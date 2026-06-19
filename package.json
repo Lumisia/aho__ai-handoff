@@ -1,11 +1,12 @@
 {
   "name": "ai-handoff",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Context-pressure-aware handoff between Claude Code and Codex",
   "type": "module",
   "license": "MIT",
   "engines": { "node": ">=18" },
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "validate:package": "node scripts/validate-package.mjs"
   }
 }

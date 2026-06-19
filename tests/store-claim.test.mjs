@@ -7,6 +7,7 @@ import {
   publishCapsule, findPendingCapsule, readState,
   claimCapsule, consumeCapsule, releaseClaim,
 } from '../core/capsule/store.mjs';
+import { buildCapsule } from '../core/capsule/create.mjs';
 
 function withRoot(fn) {
   const prev = process.env.AI_HANDOFF_ROOT;
@@ -16,11 +17,11 @@ function withRoot(fn) {
   }
 }
 
-const cap = {
-  schema_version: '1.0.0', capsule_id: 'c1', task_id: 't-x-bbbbbbbbbbbb',
-  created_at: 'z', source: { agent: 'codex' }, target: { agent: 'claude-code' },
-  checkpoint: { status: 'in_progress' }, task: { goal: 'g' }, integrity: { payload_sha256: 'sha256:x' },
-};
+const cap = buildCapsule({
+  capsuleId: 'c1', taskId: 't-x-bbbbbbbbbbbb', now: '2026-06-19T00:00:00Z',
+  source: { agent: 'codex' }, target: { agent: 'claude-code' }, trigger: { type: 'test' },
+  project: { fingerprint: 'fp' }, checkpoint: { status: 'in_progress' }, task: { goal: 'g' },
+});
 
 test('claim sets CLAIMED and blocks a second claim', () => withRoot(() => {
   publishCapsule('fp', cap, { now: 1 });
@@ -38,4 +39,24 @@ test('releaseClaim returns capsule to AVAILABLE', () => withRoot(() => {
   releaseClaim(c);
   assert.equal(readState(c.statePath).status, 'AVAILABLE');
   assert.ok(findPendingCapsule('fp'));
+}));
+
+test('expired claim lease is recovered to AVAILABLE during pending lookup', () => withRoot(() => {
+  publishCapsule('fp', cap, { now: 1 });
+  const first = claimCapsule('fp', cap.task_id, { now: 10, leaseMs: 20 });
+  assert.ok(first);
+  const recovered = findPendingCapsule('fp', { now: 31 });
+  assert.equal(recovered.state.status, 'AVAILABLE');
+  assert.ok(claimCapsule('fp', cap.task_id, { now: 32 }));
+}));
+
+test('an expired claim cannot consume a capsule reclaimed by a new owner', () => withRoot(() => {
+  publishCapsule('fp', cap, { now: 1 });
+  const stale = claimCapsule('fp', cap.task_id, { now: 10, leaseMs: 20 });
+  findPendingCapsule('fp', { now: 31 });
+  const current = claimCapsule('fp', cap.task_id, { now: 32, leaseMs: 100 });
+  assert.ok(current);
+  assert.throws(() => consumeCapsule(stale, { now: 33 }), /stale claim/);
+  assert.equal(readState(current.statePath).status, 'CLAIMED');
+  consumeCapsule(current, { now: 34 });
 }));

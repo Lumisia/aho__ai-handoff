@@ -17,3 +17,7 @@ export function configPath() { return join(dataRoot(), 'config.json'); }
 export function globalStatePath() { return join(dataRoot(), 'state.json'); }
 export function projectDir(fingerprint) { return join(dataRoot(), 'projects', fingerprint); }
 export function handoffDir(fingerprint) { return join(projectDir(fingerprint), 'handoff'); }
+export function claudeRateLimitDir() { return join(dataRoot(), 'sensors', 'claude'); }
+export function claudeStatuslineStatePath() { return join(dataRoot(), 'claude-statusline.json'); }
+export function memoryDir(fingerprint) { return join(projectDir(fingerprint), 'memory'); }
+export function memoryRecallStatePath() { return join(dataRoot(), 'memory-recall-state.json'); }

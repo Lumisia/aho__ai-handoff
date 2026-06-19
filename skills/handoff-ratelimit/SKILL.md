@@ -9,7 +9,7 @@ This skill is driven by the Stop hook. When the 5-hour usage limit reaches the
 configured `threshold_percent` (default 80), the hook creates a capsule via
 `core/cli.mjs hook:stop`.
 
-- `auto` mode: capsule is created silently.
+- `auto` mode: one Stop continuation requests a strict semantic sentinel, then publishes it.
 - `ask` mode: the agent is prompted to run `/handoff create` or `/handoff skip`.
 - `off` mode: no automatic detection.
 

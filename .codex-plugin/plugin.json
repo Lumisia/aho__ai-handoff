@@ -1,0 +1,20 @@
+{
+  "id": "ai-handoff",
+  "name": "ai-handoff",
+  "version": "1.0.0",
+  "description": "Automatic, integrity-checked handoff and verified memory recall between Claude Code and Codex.",
+  "skills": "skills",
+  "author": { "name": "ai-handoff contributors" },
+  "license": "MIT",
+  "keywords": ["handoff", "claude-code", "codex", "memory"],
+  "interface": {
+    "displayName": "AI Handoff",
+    "shortDescription": "Safe Claude Code and Codex handoff",
+    "longDescription": "Transfers verified task capsules between Claude Code and Codex and recalls only evidence-backed project memory.",
+    "developerName": "ai-handoff contributors",
+    "category": "Developer Tools",
+    "capabilities": ["Session hooks", "Rate-limit sensing", "Verified memory recall"],
+    "brandColor": "#2563EB",
+    "defaultPrompt": "Use /handoff status to inspect cross-agent handoff state."
+  }
+}

@@ -20,3 +20,11 @@ test('redactJson preserves structure and counts redactions', () => {
   assert.match(value.note, /\[REDACTED\]/);
   assert.equal(count, 1);
 });
+
+test('redacts bearer, JWT, cookie, and credential assignments', () => {
+  const input = 'Authorization: Bearer abcdefghijklmnopqrstuvwxyz cookie=sessionid123456 password=supersecret123 abcdefgh.verylongpayload.signaturevalue';
+  const r = redactText(input);
+  assert.equal(r.count, 4);
+  assert.equal(r.text.includes('supersecret123'), false);
+  assert.equal(r.text.includes('sessionid123456'), false);
+});

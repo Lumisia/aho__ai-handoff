@@ -13,6 +13,7 @@ test('builds a valid rich capsule from a model sentinel', () => {
   assert.equal(capsule.task.goal, 'fix oauth redirect');
   assert.deepEqual(capsule.task.next_actions, ['run e2e']);
   assert.equal(capsule.trigger.type, 'manual_checkpoint');
+  assert.equal(capsule.expires_at, '1970-01-02T00:00:01.000Z');
   assert.deepEqual(validateCapsule(capsule), { valid: true, errors: [] });
   assert.equal('sha256:' + capsulePayloadHash(capsule), capsule.integrity.payload_sha256);
 });

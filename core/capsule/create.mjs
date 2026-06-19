@@ -27,10 +27,18 @@ export function buildCapsule(input) {
     task: input.task,
     security: input.security,
   };
+  if (input.expiresAt) capsule.expires_at = input.expiresAt;
   capsule.integrity = { payload_sha256: 'sha256:' + capsulePayloadHash(capsule) };
   return capsule;
 }
 
 export function validateCapsule(capsule) {
-  return validate(capsule, SCHEMA);
+  const checked = validate(capsule, SCHEMA);
+  const errors = [...checked.errors];
+  const allowedAgents = new Set(['codex', 'claude-code']);
+  if (!String(capsule?.task?.goal || '').trim()) errors.push('$.task.goal: must be non-empty');
+  if (!allowedAgents.has(capsule?.source?.agent)) errors.push('$.source.agent: unsupported agent');
+  if (!allowedAgents.has(capsule?.target?.agent)) errors.push('$.target.agent: unsupported agent');
+  if (capsule?.source?.agent === capsule?.target?.agent) errors.push('$: source and target agents must differ');
+  return { valid: errors.length === 0, errors };
 }

@@ -17,19 +17,35 @@ export function writeFileAtomic(path, data) {
   renameSync(tmp, path);
 }
 
-// 단일 사용자·로컬용 best-effort lease lock.
+// Single-owner lease lock backed by atomic exclusive file creation.
 export function acquireLock(lockPath, { leaseMs = 30000, now = Date.now() } = {}) {
-  if (existsSync(lockPath)) {
-    let expiresAt = 0;
-    try { expiresAt = JSON.parse(readFileSync(lockPath, 'utf8')).expiresAt || 0; } catch {}
-    if (expiresAt > now) return null;
-  }
   const token = `${process.pid}-${Math.random().toString(36).slice(2)}`;
-  writeFileAtomic(lockPath, JSON.stringify({ token, expiresAt: now + leaseMs }));
-  try {
-    if (JSON.parse(readFileSync(lockPath, 'utf8')).token === token) return { token, lockPath };
-  } catch {}
+  const content = JSON.stringify({ token, expiresAt: now + leaseMs });
+  mkdirSync(dirname(lockPath), { recursive: true });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let fd;
+    try {
+      fd = openSync(lockPath, 'wx');
+      writeSync(fd, content);
+      fsyncSync(fd);
+      closeSync(fd);
+      return { token, lockPath };
+    } catch (error) {
+      if (fd !== undefined) { try { closeSync(fd); } catch {} }
+      if (error?.code !== 'EEXIST') throw error;
+      let expiresAt = 0;
+      try { expiresAt = JSON.parse(readFileSync(lockPath, 'utf8')).expiresAt || 0; } catch {}
+      if (expiresAt > now) return null;
+      try { unlinkSync(lockPath); } catch { return null; }
+    }
+  }
   return null;
+}
+
+export function ownsLock(lock) {
+  if (!lock) return false;
+  try { return JSON.parse(readFileSync(lock.lockPath, 'utf8')).token === lock.token; }
+  catch { return false; }
 }
 
 export function releaseLock(lock) {

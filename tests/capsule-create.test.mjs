@@ -35,3 +35,10 @@ test('a capsule missing goal fails validation', () => {
   delete c.task.goal;
   assert.equal(validateCapsule(c).valid, false);
 });
+
+test('empty goals and same-agent handoffs fail semantic validation', () => {
+  const emptyGoal = buildCapsule({ ...input, task: { goal: '   ' } });
+  assert.equal(validateCapsule(emptyGoal).valid, false);
+  const sameAgent = buildCapsule({ ...input, target: { agent: 'codex' } });
+  assert.equal(validateCapsule(sameAgent).valid, false);
+});

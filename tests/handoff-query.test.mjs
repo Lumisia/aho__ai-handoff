@@ -1,11 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { statusFor, previewFor } from '../core/hooks/handoff.mjs';
+import { statusFor, previewFor, recoverFor } from '../core/hooks/handoff.mjs';
 import { projectFingerprint } from '../core/lib/fingerprint.mjs';
 import { publishCapsule, findPendingCapsule } from '../core/capsule/store.mjs';
+import { buildCapsule } from '../core/capsule/create.mjs';
 
 function withRoot(fn) {
   const prev = process.env.AI_HANDOFF_ROOT;
@@ -16,12 +17,12 @@ function withRoot(fn) {
 }
 
 function cap(fp) {
-  return {
-    schema_version: '1.0.0', capsule_id: 'c1', task_id: 't-x-dddddddddddd',
-    created_at: 'z', source: { agent: 'codex' }, target: { agent: 'claude-code' },
-    checkpoint: { status: 'in_progress' }, task: { goal: 'do X', next_actions: ['a'] },
-    integrity: { payload_sha256: 'sha256:x' },
-  };
+  return buildCapsule({
+    capsuleId: 'c1', taskId: 't-x-dddddddddddd', now: '2026-06-19T00:00:00Z',
+    source: { agent: 'codex' }, target: { agent: 'claude-code' }, trigger: { type: 'test' },
+    project: { fingerprint: fp }, checkpoint: { status: 'in_progress' },
+    task: { goal: 'do X', next_actions: ['a'] },
+  });
 }
 
 test('statusFor and previewFor report pending without consuming', () => withRoot(() => {
@@ -40,4 +41,27 @@ test('no pending → not pending', () => withRoot(() => {
   const cwd = mkdtempSync(join(tmpdir(), 'ah-proj-'));
   assert.equal(statusFor(cwd).pending, false);
   assert.equal(previewFor(cwd).pending, false);
+}));
+
+test('recover diagnoses pending capsule integrity without consuming it', () => withRoot(() => {
+  const cwd = mkdtempSync(join(tmpdir(), 'ah-proj-'));
+  const fp = projectFingerprint(cwd);
+  publishCapsule(fp, cap(fp), { now: 1 });
+  const result = recoverFor(cwd, { now: 2 });
+  assert.equal(result.healthy, true);
+  assert.equal(result.pending.status, 'AVAILABLE');
+  assert.deepEqual(result.issues, []);
+  assert.ok(findPendingCapsule(fp));
+}));
+
+test('preview never exposes an unverified tampered capsule', () => withRoot(() => {
+  const cwd = mkdtempSync(join(tmpdir(), 'ah-proj-'));
+  const fp = projectFingerprint(cwd);
+  const published = publishCapsule(fp, cap(fp), { now: 1 });
+  const tampered = readFileSync(published.capsulePath, 'utf8').replace('do X', 'malicious instructions');
+  writeFileSync(published.capsulePath, tampered);
+  const preview = previewFor(cwd);
+  assert.equal(preview.valid, false);
+  assert.equal('goal' in preview, false);
+  assert.ok(preview.errors.includes('payload-integrity-mismatch'));
 }));

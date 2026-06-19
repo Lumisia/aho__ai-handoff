@@ -6,6 +6,7 @@
     "capsule_id": { "type": "string" },
     "task_id": { "type": "string" },
     "created_at": { "type": "string" },
+    "expires_at": { "type": "string" },
     "source": { "type": "object", "required": ["agent"], "properties": { "agent": { "type": "string" } } },
     "target": { "type": "object", "required": ["agent"], "properties": { "agent": { "type": "string" } } },
     "checkpoint": {

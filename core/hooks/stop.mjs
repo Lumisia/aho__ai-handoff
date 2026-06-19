@@ -1,19 +1,74 @@
 import { projectFingerprint } from '../lib/fingerprint.mjs';
-import { gitContext } from '../lib/gitctx.mjs';
 import { evaluateTrigger } from './trigger.mjs';
 import { resolveProject } from '../lib/config.mjs';
-import { instanceKey, deriveTaskId } from '../lib/taskid.mjs';
-import { buildCapsule } from '../capsule/create.mjs';
 import { publishCapsule, readState, writeState } from '../capsule/store.mjs';
 import { dedupeKey, hasSeen, markSeen } from '../lib/dedupe.mjs';
 import { globalStatePath } from '../lib/paths.mjs';
+import { saveApproval } from '../capsule/approval.mjs';
+import { notify } from '../lib/notify.mjs';
+import {
+  generationSlotKey, saveGeneration, findGeneration, finishGeneration,
+} from '../capsule/generation.mjs';
+import { buildCheckpointCapsule } from '../capsule/checkpoint.mjs';
 
-export async function handleStop({ input, config, readSensor, agent, now = Date.now() }) {
+function extractSentinel(text) {
+  const match = String(text || '').match(/<handoff-capsule>\s*([\s\S]*?)\s*<\/handoff-capsule>/i);
+  if (!match) return null;
+  try {
+    const value = JSON.parse(match[1]);
+    return value && typeof value.goal === 'string' && value.goal.trim() ? value : null;
+  } catch { return null; }
+}
+
+function summaryInstruction() {
+  return [
+    'Create the handoff capsule now. Reply with exactly one semantic summary wrapped in',
+    '<handoff-capsule>{"goal":"...","next_actions":["..."],"completed":[],"open_issues":[],"status":"in_progress"}</handoff-capsule>.',
+    'Do not include secrets, hidden reasoning, or transcript text.',
+  ].join(' ');
+}
+
+export async function handleStop({ input, config, readSensor, agent, now = Date.now(), notifyFn = notify }) {
   const cwd = input.cwd || process.cwd();
   const fp = projectFingerprint(cwd);
   const tcfg = resolveProject(config, fp).triggers.five_hour;
-  const reading = await readSensor();
+  const slotKey = generationSlotKey({ agent, sessionId: input.session_id, projectFingerprint: fp });
 
+  if (input.stop_hook_active) {
+    const generation = findGeneration(slotKey);
+    if (!generation) return { action: 'none', reason: 'no-generation', fingerprint: fp };
+    const context = generation.context;
+    const semantic = extractSentinel(input.last_assistant_message);
+    const degraded = !semantic;
+    const sentinel = semantic || {
+      goal: `auto checkpoint at ${context.reading.usedPercent}%`,
+      next_actions: [], completed: [], open_issues: [], status: 'in_progress',
+    };
+    const { capsule } = buildCheckpointCapsule({
+      sentinel,
+      cwd: context.cwd,
+      agent: context.agent,
+      sessionId: context.sessionId,
+      checkpointKey: context.dedupeKey,
+      now,
+      trigger: {
+        type: 'rate_limit',
+        threshold_percent: context.threshold,
+        observed_percent: context.reading.usedPercent,
+        measurement_source: context.reading.source,
+      },
+    });
+    publishCapsule(fp, capsule, { status: degraded ? 'DEGRADED_AVAILABLE' : 'AVAILABLE', now });
+    const gpath = globalStatePath();
+    writeState(gpath, markSeen(readState(gpath), context.dedupeKey, now));
+    finishGeneration(slotKey, { now });
+    notifyFn('AI handoff', `Capsule ready for ${capsule.target.agent}`);
+    return { action: 'create', reason: 'threshold', taskId: capsule.task_id, fingerprint: fp, degraded };
+  }
+
+  if (tcfg.enabled === false) return { action: 'none', reason: 'disabled', fingerprint: fp };
+
+  const reading = await readSensor();
   const gpath = globalStatePath();
   const gstate = readState(gpath);
   const dkey = dedupeKey({
@@ -24,37 +79,33 @@ export async function handleStop({ input, config, readSensor, agent, now = Date.
     projectFingerprint: fp,
     threshold: tcfg.threshold_percent,
   });
-  const deduped = hasSeen(gstate, dkey);
-
   const ev = evaluateTrigger({
     usedPercent: reading && reading.usedPercent,
     threshold: tcfg.threshold_percent,
     mode: tcfg.mode,
-    deduped,
+    deduped: hasSeen(gstate, dkey),
   });
   if (ev.action === 'none') return { action: 'none', reason: ev.reason, fingerprint: fp };
 
-  // ask/create 모두 같은 window 재트리거 방지 위해 seen 기록
-  writeState(gpath, markSeen(gstate, dkey, now));
-  if (ev.action === 'ask') return { action: 'ask', reason: ev.reason, fingerprint: fp };
+  if (ev.action === 'ask') {
+    writeState(gpath, markSeen(gstate, dkey, now));
+    saveApproval({
+      fingerprint: fp,
+      key: dkey,
+      now,
+      context: { agent, sessionId: input.session_id, cwd, reading, threshold: tcfg.threshold_percent },
+    });
+    notifyFn('AI handoff', 'Capsule을 생성할까요? /handoff create | /handoff skip');
+    return { action: 'ask', reason: ev.reason, fingerprint: fp, approvalKey: dkey };
+  }
 
-  const git = gitContext(cwd);
-  const goal = `auto checkpoint at ${reading.usedPercent}% (${git.branch || 'no-branch'})`;
-  const taskId = deriveTaskId({
-    projectFingerprint: fp,
-    instanceKey: instanceKey({ agent, sessionId: input.session_id }),
-    goalSlug: goal,
+  saveGeneration({
+    slotKey,
+    now,
+    context: {
+      agent, sessionId: input.session_id, cwd, reading,
+      threshold: tcfg.threshold_percent, dedupeKey: dkey,
+    },
   });
-  const capsule = buildCapsule({
-    taskId,
-    now: new Date(now).toISOString(),
-    source: { agent, session_id: input.session_id },
-    target: { agent: agent === 'codex' ? 'claude-code' : 'codex' },
-    trigger: { type: 'rate_limit', threshold_percent: tcfg.threshold_percent, observed_percent: reading.usedPercent, measurement_source: reading.source },
-    project: { fingerprint: fp, git_branch: git.branch, git_head: git.head, working_tree_dirty: git.dirty },
-    checkpoint: { status: 'in_progress' },
-    task: { goal, next_actions: [] },
-  });
-  publishCapsule(fp, capsule, { status: 'AVAILABLE', now });
-  return { action: 'create', reason: ev.reason, taskId, fingerprint: fp };
+  return { action: 'request-summary', reason: ev.reason, fingerprint: fp, prompt: summaryInstruction() };
 }
