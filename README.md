@@ -105,16 +105,18 @@ codex plugin add ai-handoff@claude-codex-auto-handoff
 
 ### One extra step for Claude Code's sensor (both methods)
 
-Claude reads usage from its **status line**, and a plugin cannot claim that slot by itself — so run this once. It safely keeps any status line you already had:
+Claude reads usage from its **status line**, and a plugin cannot claim that slot by itself — so run this once. It safely keeps any status line you already had.
+
+> ⚠️ **Replace `PATH/TO/claude-codex-auto-handoff` with the real, absolute path** — do not paste it literally (that is what causes `Cannot find module ...\PATH\TO\...`). Example on Windows: `C:\Users\you\claude-codex-auto-handoff`. The simplest stable path is a local clone of the repo (Method B), even if you installed the plugin from the marketplace — a clone path will not change when the plugin updates.
 
 ```bash
-node PATH/TO/claude-codex-auto-handoff/core/cli.mjs setup:claude-statusline --plugin-root PATH/TO/claude-codex-auto-handoff
+node "PATH/TO/claude-codex-auto-handoff/core/cli.mjs" setup:claude-statusline --plugin-root "PATH/TO/claude-codex-auto-handoff"
 ```
 
 To undo it later:
 
 ```bash
-node PATH/TO/claude-codex-auto-handoff/core/cli.mjs setup:claude-statusline --restore
+node "PATH/TO/claude-codex-auto-handoff/core/cli.mjs" setup:claude-statusline --restore
 ```
 
 (Codex reads usage from its official App Server, so it needs **no** extra sensor setup.)

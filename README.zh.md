@@ -105,16 +105,18 @@ codex plugin add ai-handoff@claude-codex-auto-handoff
 
 ### Claude Code 传感器的一次额外步骤（两种方式通用）
 
-Claude 从它的 **状态栏（status line）** 读取用量，而插件无法独占那个位置，所以需要运行一次这条命令。如果你原本就有状态栏，它会被安全保留：
+Claude 从它的 **状态栏（status line）** 读取用量，而插件无法独占那个位置，所以需要运行一次这条命令。如果你原本就有状态栏，它会被安全保留。
+
+> ⚠️ **请把 `PATH/TO/claude-codex-auto-handoff` 替换为真实的绝对路径** —— 不要原样粘贴（那会导致 `Cannot find module ...\PATH\TO\...` 错误）。Windows 示例：`C:\Users\you\claude-codex-auto-handoff`。最稳定的路径是仓库的本地克隆（方式 B）—— 即使你是从市场安装的，克隆路径也不会随插件更新而改变。
 
 ```bash
-node PATH/TO/claude-codex-auto-handoff/core/cli.mjs setup:claude-statusline --plugin-root PATH/TO/claude-codex-auto-handoff
+node "PATH/TO/claude-codex-auto-handoff/core/cli.mjs" setup:claude-statusline --plugin-root "PATH/TO/claude-codex-auto-handoff"
 ```
 
 日后撤销：
 
 ```bash
-node PATH/TO/claude-codex-auto-handoff/core/cli.mjs setup:claude-statusline --restore
+node "PATH/TO/claude-codex-auto-handoff/core/cli.mjs" setup:claude-statusline --restore
 ```
 
 （Codex 从官方 App Server 读取用量，因此 **无需** 额外的传感器设置。）

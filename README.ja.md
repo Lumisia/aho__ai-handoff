@@ -105,16 +105,18 @@ codex plugin add ai-handoff@claude-codex-auto-handoff
 
 ### Claude Code のセンサー用の追加1ステップ（両方法共通）
 
-Claude は使用量を **ステータスライン** から読み取りますが、プラグインがその枠を単独で占有できないため、このコマンドを一度実行します。既存のステータスラインがあれば安全に保持します:
+Claude は使用量を **ステータスライン** から読み取りますが、プラグインがその枠を単独で占有できないため、このコマンドを一度実行します。既存のステータスラインがあれば安全に保持します。
+
+> ⚠️ **`PATH/TO/claude-codex-auto-handoff` を実際の絶対パスに置き換えてください** — そのまま貼り付けないでください（`Cannot find module ...\PATH\TO\...` エラーの原因になります）。Windows の例: `C:\Users\you\claude-codex-auto-handoff`。最も安定したパスはリポジトリのローカルクローン（方法 B）です——マーケットプレイスから導入した場合でも、クローンのパスはプラグイン更新で変わりません。
 
 ```bash
-node PATH/TO/claude-codex-auto-handoff/core/cli.mjs setup:claude-statusline --plugin-root PATH/TO/claude-codex-auto-handoff
+node "PATH/TO/claude-codex-auto-handoff/core/cli.mjs" setup:claude-statusline --plugin-root "PATH/TO/claude-codex-auto-handoff"
 ```
 
 あとで元に戻すには:
 
 ```bash
-node PATH/TO/claude-codex-auto-handoff/core/cli.mjs setup:claude-statusline --restore
+node "PATH/TO/claude-codex-auto-handoff/core/cli.mjs" setup:claude-statusline --restore
 ```
 
 （Codex は使用量を公式の App Server から読み取るため、**追加のセンサー設定は不要** です。）

@@ -105,16 +105,18 @@ codex plugin add ai-handoff@claude-codex-auto-handoff
 
 ### Claude Code 센서를 위한 추가 1단계 (두 방법 공통)
 
-Claude는 사용량을 **상태줄(status line)** 에서 읽는데, 플러그인이 그 자리를 혼자 차지할 수 없어서 이 명령을 한 번 실행합니다. 기존에 쓰던 상태줄이 있으면 안전하게 보존합니다:
+Claude는 사용량을 **상태줄(status line)** 에서 읽는데, 플러그인이 그 자리를 혼자 차지할 수 없어서 이 명령을 한 번 실행합니다. 기존에 쓰던 상태줄이 있으면 안전하게 보존합니다.
+
+> ⚠️ **`PATH/TO/claude-codex-auto-handoff` 를 실제 절대경로로 바꾸세요** — 그대로 붙여넣지 마세요(그러면 `Cannot find module ...\PATH\TO\...` 에러가 납니다). Windows 예: `C:\Users\you\claude-codex-auto-handoff`. 가장 안정적인 경로는 저장소를 로컬 클론한 폴더(방법 B)입니다 — 마켓플레이스로 설치했더라도, 클론 경로는 플러그인이 업데이트돼도 바뀌지 않습니다.
 
 ```bash
-node PATH/TO/claude-codex-auto-handoff/core/cli.mjs setup:claude-statusline --plugin-root PATH/TO/claude-codex-auto-handoff
+node "PATH/TO/claude-codex-auto-handoff/core/cli.mjs" setup:claude-statusline --plugin-root "PATH/TO/claude-codex-auto-handoff"
 ```
 
 나중에 되돌리려면:
 
 ```bash
-node PATH/TO/claude-codex-auto-handoff/core/cli.mjs setup:claude-statusline --restore
+node "PATH/TO/claude-codex-auto-handoff/core/cli.mjs" setup:claude-statusline --restore
 ```
 
 (Codex는 사용량을 공식 App Server에서 읽으므로 **추가 센서 설정이 필요 없습니다**.)

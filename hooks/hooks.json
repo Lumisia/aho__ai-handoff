@@ -1,5 +1,4 @@
 {
-  "description": "Automatic bidirectional handoff and verified memory recall",
   "hooks": {
     "SessionStart": [
       {
