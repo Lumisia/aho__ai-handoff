@@ -25,6 +25,7 @@ export function buildCapsule(input) {
     project: input.project,
     checkpoint: input.checkpoint,
     task: input.task,
+    security: input.security,
   };
   capsule.integrity = { payload_sha256: 'sha256:' + capsulePayloadHash(capsule) };
   return capsule;
