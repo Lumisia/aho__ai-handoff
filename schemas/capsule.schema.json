@@ -1,0 +1,19 @@
+{
+  "type": "object",
+  "required": ["schema_version", "capsule_id", "task_id", "created_at", "source", "target", "checkpoint", "task", "integrity"],
+  "properties": {
+    "schema_version": { "type": "string" },
+    "capsule_id": { "type": "string" },
+    "task_id": { "type": "string" },
+    "created_at": { "type": "string" },
+    "source": { "type": "object", "required": ["agent"], "properties": { "agent": { "type": "string" } } },
+    "target": { "type": "object", "required": ["agent"], "properties": { "agent": { "type": "string" } } },
+    "checkpoint": {
+      "type": "object",
+      "required": ["status"],
+      "properties": { "status": { "type": "string", "enum": ["in_progress", "blocked", "completed"] } }
+    },
+    "task": { "type": "object", "required": ["goal"], "properties": { "goal": { "type": "string" } } },
+    "integrity": { "type": "object", "required": ["payload_sha256"], "properties": { "payload_sha256": { "type": "string" } } }
+  }
+}
