@@ -1,8 +1,9 @@
 import { join } from 'node:path';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { handoffDir } from '../lib/paths.mjs';
-import { writeFileAtomic } from '../lib/fsx.mjs';
+import { writeFileAtomic, acquireLock, releaseLock } from '../lib/fsx.mjs';
 import { sha256Hex } from '../lib/hash.mjs';
+import { transition } from './lifecycle.mjs';
 
 function taskDir(fingerprint, taskId) { return join(handoffDir(fingerprint), taskId); }
 
@@ -45,4 +46,38 @@ export function findPendingCapsule(fingerprint) {
   let capsule = null;
   try { capsule = JSON.parse(readFileSync(join(hd, best.taskId, 'capsule.json'), 'utf8')); } catch {}
   return { ...best, capsule };
+}
+
+export function claimCapsule(fingerprint, taskId, { leaseMs = 30000, now = Date.now() } = {}) {
+  const dir = taskDir(fingerprint, taskId);
+  const statePath = join(dir, 'state.json');
+  const lock = acquireLock(join(dir, '.claim.lock'), { leaseMs, now });
+  if (!lock) return null;
+  try {
+    const st = readState(statePath);
+    const next = transition(st.status, 'CLAIMED');
+    writeState(statePath, { ...st, status: next, claimed_at: now });
+    return { lock, statePath };
+  } catch {
+    releaseLock(lock);
+    return null;
+  }
+}
+
+export function consumeCapsule(claim, { now = Date.now() } = {}) {
+  const st = readState(claim.statePath);
+  writeState(claim.statePath, { ...st, status: transition(st.status, 'CONSUMED'), consumed_at: now });
+  releaseLock(claim.lock);
+}
+
+export function releaseClaim(claim) {
+  const st = readState(claim.statePath);
+  writeState(claim.statePath, { ...st, status: transition(st.status, 'AVAILABLE') });
+  releaseLock(claim.lock);
+}
+
+export function rejectCapsule(claim, { now = Date.now() } = {}) {
+  const st = readState(claim.statePath);
+  writeState(claim.statePath, { ...st, status: transition(st.status, 'REJECTED'), rejected_at: now });
+  releaseLock(claim.lock);
 }
