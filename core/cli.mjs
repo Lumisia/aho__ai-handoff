@@ -7,6 +7,9 @@ import { handleStop } from './hooks/stop.mjs';
 import { handleSessionStart } from './hooks/session-start.mjs';
 import { loadConfig } from './lib/config.mjs';
 import { configPath } from './lib/paths.mjs';
+import { statusFor, previewFor } from './hooks/handoff.mjs';
+import { buildCheckpointCapsule } from './capsule/checkpoint.mjs';
+import { publishCapsule } from './capsule/store.mjs';
 
 async function sensorRatelimit(args) {
   const shadow = args.includes('--shadow');
@@ -67,11 +70,45 @@ async function hookSessionStart() {
   if (r.injected) process.stdout.write(r.context + '\n');
 }
 
+async function handoffStatus() {
+  const input = JSON.parse((await readStdin()) || '{}');
+  process.stdout.write(JSON.stringify(statusFor(input.cwd || process.cwd())) + '\n');
+}
+
+async function handoffPreview() {
+  const input = JSON.parse((await readStdin()) || '{}');
+  process.stdout.write(JSON.stringify(previewFor(input.cwd || process.cwd())) + '\n');
+}
+
+async function handoffResume() {
+  const input = JSON.parse((await readStdin()) || '{}');
+  const r = handleSessionStart({ input });
+  if (r.injected) process.stdout.write(r.context + '\n');
+  else process.stderr.write(`[handoff] resume: ${r.reason}\n`);
+}
+
+async function handoffCheckpoint(args) {
+  const agent = argValue(args, '--agent', 'codex');
+  const input = JSON.parse((await readStdin()) || '{}');
+  const { capsule, fingerprint } = buildCheckpointCapsule({
+    sentinel: input.sentinel || {},
+    cwd: input.cwd || process.cwd(),
+    agent,
+    sessionId: input.session_id,
+  });
+  publishCapsule(fingerprint, capsule, { status: 'AVAILABLE' });
+  process.stdout.write(JSON.stringify({ taskId: capsule.task_id, fingerprint }) + '\n');
+}
+
 const [cmd, ...rest] = process.argv.slice(2);
 const commands = {
   'sensor:ratelimit': sensorRatelimit,
   'hook:stop': hookStop,
   'hook:session-start': hookSessionStart,
+  'handoff:status': handoffStatus,
+  'handoff:preview': handoffPreview,
+  'handoff:resume': handoffResume,
+  'handoff:checkpoint': handoffCheckpoint,
 };
 
 const run = commands[cmd];
