@@ -2,3 +2,6 @@ node_modules/
 *.log
 .DS_Store
 /tmp/
+
+# subagent-driven-development scratch (briefs, reports, diffs, ledger)
+.superpowers/
