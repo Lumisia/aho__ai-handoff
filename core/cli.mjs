@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { codexHome, newestSessionFile } from './lib/sessions.mjs';
 import { readJsonlRateLimit } from './sensors/codex-jsonl.mjs';
 import { readAppServerRateLimit } from './sensors/codex-appserver.mjs';
@@ -57,7 +57,7 @@ function readStdin() {
     let value = '';
     process.stdin.setEncoding('utf8');
     process.stdin.on('data', (chunk) => { value += chunk; });
-    process.stdin.on('end', () => resolve(value));
+    process.stdin.on('end', () => resolve(value.replace(/^﻿/, '')));
     if (process.stdin.isTTY) resolve('');
   });
 }
@@ -65,6 +65,30 @@ function readStdin() {
 function argValue(args, name, fallback) {
   const index = args.indexOf(name);
   return index >= 0 && index + 1 < args.length ? args[index + 1] : fallback;
+}
+
+// Reads the command's JSON payload in a shell-agnostic way. Source order:
+//   --input <file>  (preferred for rich JSON: the caller writes a UTF-8 file
+//                    with its native API, so no shell quoting is involved)
+//   else stdin.
+// A leading UTF-8 BOM (PowerShell pipes add one) is stripped before parsing,
+// and --cwd <path> overrides input.cwd so callers never have to embed a
+// backslash Windows path inside JSON (argv keeps backslashes literal).
+async function readInput(args = []) {
+  const file = argValue(args, '--input', null);
+  const raw = (file ? readFileSync(file, 'utf8') : await readStdin()).replace(/^﻿/, '');
+  let input = {};
+  if (raw.trim()) {
+    try {
+      input = JSON.parse(raw);
+    } catch (error) {
+      throw new Error(`invalid input JSON from ${file ? `--input ${file}` : 'stdin'}: ${error.message}`);
+    }
+  }
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) input = {};
+  const cwd = argValue(args, '--cwd', null);
+  if (cwd) input.cwd = cwd;
+  return input;
 }
 
 function codexSensorReader() {
@@ -99,7 +123,7 @@ async function hookStop(args) {
   const config = loadConfig({ path: configPath() });
   const modeOverride = argValue(args, '--mode', null);
   if (modeOverride) config.triggers.five_hour.mode = modeOverride;
-  const input = JSON.parse((await readStdin()) || '{}');
+  const input = await readInput(args);
   const result = await handleStop({ input, config, readSensor: sensorReader(agent, input, config), agent });
   process.stderr.write(`[handoff] stop: ${result.action} (${result.reason})\n`);
   if (result.action === 'request-summary') {
@@ -129,30 +153,30 @@ async function deliverSession(input, agent) {
 
 async function hookSessionStart(args) {
   const agent = argValue(args, '--agent', 'codex');
-  const input = JSON.parse((await readStdin()) || '{}');
+  const input = await readInput(args);
   await deliverSession(input, agent);
 }
 
-async function handoffStatus() {
-  const input = JSON.parse((await readStdin()) || '{}');
+async function handoffStatus(args) {
+  const input = await readInput(args);
   await writeStdout(JSON.stringify(statusFor(input.cwd || process.cwd())) + '\n');
 }
 
-async function handoffPreview() {
-  const input = JSON.parse((await readStdin()) || '{}');
+async function handoffPreview(args) {
+  const input = await readInput(args);
   await writeStdout(JSON.stringify(previewFor(input.cwd || process.cwd())) + '\n');
 }
 
 async function handoffResume(args) {
   const agent = argValue(args, '--agent', 'codex');
-  const input = JSON.parse((await readStdin()) || '{}');
+  const input = await readInput(args);
   const result = await deliverSession(input, agent);
   if (!result.injected) process.stderr.write(`[handoff] resume: ${result.reason}\n`);
 }
 
 async function handoffCheckpoint(args) {
   const agent = argValue(args, '--agent', 'codex');
-  const input = JSON.parse((await readStdin()) || '{}');
+  const input = await readInput(args);
   const { capsule, fingerprint } = buildCheckpointCapsule({
     sentinel: input.sentinel || {}, cwd: input.cwd || process.cwd(), agent,
     sessionId: input.session_id, checkpointKey: input.checkpoint_key || randomUUID(),
@@ -161,25 +185,25 @@ async function handoffCheckpoint(args) {
   await writeStdout(JSON.stringify({ taskId: capsule.task_id, fingerprint }) + '\n');
 }
 
-async function handoffCreate() {
-  const input = JSON.parse((await readStdin()) || '{}');
+async function handoffCreate(args) {
+  const input = await readInput(args);
   await writeStdout(JSON.stringify(createFromApproval({
     cwd: input.cwd || process.cwd(), sentinel: input.sentinel || {},
   })) + '\n');
 }
 
-async function handoffSkip() {
-  const input = JSON.parse((await readStdin()) || '{}');
+async function handoffSkip(args) {
+  const input = await readInput(args);
   await writeStdout(JSON.stringify(skipApproval({ cwd: input.cwd || process.cwd() })) + '\n');
 }
 
-async function handoffRecover() {
-  const input = JSON.parse((await readStdin()) || '{}');
+async function handoffRecover(args) {
+  const input = await readInput(args);
   await writeStdout(JSON.stringify(recoverFor(input.cwd || process.cwd()), null, 2) + '\n');
 }
 
 async function hookUserPrompt(args) {
-  const input = JSON.parse((await readStdin()) || '{}');
+  const input = await readInput(args);
   const config = loadConfig({ path: configPath() });
   if (config.memory?.auto_recall === false) return;
   const result = prepareUserPrompt({
@@ -191,8 +215,8 @@ async function hookUserPrompt(args) {
   finalizeUserPrompt(result.delivery);
 }
 
-async function memoryRemember() {
-  const input = JSON.parse((await readStdin()) || '{}');
+async function memoryRemember(args) {
+  const input = await readInput(args);
   const cwd = input.cwd || process.cwd();
   const fingerprint = projectFingerprint(cwd);
   const shard = buildMemoryShard({
@@ -203,8 +227,8 @@ async function memoryRemember() {
   await writeStdout(JSON.stringify({ stored: true, shardId: shard.shard_id, fingerprint }) + '\n');
 }
 
-async function memoryRecall() {
-  const input = JSON.parse((await readStdin()) || '{}');
+async function memoryRecall(args) {
+  const input = await readInput(args);
   const cwd = input.cwd || process.cwd();
   const fingerprint = projectFingerprint(cwd);
   const ranked = rankMemoryShards(readVerifiedShards(fingerprint), {
@@ -231,20 +255,20 @@ async function configShow() {
   }, null, 2) + '\n');
 }
 
-async function configGet() {
-  const input = JSON.parse((await readStdin()) || '{}');
+async function configGet(args) {
+  const input = await readInput(args);
   const config = loadConfig({ path: configPath() });
   await writeStdout(JSON.stringify({ key: input.key, value: getAt(config, input.key) }) + '\n');
 }
 
-async function configSet() {
-  const input = JSON.parse((await readStdin()) || '{}');
+async function configSet(args) {
+  const input = await readInput(args);
   const result = setConfigValue(configPath(), input.key, input.value);
   await writeStdout(JSON.stringify({ ok: true, ...result, path: configPath() }) + '\n');
 }
 
-async function configUnset() {
-  const input = JSON.parse((await readStdin()) || '{}');
+async function configUnset(args) {
+  const input = await readInput(args);
   const result = unsetConfigValue(configPath(), input.key);
   await writeStdout(JSON.stringify({ ok: true, ...result, path: configPath() }) + '\n');
 }

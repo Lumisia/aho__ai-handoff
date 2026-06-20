@@ -18,14 +18,27 @@ Backs the `/handoff` command for both Claude Code and Codex.
 - `/handoff recall` -> retrieve relevant verified memory without consuming it.
 - `/handoff config` -> show or change settings (threshold, mode, notification, memory).
 
-Run the underlying CLI with the current working directory piped as JSON, e.g.:
+Run the underlying CLI. Pass the project directory with the `--cwd` flag rather
+than embedding it in JSON — argv keeps backslashes literal, so Windows paths
+need no escaping. If you omit `--cwd`, the CLI uses the process working
+directory. `status`, `preview`, `skip`, `create`, and `recover` then need
+nothing on stdin:
 
-    echo '{"cwd":"<cwd>"}' | node <pluginRoot>/core/cli.mjs handoff:status
+    node <pluginRoot>/core/cli.mjs handoff:status --cwd "<project dir>"
 
-For `checkpoint`, emit a sentinel JSON with your semantic summary:
+For payloads with rich JSON (`checkpoint`, `memory:remember`), do NOT pipe the
+JSON through the shell on Windows: PowerShell prepends a UTF-8 BOM and mangles
+backslashes. Write the JSON to a UTF-8 file with your native file API and pass
+its path with `--input`:
 
-    echo '{"cwd":"<cwd>","session_id":"<id>","sentinel":{"goal":"...","next_actions":["..."]}}' \
-      | node <pluginRoot>/core/cli.mjs handoff:checkpoint --agent <agent>
+    node <pluginRoot>/core/cli.mjs handoff:checkpoint --agent <agent> --input <file.json>
+
+where `<file.json>` holds
+`{"cwd":"<cwd>","session_id":"<id>","sentinel":{"goal":"...","next_actions":["..."]}}`.
+Piping JSON on stdin still works (a leading BOM is stripped automatically) and
+is fine on macOS/Linux:
+
+    echo '{"cwd":"<cwd>","sentinel":{...}}' | node <pluginRoot>/core/cli.mjs handoff:checkpoint --agent <agent>
 
 `<agent>` must be your own runtime identity: `claude-code` on Claude Code or
 `codex` on Codex. These are the only accepted values; any other string (e.g.
