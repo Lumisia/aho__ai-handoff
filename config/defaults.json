@@ -1,6 +1,6 @@
 {
   "triggers": {
-    "five_hour": { "enabled": true, "threshold_percent": 80, "mode": "ask" }
+    "five_hour": { "enabled": true, "threshold_percent": 80, "mode": "ask", "burn_rate": { "enabled": false, "runway_minutes": 30 } }
   },
   "capsule": { "completed_autocreate": false, "semantic_retry_limit": 0 },
   "notification": { "method": "os", "fallback": "terminal" },
