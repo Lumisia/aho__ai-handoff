@@ -13,6 +13,7 @@ export const CONFIG_KEYS = {
   'notification.fallback': { type: 'enum', values: ['terminal', 'off'] },
   'memory.auto_recall': { type: 'boolean' },
   'memory.auto_recall_token_budget': { type: 'number', min: 1 },
+  'statusline.show_handoff': { type: 'boolean' },
 };
 
 function isObject(v) { return v && typeof v === 'object' && !Array.isArray(v); }

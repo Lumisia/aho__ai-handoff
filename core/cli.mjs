@@ -30,6 +30,7 @@ import { prepareUserPrompt, finalizeUserPrompt } from './hooks/user-prompt.mjs';
 import { projectFingerprint } from './lib/fingerprint.mjs';
 import { readHistory } from './capsule/history.mjs';
 import { gitContext } from './lib/gitctx.mjs';
+import { statuslineSegment } from './lib/statusline-segment.mjs';
 
 function writeStdout(text) {
   return new Promise((resolve, reject) => {
@@ -115,8 +116,16 @@ async function sensorClaudeStatusline() {
   const raw = (await readStdin()) || '{}';
   const input = JSON.parse(raw);
   recordClaudeRateLimit(input);
-  try { await writeStdout(runPreviousStatusline(raw)); }
+  const cfg = loadConfig({ path: configPath() });
+  const seg = statuslineSegment({
+    usedPercent: input?.rate_limits?.five_hour?.used_percentage,
+    cwd: input.cwd || input.workspace?.current_dir,
+    show: cfg.statusline?.show_handoff !== false,
+  });
+  let prev = '';
+  try { prev = runPreviousStatusline(raw); }
   catch (error) { process.stderr.write(`[handoff] previous statusLine failed: ${error.message}\n`); }
+  await writeStdout(seg ? (prev ? `${seg} | ${prev}` : seg + '\n') : prev);
 }
 
 async function hookStop(args) {
