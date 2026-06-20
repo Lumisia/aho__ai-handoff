@@ -89,8 +89,10 @@ export function findPendingCapsule(fingerprint, { now = Date.now() } = {}) {
     if (!existsSync(statePath)) continue;
     let state = readState(statePath);
     if (state.status === 'CLAIMED' && typeof state.claim_expires_at === 'number' && state.claim_expires_at <= now) {
-      state = { ...state, status: transition('CLAIMED', 'AVAILABLE'), recovered_at: now };
+      const target = state.previous_status === 'DEGRADED_AVAILABLE' ? 'DEGRADED_AVAILABLE' : 'AVAILABLE';
+      state = { ...state, status: transition('CLAIMED', target), recovered_at: now };
       delete state.claim_expires_at;
+      delete state.previous_status;
       writeState(statePath, state);
       try { unlinkSync(join(hd, name, '.claim.lock')); } catch {}
     }
@@ -113,7 +115,11 @@ export function claimCapsule(fingerprint, taskId, { leaseMs = 30000, now = Date.
   try {
     const st = readState(statePath);
     const next = transition(st.status, 'CLAIMED');
-    writeState(statePath, { ...st, status: next, claimed_at: now, claim_expires_at: now + leaseMs });
+    // Remember whether the capsule was AVAILABLE or DEGRADED_AVAILABLE so a
+    // release or lease-expiry restores the original quality, not always AVAILABLE.
+    writeState(statePath, {
+      ...st, status: next, previous_status: st.status, claimed_at: now, claim_expires_at: now + leaseMs,
+    });
     return { lock, statePath };
   } catch {
     releaseLock(lock);
@@ -135,8 +141,10 @@ export function consumeCapsule(claim, { now = Date.now() } = {}) {
 export function releaseClaim(claim) {
   if (!ownsLock(claim?.lock)) throw new Error('stale claim cannot release capsule');
   const st = readState(claim.statePath);
-  const next = { ...st, status: transition(st.status, 'AVAILABLE') };
+  const target = st.previous_status === 'DEGRADED_AVAILABLE' ? 'DEGRADED_AVAILABLE' : 'AVAILABLE';
+  const next = { ...st, status: transition(st.status, target) };
   delete next.claim_expires_at;
+  delete next.previous_status;
   writeState(claim.statePath, next);
   releaseLock(claim.lock);
 }
