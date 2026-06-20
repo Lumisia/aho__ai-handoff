@@ -1,6 +1,6 @@
 import { join } from 'node:path';
-import { readFileSync, mkdirSync } from 'node:fs';
-import { writeFileAtomic } from '../lib/fsx.mjs';
+import { readFileSync, mkdirSync, appendFileSync } from 'node:fs';
+import { writeFileAtomic, withLock, sleepSync } from '../lib/fsx.mjs';
 import { projectDir } from '../lib/paths.mjs';
 
 function historyPath(fingerprint) { return join(projectDir(fingerprint), 'history.jsonl'); }
@@ -13,9 +13,26 @@ function readLines(path) {
 export function appendHistory(fingerprint, entry, { now = Date.now(), max = 500 } = {}) {
   const path = historyPath(fingerprint);
   try { mkdirSync(projectDir(fingerprint), { recursive: true }); } catch {}
-  const lines = readLines(path);
-  lines.push(JSON.stringify({ ts: now, ...entry }));
-  writeFileAtomic(path, lines.slice(-max).join('\n') + '\n');
+  const line = JSON.stringify({ ts: now, ...entry }) + '\n';
+  // Append-only: a pure append never reads existing lines, so it cannot clobber
+  // a write that landed between a read and a rewrite. The lock serializes the
+  // best-effort trim below; if the trim's read transiently fails we skip it and
+  // the cap self-heals on the next append (no entry is ever lost).
+  withLock(`${path}.lock`, () => {
+    // Retry transient Windows fs errors (AV/indexer briefly locking the file);
+    // never throw — appendHistory runs on the unguarded publishCapsule path.
+    for (let i = 0; i < 20; i++) {
+      try { appendFileSync(path, line); break; }
+      catch (error) {
+        if (i === 19) { process.stderr.write(`[handoff] history append failed: ${error.message}\n`); return; }
+        sleepSync(10);
+      }
+    }
+    try {
+      const lines = readLines(path);
+      if (lines.length > max) writeFileAtomic(path, lines.slice(-max).join('\n') + '\n');
+    } catch { /* best-effort cap; self-heals on next append */ }
+  });
 }
 
 export function readHistory(fingerprint, { limit = 20 } = {}) {

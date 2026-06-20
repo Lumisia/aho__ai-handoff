@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { readFileSync, mkdirSync } from 'node:fs';
-import { writeFileAtomic } from '../lib/fsx.mjs';
+import { writeFileAtomic, withLock } from '../lib/fsx.mjs';
 import { projectDir } from '../lib/paths.mjs';
 
 function samplesPath(fingerprint, agent) {
@@ -17,6 +17,13 @@ export function readSamples(fingerprint, agent) {
 export function appendSample(fingerprint, agent, { usedPercent, at = Date.now() }, { max = 6 } = {}) {
   if (typeof usedPercent !== 'number' || !Number.isFinite(usedPercent)) return;
   try { mkdirSync(projectDir(fingerprint), { recursive: true }); } catch {}
-  const next = [...readSamples(fingerprint, agent), { usedPercent, at }].slice(-max);
-  writeFileAtomic(samplesPath(fingerprint, agent), JSON.stringify(next, null, 2) + '\n');
+  const path = samplesPath(fingerprint, agent);
+  // Lock so the status-line sensor and Stop hook don't clobber the ring buffer.
+  // Best-effort: never throw on the hook path; a dropped recent sample is benign.
+  withLock(`${path}.lock`, () => {
+    try {
+      const next = [...readSamples(fingerprint, agent), { usedPercent, at }].slice(-max);
+      writeFileAtomic(path, JSON.stringify(next, null, 2) + '\n');
+    } catch { /* best-effort ring buffer */ }
+  });
 }
