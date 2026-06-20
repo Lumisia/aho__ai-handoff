@@ -191,7 +191,7 @@ The entire core is plain Node (baseline 18) with **no npm dependencies**, so the
 
 ## Commands
 
-Type these inside Claude Code or Codex. They are identical on both.
+> ⚠️ **In Claude Code, plugin commands are namespaced by the plugin name.** Type **`/ai-handoff:handoff`** — for example `/ai-handoff:handoff status` — not a bare `/handoff` (that returns *"Unknown command"*). The table below uses the short `/handoff` form for readability. In **Codex**, the handoff actions come from the bundled skills and are model-invoked: just ask in plain language (e.g. *"show my ai-handoff status"* or *"resume the handoff"*).
 
 | Command | What it does |
 |---|---|

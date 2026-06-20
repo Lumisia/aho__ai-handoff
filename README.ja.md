@@ -191,7 +191,7 @@ Claude Code (80% 使用)  →  カプセル作成  →  Codex を開く  →  Co
 
 ## コマンド
 
-Claude Code または Codex の中で入力します。両方で同じです。
+> ⚠️ **Claude Code では、プラグインのコマンドはプラグイン名で名前空間化されます。** bare `/handoff` ではなく **`/ai-handoff:handoff`** と入力してください — 例: `/ai-handoff:handoff status`。（bare `/handoff` は *"Unknown command"* になります。）下の表は読みやすさのため短い `/handoff` 形式で書いています。**Codex** では handoff の動作はバンドルされたスキルから提供され、model-invoked です — 普通の言葉で頼んでください（例: *「私の ai-handoff の状態を見せて」*、*「handoff を再開して」*）。
 
 | コマンド | 動作 |
 |---|---|

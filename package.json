@@ -1,6 +1,6 @@
 {
   "name": "ai-handoff",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Context-pressure-aware handoff between Claude Code and Codex",
   "type": "module",
   "license": "MIT",
