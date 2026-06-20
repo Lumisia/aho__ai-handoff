@@ -28,6 +28,7 @@ import { buildMemoryShard, storeMemoryShard, readVerifiedShards } from './memory
 import { rankMemoryShards, renderMemoryRecall } from './memory/recall.mjs';
 import { prepareUserPrompt, finalizeUserPrompt } from './hooks/user-prompt.mjs';
 import { projectFingerprint } from './lib/fingerprint.mjs';
+import { t } from './lib/i18n.mjs';
 import { readHistory } from './capsule/history.mjs';
 import { gitContext } from './lib/gitctx.mjs';
 import { statuslineSegment } from './lib/statusline-segment.mjs';
@@ -131,6 +132,7 @@ async function sensorClaudeStatusline() {
 async function hookStop(args) {
   const agent = argValue(args, '--agent', 'codex');
   const config = loadConfig({ path: configPath() });
+  const locale = config.locale || 'en';
   const modeOverride = argValue(args, '--mode', null);
   if (modeOverride) config.triggers.five_hour.mode = modeOverride;
   const input = await readInput(args);
@@ -139,10 +141,7 @@ async function hookStop(args) {
   if (result.action === 'request-summary') {
     await writeStdout(JSON.stringify({ decision: 'block', reason: result.prompt }) + '\n');
   } else if (result.action === 'ask') {
-    await writeStdout(JSON.stringify({
-      decision: 'block',
-      reason: 'Ask the user once: Capsule을 생성할까요? /handoff create | /handoff skip',
-    }) + '\n');
+    await writeStdout(JSON.stringify({ decision: 'block', reason: t('ask.create_or_skip', {}, locale) }) + '\n');
   } else {
     await writeStdout(JSON.stringify({ continue: true }) + '\n');
   }

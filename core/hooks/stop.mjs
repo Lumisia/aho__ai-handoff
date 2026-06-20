@@ -11,6 +11,7 @@ import {
 } from '../capsule/generation.mjs';
 import { buildCheckpointCapsule } from '../capsule/checkpoint.mjs';
 import { appendSample, readSamples } from '../sensors/samples.mjs';
+import { t } from '../lib/i18n.mjs';
 
 function extractSentinel(text) {
   const match = String(text || '').match(/<handoff-capsule>\s*([\s\S]*?)\s*<\/handoff-capsule>/i);
@@ -21,19 +22,12 @@ function extractSentinel(text) {
   } catch { return null; }
 }
 
-function summaryInstruction() {
-  return [
-    'Create the handoff capsule now. Reply with exactly one semantic summary wrapped in',
-    '<handoff-capsule>{"goal":"...","next_actions":["..."],"completed":[],"open_issues":[],"status":"in_progress"}</handoff-capsule>.',
-    'Do not include secrets, hidden reasoning, or transcript text.',
-  ].join(' ');
-}
-
 export async function handleStop({ input, config, readSensor, agent, now = Date.now(), notifyFn = sendNotification }) {
   const cwd = input.cwd || process.cwd();
   const fp = projectFingerprint(cwd);
   const pcfg = resolveProject(config, fp);
   const tcfg = pcfg.triggers.five_hour;
+  const locale = pcfg.locale || 'en';
   const notification = pcfg.notification || {};
   const noticeMethod = notification.method ?? 'os';
   const noticeOpts = { method: noticeMethod, fallback: notification.fallback ?? 'terminal' };
@@ -68,7 +62,7 @@ export async function handleStop({ input, config, readSensor, agent, now = Date.
     const gpath = globalStatePath();
     writeState(gpath, markSeen(readState(gpath), context.dedupeKey, now));
     finishGeneration(slotKey, { now });
-    sendNotice('AI handoff', `Capsule ready for ${capsule.target.agent}`);
+    sendNotice('AI handoff', t('notify.capsule_ready', { agent: capsule.target.agent }, locale));
     return { action: 'create', reason: 'threshold', taskId: capsule.task_id, fingerprint: fp, degraded };
   }
 
@@ -107,7 +101,7 @@ export async function handleStop({ input, config, readSensor, agent, now = Date.
       now,
       context: { agent, sessionId: input.session_id, cwd, reading, threshold: tcfg.threshold_percent },
     });
-    sendNotice('AI handoff', 'Capsule을 생성할까요? /handoff create | /handoff skip');
+    sendNotice('AI handoff', t('ask.create_or_skip', {}, locale));
     return { action: 'ask', reason: ev.reason, fingerprint: fp, approvalKey: dkey };
   }
 
@@ -119,5 +113,5 @@ export async function handleStop({ input, config, readSensor, agent, now = Date.
       threshold: tcfg.threshold_percent, dedupeKey: dkey,
     },
   });
-  return { action: 'request-summary', reason: ev.reason, fingerprint: fp, prompt: summaryInstruction() };
+  return { action: 'request-summary', reason: ev.reason, fingerprint: fp, prompt: t('summary.instruction', {}, locale) };
 }
