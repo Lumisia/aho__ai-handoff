@@ -1,0 +1,136 @@
+=== COMMITS 5be0e5e..HEAD ===
+84fe6f0 feat: add opt-in burn-rate projection to evaluateTrigger
+
+=== STAT ===
+ config/defaults.json     |  2 +-
+ core/hooks/trigger.mjs   | 27 +++++++++++++++++++++++----
+ core/lib/config-edit.mjs |  2 ++
+ tests/trigger.test.mjs   | 31 +++++++++++++++++++++++++++++++
+ 4 files changed, 57 insertions(+), 5 deletions(-)
+
+=== DIFF -U10 ===
+diff --git a/config/defaults.json b/config/defaults.json
+index 6425d07..7bc2ef2 100644
+--- a/config/defaults.json
++++ b/config/defaults.json
+@@ -1,11 +1,11 @@
+ {
+   "triggers": {
+-    "five_hour": { "enabled": true, "threshold_percent": 80, "mode": "ask" }
++    "five_hour": { "enabled": true, "threshold_percent": 80, "mode": "ask", "burn_rate": { "enabled": false, "runway_minutes": 30 } }
+   },
+   "capsule": { "completed_autocreate": false, "semantic_retry_limit": 0 },
+   "notification": { "method": "os", "fallback": "terminal" },
+   "handoff": { "target": "other-agent", "launcher": "notify", "already_running_requires_manual": true },
+   "memory": { "auto_recall": true, "auto_recall_token_budget": 800 },
+   "sensors": { "claude": { "freshness_ms": 120000 } },
+   "statusline": { "show_handoff": true }
+ }
+diff --git a/core/hooks/trigger.mjs b/core/hooks/trigger.mjs
+index 1c817f3..1b229a3 100644
+--- a/core/hooks/trigger.mjs
++++ b/core/hooks/trigger.mjs
+@@ -1,7 +1,26 @@
+-export function evaluateTrigger({ usedPercent, threshold, mode, deduped }) {
++function projectMinutesTo100(samples, usedPercent) {
++  if (!Array.isArray(samples) || samples.length < 2) return null;
++  const sorted = [...samples].sort((a, b) => a.at - b.at);
++  const first = sorted[0];
++  const last = sorted[sorted.length - 1];
++  const dPct = last.usedPercent - first.usedPercent;
++  const dMin = (last.at - first.at) / 60000;
++  if (dMin <= 0 || dPct <= 0) return null;
++  const slope = dPct / dMin; // % per minute
++  const remaining = 100 - (typeof usedPercent === 'number' ? usedPercent : last.usedPercent);
++  if (remaining <= 0) return 0;
++  return remaining / slope;
++}
++
++export function evaluateTrigger({ usedPercent, threshold, mode, deduped, samples, burnRate, now = Date.now() }) {
+   if (mode === 'off') return { action: 'none', reason: 'off' };
+   if (typeof usedPercent !== 'number') return { action: 'none', reason: 'unknown' };
+-  if (usedPercent < threshold) return { action: 'none', reason: 'below' };
+-  if (deduped) return { action: 'none', reason: 'deduped' };
+-  return { action: mode === 'auto' ? 'create' : 'ask', reason: 'threshold' };
++  const fire = (reason) => (deduped ? { action: 'none', reason: 'deduped' } : { action: mode === 'auto' ? 'create' : 'ask', reason });
++  if (usedPercent >= threshold) return fire('threshold');
++  if (burnRate && burnRate.enabled) {
++    const eta = projectMinutesTo100(samples, usedPercent);
++    if (eta == null) return { action: 'none', reason: 'insufficient-samples' };
++    if (eta <= (burnRate.runwayMinutes ?? 30)) return fire('burn-rate');
++  }
++  return { action: 'none', reason: 'below' };
+ }
+diff --git a/core/lib/config-edit.mjs b/core/lib/config-edit.mjs
+index 6d76ad3..78f5922 100644
+--- a/core/lib/config-edit.mjs
++++ b/core/lib/config-edit.mjs
+@@ -1,20 +1,22 @@
+ import { readFileSync } from 'node:fs';
+ import { writeFileAtomic } from './fsx.mjs';
+ 
+ // Allowlist of user-settable keys. Editing the file by hand can set anything,
+ // but `config:set` is guided: only these keys, with type/range/enum checks, so
+ // a typo can't silently write a config the runtime ignores.
+ export const CONFIG_KEYS = {
+   'triggers.five_hour.enabled': { type: 'boolean' },
+   'triggers.five_hour.threshold_percent': { type: 'number', min: 1, max: 100 },
+   'triggers.five_hour.mode': { type: 'enum', values: ['auto', 'ask', 'off'] },
++  'triggers.five_hour.burn_rate.enabled': { type: 'boolean' },
++  'triggers.five_hour.burn_rate.runway_minutes': { type: 'number', min: 5, max: 120 },
+   'capsule.completed_autocreate': { type: 'boolean' },
+   'notification.method': { type: 'enum', values: ['os', 'terminal', 'off'] },
+   'notification.fallback': { type: 'enum', values: ['terminal', 'off'] },
+   'memory.auto_recall': { type: 'boolean' },
+   'memory.auto_recall_token_budget': { type: 'number', min: 1 },
+   'statusline.show_handoff': { type: 'boolean' },
+ };
+ 
+ function isObject(v) { return v && typeof v === 'object' && !Array.isArray(v); }
+ function clone(v) { return isObject(v) ? JSON.parse(JSON.stringify(v)) : {}; }
+diff --git a/tests/trigger.test.mjs b/tests/trigger.test.mjs
+index e39fade..4d385a3 100644
+--- a/tests/trigger.test.mjs
++++ b/tests/trigger.test.mjs
+@@ -13,10 +13,41 @@ test('auto over threshold → create', () => {
+ });
+ test('ask over threshold → ask', () => {
+   assert.equal(evaluateTrigger({ usedPercent: 85, threshold: 80, mode: 'ask', deduped: false }).action, 'ask');
+ });
+ test('deduped → none', () => {
+   assert.equal(evaluateTrigger({ usedPercent: 85, threshold: 80, mode: 'auto', deduped: true }).action, 'none');
+ });
+ test('unknown usedPercent → none', () => {
+   assert.equal(evaluateTrigger({ usedPercent: undefined, threshold: 80, mode: 'auto', deduped: false }).action, 'none');
+ });
++
++const base = { threshold: 95, mode: 'ask', deduped: false };
++
++test('static threshold still fires (regression)', () => {
++  assert.equal(evaluateTrigger({ ...base, usedPercent: 96 }).action, 'ask');
++  assert.equal(evaluateTrigger({ ...base, usedPercent: 50 }).action, 'none');
++});
++
++test('burn-rate fires below threshold when exhaustion is within runway', () => {
++  const now = 100 * 60000;
++  const samples = [{ usedPercent: 60, at: now - 10 * 60000 }, { usedPercent: 80, at: now }]; // +20%/10min => 100% in 10min
++  const ev = evaluateTrigger({ ...base, usedPercent: 80, samples, burnRate: { enabled: true, runwayMinutes: 30 }, now });
++  assert.equal(ev.action, 'ask');
++  assert.equal(ev.reason, 'burn-rate');
++});
++
++test('burn-rate does not fire when projection is beyond runway', () => {
++  const now = 100 * 60000;
++  const samples = [{ usedPercent: 60, at: now - 60 * 60000 }, { usedPercent: 62, at: now }]; // slow
++  assert.equal(evaluateTrigger({ ...base, usedPercent: 62, samples, burnRate: { enabled: true, runwayMinutes: 30 }, now }).action, 'none');
++});
++
++test('burn-rate disabled => static only', () => {
++  const now = 100 * 60000;
++  const samples = [{ usedPercent: 60, at: now - 10 * 60000 }, { usedPercent: 80, at: now }];
++  assert.equal(evaluateTrigger({ ...base, usedPercent: 80, samples, burnRate: { enabled: false }, now }).action, 'none');
++});
++
++test('burn-rate enabled but too few samples => insufficient-samples', () => {
++  assert.equal(evaluateTrigger({ ...base, usedPercent: 80, samples: [], burnRate: { enabled: true, runwayMinutes: 30 }, now: 1 }).reason, 'insufficient-samples');
++});

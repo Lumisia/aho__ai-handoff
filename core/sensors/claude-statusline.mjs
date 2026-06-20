@@ -3,6 +3,8 @@ import { readFileSync } from 'node:fs';
 import { claudeRateLimitDir } from '../lib/paths.mjs';
 import { sha256Hex } from '../lib/hash.mjs';
 import { writeFileAtomic } from '../lib/fsx.mjs';
+import { appendSample } from './samples.mjs';
+import { projectFingerprint } from '../lib/fingerprint.mjs';
 
 function samplePath(sessionId) {
   if (!sessionId) return null;
@@ -21,6 +23,8 @@ export function recordClaudeRateLimit(input, { now = Date.now() } = {}) {
     resets_at: fiveHour.resets_at ?? null,
     captured_at: now,
   }, null, 2) + '\n');
+  const cwd = input.cwd || input.workspace?.current_dir;
+  if (cwd) { try { appendSample(projectFingerprint(cwd), 'claude-code', { usedPercent: used, at: now }); } catch {} }
   return true;
 }
 

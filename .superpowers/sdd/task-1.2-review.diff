@@ -1,0 +1,1117 @@
+=== COMMITS 876e6dc..HEAD ===
+a06d689 docs: add task-1.2 report
+02f0d40 feat: rename recover to doctor and add basis + cross-fingerprint scan
+
+=== STAT ===
+ .superpowers/sdd/progress.md          |   5 ++
+ .superpowers/sdd/task-1.1-brief.md    |  74 ++++++++++++++++
+ .superpowers/sdd/task-1.1-report.md   |  68 ++++++++++++++
+ .superpowers/sdd/task-1.1-review.diff |  86 ++++++++++++++++++
+ .superpowers/sdd/task-1.2-brief.md    | 162 ++++++++++++++++++++++++++++++++++
+ .superpowers/sdd/task-1.2-report.md   |  81 +++++++++++++++++
+ README.ja.md                          |   4 +-
+ README.ko.md                          |   4 +-
+ README.md                             |   4 +-
+ README.zh.md                          |   4 +-
+ core/cli.mjs                          |   8 +-
+ core/hooks/handoff.mjs                |  44 ++++++++-
+ skills/handoff-doctor/SKILL.md        |  15 ++++
+ skills/handoff-recover/SKILL.md       |  14 ---
+ skills/handoff-session/SKILL.md       |   6 +-
+ tests/cli-doctor.test.mjs             |  25 ++++++
+ tests/handoff-query.test.mjs          |   6 +-
+ tests/skills-present.test.mjs         |   2 +-
+ 18 files changed, 576 insertions(+), 36 deletions(-)
+
+=== DIFF -U10 ===
+diff --git a/.superpowers/sdd/progress.md b/.superpowers/sdd/progress.md
+new file mode 100644
+index 0000000..08567a4
+--- /dev/null
++++ b/.superpowers/sdd/progress.md
+@@ -0,0 +1,5 @@
++# v1.1 enhancements — progress ledger
++
++Branch: v1.1-enhancements (from master)
++
++Task 1.1: complete (commits d15566e..876e6dc, review clean)
+diff --git a/.superpowers/sdd/task-1.1-brief.md b/.superpowers/sdd/task-1.1-brief.md
+new file mode 100644
+index 0000000..0e26cb3
+--- /dev/null
++++ b/.superpowers/sdd/task-1.1-brief.md
+@@ -0,0 +1,74 @@
++# Task 1.1 — Expose fingerprint basis
++
++You are implementing ONE task in the ai-handoff repo (Node ≥18, zero runtime deps, ES modules `.mjs`, tests via `node:test`). Follow TDD exactly: failing test → run (see it fail) → implement → run (see it pass) → commit.
++
++## Files
++- Modify: `core/lib/fingerprint.mjs`
++- Test: `tests/fingerprint.test.mjs`
++
++## Goal / Produces
++`projectFingerprintInfo(cwd) -> { fingerprint, basis: { type: 'remote'|'gitroot'|'path', value } }`. `projectFingerprint(cwd)` must keep returning the same 24-char string as before (now via the new function).
++
++## Current `core/lib/fingerprint.mjs`
++It has `git(cwd, args)` helper, imports `realpathSync` from `node:fs` and `sha256Hex` from `./hash.mjs`. `projectFingerprint(cwd)` computes a basis string (`remote:<url>` if git remote, else `gitroot:<realpath>`, else `path:<realpath>`) and returns `sha256Hex(basis).slice(0,24)`. Preserve that exact basis-string format so existing fingerprints do not change.
++
++## Step 1 — failing test (append to `tests/fingerprint.test.mjs`)
++```js
++import { projectFingerprintInfo } from '../core/lib/fingerprint.mjs';
++import { mkdtempSync } from 'node:fs';
++import { tmpdir } from 'node:os';
++import { join } from 'node:path';
++
++test('projectFingerprintInfo reports a path basis for a non-repo dir', () => {
++  const dir = mkdtempSync(join(tmpdir(), 'ah-fp-'));
++  const info = projectFingerprintInfo(dir);
++  assert.equal(info.basis.type, 'path');
++  assert.match(info.basis.value, /^path:/);
++  assert.equal(info.fingerprint.length, 24);
++});
++```
++(If `test`/`assert` are already imported at the top of the file, do not duplicate those imports — only add what's missing. Check the file first.)
++
++## Step 2 — run, expect FAIL
++`node --test tests/fingerprint.test.mjs` → fails (projectFingerprintInfo not exported).
++
++## Step 3 — implement
++Replace `projectFingerprint` in `core/lib/fingerprint.mjs` with:
++```js
++export function projectFingerprintInfo(cwd) {
++  let basis = null;
++  const url = git(cwd, ['config', '--get', 'remote.origin.url']);
++  if (url) basis = { type: 'remote', value: 'remote:' + url };
++  if (!basis) {
++    const root = git(cwd, ['rev-parse', '--show-toplevel']);
++    if (root) {
++      let resolved = root;
++      try { resolved = realpathSync(root); } catch {}
++      basis = { type: 'gitroot', value: 'gitroot:' + resolved };
++    }
++  }
++  if (!basis) {
++    let resolved = cwd;
++    try { resolved = realpathSync(cwd); } catch {}
++    basis = { type: 'path', value: 'path:' + resolved };
++  }
++  return { fingerprint: sha256Hex(basis.value).slice(0, 24), basis };
++}
++
++export function projectFingerprint(cwd) {
++  return projectFingerprintInfo(cwd).fingerprint;
++}
++```
++Keep the `git` helper and imports intact.
++
++## Step 4 — run, expect PASS
++`node --test tests/fingerprint.test.mjs` → all pass. Also run the full suite `node --test` to confirm no regression (existing fingerprints unchanged).
++
++## Step 5 — commit
++```
++git add core/lib/fingerprint.mjs tests/fingerprint.test.mjs
++git commit -m "refactor: expose fingerprint basis via projectFingerprintInfo"
++```
++
++## Global constraints
++Node ≥18, zero runtime deps (stdlib only). Do not touch other files. `node --test` must stay green.
+diff --git a/.superpowers/sdd/task-1.1-report.md b/.superpowers/sdd/task-1.1-report.md
+new file mode 100644
+index 0000000..19606eb
+--- /dev/null
++++ b/.superpowers/sdd/task-1.1-report.md
+@@ -0,0 +1,68 @@
++# Task 1.1 Report — Expose fingerprint basis
++
++## Summary
++Successfully implemented `projectFingerprintInfo(cwd)` to expose fingerprint basis information while preserving backward compatibility with the existing `projectFingerprint(cwd)` function.
++
++## Changes Made
++
++### 1. `core/lib/fingerprint.mjs`
++- **Refactored** `projectFingerprint()` into two functions:
++  - New `projectFingerprintInfo(cwd)` returns `{ fingerprint, basis: { type, value } }`
++  - Updated `projectFingerprint(cwd)` now calls `projectFingerprintInfo()` and returns only the fingerprint string
++- **Basis types preserved**: `'remote'`, `'gitroot'`, and `'path'`
++- **Basis value format** unchanged: `remote:<url>`, `gitroot:<realpath>`, `path:<realpath>`
++- **Error handling** improved: `realpathSync()` now only affects the resolved path, not the basis string
++
++### 2. `tests/fingerprint.test.mjs`
++- **Added import**: `projectFingerprintInfo` from fingerprint module
++- **Added test**: `projectFingerprintInfo reports a path basis for a non-repo dir`
++  - Creates a temp directory (non-git)
++  - Verifies `info.basis.type` is `'path'`
++  - Verifies `info.basis.value` starts with `'path:'`
++  - Verifies `info.fingerprint` is exactly 24 characters
++
++## Test Results
++
++### Step 2: Initial test run (expected FAIL)
++```
++SyntaxError: The requested module does not provide an export named 'projectFingerprintInfo'
++```
++✅ Test failed as expected
++
++### Step 4: After implementation (expected PASS)
++```
++✔ fingerprint is deterministic and 24 hex chars (91.1655ms)
++✔ different dirs give different fingerprints (88.5642ms)
++✔ projectFingerprintInfo reports a path basis for a non-repo dir (41.5433ms)
++ℹ tests 3
++ℹ suites 0
++ℹ pass 3
++ℹ fail 0
++```
++✅ All fingerprint tests pass
++
++### Full test suite (regression check)
++```
++ℹ tests 154
++ℹ suites 0
++ℹ pass 153
++ℹ fail 0
++ℹ cancelled 0
++ℹ skipped 1
++ℹ todo 0
++ℹ duration_ms 3706.9343
++```
++✅ No regressions. All 153 tests pass (1 skipped, unchanged).
++
++## Backward Compatibility
++- Existing fingerprints remain **unchanged** because the basis string format is identical
++- `projectFingerprint(cwd)` behavior is 100% compatible
++- All existing tests continue to pass
++
++## Commit
++```
++876e6dc refactor: expose fingerprint basis via projectFingerprintInfo
++```
++
++## Concerns
++None. Implementation follows TDD steps exactly, all tests pass, no regressions detected.
+diff --git a/.superpowers/sdd/task-1.1-review.diff b/.superpowers/sdd/task-1.1-review.diff
+new file mode 100644
+index 0000000..874d4a9
+--- /dev/null
++++ b/.superpowers/sdd/task-1.1-review.diff
+@@ -0,0 +1,86 @@
++=== COMMITS d15566e..HEAD ===
++876e6dc refactor: expose fingerprint basis via projectFingerprintInfo
++
++=== STAT ===
++ core/lib/fingerprint.mjs   | 20 +++++++++++++++-----
++ tests/fingerprint.test.mjs | 10 +++++++++-
++ 2 files changed, 24 insertions(+), 6 deletions(-)
++
++=== DIFF -U10 ===
++diff --git a/core/lib/fingerprint.mjs b/core/lib/fingerprint.mjs
++index a0f7382..0a2e257 100644
++--- a/core/lib/fingerprint.mjs
+++++ b/core/lib/fingerprint.mjs
++@@ -3,23 +3,33 @@ import { realpathSync } from 'node:fs';
++ import { sha256Hex } from './hash.mjs';
++ 
++ function git(cwd, args) {
++   try {
++     return execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
++   } catch {
++     return null;
++   }
++ }
++ 
++-export function projectFingerprint(cwd) {
+++export function projectFingerprintInfo(cwd) {
++   let basis = null;
++   const url = git(cwd, ['config', '--get', 'remote.origin.url']);
++-  if (url) basis = 'remote:' + url;
+++  if (url) basis = { type: 'remote', value: 'remote:' + url };
++   if (!basis) {
++     const root = git(cwd, ['rev-parse', '--show-toplevel']);
++-    if (root) { try { basis = 'gitroot:' + realpathSync(root); } catch { basis = 'gitroot:' + root; } }
+++    if (root) {
+++      let resolved = root;
+++      try { resolved = realpathSync(root); } catch {}
+++      basis = { type: 'gitroot', value: 'gitroot:' + resolved };
+++    }
++   }
++   if (!basis) {
++-    try { basis = 'path:' + realpathSync(cwd); } catch { basis = 'path:' + cwd; }
+++    let resolved = cwd;
+++    try { resolved = realpathSync(cwd); } catch {}
+++    basis = { type: 'path', value: 'path:' + resolved };
++   }
++-  return sha256Hex(basis).slice(0, 24);
+++  return { fingerprint: sha256Hex(basis.value).slice(0, 24), basis };
+++}
+++
+++export function projectFingerprint(cwd) {
+++  return projectFingerprintInfo(cwd).fingerprint;
++ }
++diff --git a/tests/fingerprint.test.mjs b/tests/fingerprint.test.mjs
++index 4bee2bd..38e8cfa 100644
++--- a/tests/fingerprint.test.mjs
+++++ b/tests/fingerprint.test.mjs
++@@ -1,20 +1,28 @@
++ import { test } from 'node:test';
++ import assert from 'node:assert/strict';
++ import { mkdtempSync } from 'node:fs';
++ import { tmpdir } from 'node:os';
++ import { join } from 'node:path';
++-import { projectFingerprint } from '../core/lib/fingerprint.mjs';
+++import { projectFingerprint, projectFingerprintInfo } from '../core/lib/fingerprint.mjs';
++ 
++ test('fingerprint is deterministic and 24 hex chars', () => {
++   const dir = mkdtempSync(join(tmpdir(), 'ah-fp-'));
++   const a = projectFingerprint(dir);
++   const b = projectFingerprint(dir);
++   assert.equal(a, b);
++   assert.match(a, /^[0-9a-f]{24}$/);
++ });
++ 
++ test('different dirs give different fingerprints', () => {
++   const d1 = mkdtempSync(join(tmpdir(), 'ah-fp-'));
++   const d2 = mkdtempSync(join(tmpdir(), 'ah-fp-'));
++   assert.notEqual(projectFingerprint(d1), projectFingerprint(d2));
++ });
+++
+++test('projectFingerprintInfo reports a path basis for a non-repo dir', () => {
+++  const dir = mkdtempSync(join(tmpdir(), 'ah-fp-'));
+++  const info = projectFingerprintInfo(dir);
+++  assert.equal(info.basis.type, 'path');
+++  assert.match(info.basis.value, /^path:/);
+++  assert.equal(info.fingerprint.length, 24);
+++});
+diff --git a/.superpowers/sdd/task-1.2-brief.md b/.superpowers/sdd/task-1.2-brief.md
+new file mode 100644
+index 0000000..bc31b8f
+--- /dev/null
++++ b/.superpowers/sdd/task-1.2-brief.md
+@@ -0,0 +1,162 @@
++# Task 1.2 — Rename recover → doctor and expand diagnosis
++
++ai-handoff repo, branch v1.1-enhancements. Node ≥18, zero deps, ES modules. TDD.
++
++## Files
++- Modify: `core/hooks/handoff.mjs` (rename `recoverFor` → `doctorFor`, expand)
++- Modify: `core/cli.mjs` (dispatch `handoff:recover` → `handoff:doctor`, handler `handoffRecover` → `handoffDoctor`)
++- Rename: `skills/handoff-recover/SKILL.md` → `skills/handoff-doctor/SKILL.md` (use `git mv`)
++- Modify references: `tests/skills-present.test.mjs` + any test / README referencing recover
++- Test: create `tests/cli-doctor.test.mjs`
++
++## Consumes (already exists)
++- `projectFingerprintInfo(cwd) -> { fingerprint, basis: { type, value } }` from `core/lib/fingerprint.mjs` (Task 1.1, committed).
++- In `core/hooks/handoff.mjs`: existing `findPendingCapsule`, `verifyStoredCapsule`, `findApproval`, and the current `recoverFor`.
++- `dataRoot()` from `core/lib/paths.mjs`; `projectDir`/`handoffDir` also there.
++
++## Produces
++- `doctorFor(cwd, { now }) -> { fingerprint, basis, cwdResolved, dataRoot, healthy, issues, pending, approval, otherPending }`
++- CLI command `handoff:doctor`.
++
++## Step 1 — failing test: create `tests/cli-doctor.test.mjs`
++```js
++import { test } from 'node:test';
++import assert from 'node:assert/strict';
++import { execFileSync } from 'node:child_process';
++import { mkdtempSync } from 'node:fs';
++import { tmpdir } from 'node:os';
++import { dirname, join } from 'node:path';
++import { fileURLToPath } from 'node:url';
++
++const cli = join(dirname(fileURLToPath(import.meta.url)), '..', 'core', 'cli.mjs');
++const run = (args, input, env) =>
++  execFileSync(process.execPath, [cli, ...args], { input, encoding: 'utf8', env: { ...process.env, ...env } });
++
++test('handoff:doctor reports basis and cross-fingerprint pending capsules', () => {
++  const root = mkdtempSync(join(tmpdir(), 'ah-doc-'));
++  const projA = mkdtempSync(join(tmpdir(), 'ah-a-'));
++  const projB = mkdtempSync(join(tmpdir(), 'ah-b-'));
++  const env = { AI_HANDOFF_ROOT: root };
++  run(['handoff:checkpoint', '--agent', 'codex', '--cwd', projA],
++    JSON.stringify({ session_id: 's', sentinel: { goal: 'find me', next_actions: ['x'] } }), env);
++  const out = JSON.parse(run(['handoff:doctor', '--cwd', projB], '', env));
++  assert.equal(out.basis.type, 'path');
++  assert.equal(out.pending, null);
++  assert.equal(out.otherPending.length, 1);
++  assert.equal(out.otherPending[0].goal, 'find me');
++});
++```
++
++## Step 2 — run, expect FAIL
++`node --test tests/cli-doctor.test.mjs` → `unknown command: handoff:doctor`.
++
++## Step 3 — expand + rename in `core/hooks/handoff.mjs`
++At top, ensure these imports exist (merge, do not duplicate): `import { projectFingerprintInfo } from '../lib/fingerprint.mjs';`, `import { readdirSync, readFileSync, existsSync, realpathSync } from 'node:fs';`, `import { join } from 'node:path';`, `import { dataRoot } from '../lib/paths.mjs';`. (The file already imports `projectFingerprint` — keep it if still used elsewhere; it is used by statusFor/createFromApproval/etc., so keep that import.)
++
++Remove the old `recoverFor` and add:
++```js
++function scanOtherPending(currentFp) {
++  const projects = join(dataRoot(), 'projects');
++  const out = [];
++  let names = [];
++  try { names = readdirSync(projects); } catch { return out; }
++  for (const fp of names) {
++    if (fp === currentFp) continue;
++    const hdir = join(projects, fp, 'handoff');
++    let tasks = [];
++    try { tasks = readdirSync(hdir); } catch { continue; }
++    for (const taskId of tasks) {
++      const statePath = join(hdir, taskId, 'state.json');
++      const capPath = join(hdir, taskId, 'capsule.json');
++      if (!existsSync(statePath) || !existsSync(capPath)) continue;
++      let state; let cap;
++      try { state = JSON.parse(readFileSync(statePath, 'utf8')); cap = JSON.parse(readFileSync(capPath, 'utf8')); }
++      catch { continue; }
++      if (state.status !== 'AVAILABLE' && state.status !== 'DEGRADED_AVAILABLE') continue;
++      out.push({
++        fingerprint: fp, taskId,
++        goal: cap.task && cap.task.goal,
++        source: cap.source && cap.source.agent,
++        branch: cap.project && cap.project.git_branch,
++      });
++    }
++  }
++  return out;
++}
++
++export function doctorFor(cwd, { now = Date.now() } = {}) {
++  const { fingerprint, basis } = projectFingerprintInfo(cwd);
++  let cwdResolved = cwd;
++  try { cwdResolved = realpathSync(cwd); } catch {}
++  const pending = findPendingCapsule(fingerprint, { now });
++  const approval = findApproval(fingerprint);
++  const issues = [];
++  let verified = null;
++  if (pending?.capsule) {
++    verified = verifyStoredCapsule(fingerprint, pending.taskId, { now });
++    issues.push(...verified.errors);
++  }
++  return {
++    fingerprint,
++    basis,
++    cwdResolved,
++    dataRoot: dataRoot(),
++    healthy: issues.length === 0,
++    issues,
++    pending: pending ? {
++      taskId: pending.taskId,
++      status: pending.state.status,
++      recoveredAt: pending.state.recovered_at || null,
++      verified: verified?.valid ?? false,
++    } : null,
++    approval: approval ? { key: approval.key, status: approval.status } : null,
++    otherPending: scanOtherPending(fingerprint),
++  };
++}
++```
++
++## Step 4 — rename command in `core/cli.mjs`
++- Change the import `recoverFor` → `doctorFor`.
++- Rename handler `handoffRecover` → `handoffDoctor`, body:
++```js
++async function handoffDoctor(args) {
++  const input = await readInput(args);
++  await writeStdout(JSON.stringify(doctorFor(input.cwd || process.cwd()), null, 2) + '\n');
++}
++```
++- In the dispatch map, replace `'handoff:recover': handoffRecover` with `'handoff:doctor': handoffDoctor`.
++
++## Step 5 — rename the skill
++`git mv skills/handoff-recover skills/handoff-doctor`, then rewrite `skills/handoff-doctor/SKILL.md`:
++```markdown
++---
++name: handoff-doctor
++description: Diagnose why a handoff is not appearing — fingerprint/basis, store location, capsule integrity, stale claims, approval state, and capsules pending under a different directory/fingerprint.
++---
++
++# handoff-doctor
++
++Run `handoff:doctor --cwd "<project dir>"`. Report `basis` (how the project
++fingerprint was derived: git remote / git root / path), `dataRoot` (where
++capsules live), `cwdResolved`, current `pending`/`issues`, and `approval`.
++
++If `otherPending` is non-empty, a capsule exists under a DIFFERENT fingerprint —
++tell the user which directory/remote it belongs to and that both agents must run
++from the same project (a git repo gives a path-independent remote-based
++fingerprint). Do not consume, rewrite, or delete a capsule during diagnosis.
++```
++
++## Step 6 — update references
++In `tests/skills-present.test.mjs`, change `'skills/handoff-recover/SKILL.md'` → `'skills/handoff-doctor/SKILL.md'`. Then run `git grep -n "handoff:recover\|recoverFor\|handoff-recover"` and update any remaining matches in `tests/` and `README*.md` (e.g. README command tables: `/handoff recover` → `/handoff doctor`). It must return no matches when done. (Note: the handoff-session SKILL.md mentions `handoff:recover` — update it to `handoff:doctor`.)
++
++## Step 7 — run tests
++`node --test tests/cli-doctor.test.mjs tests/skills-present.test.mjs` → PASS. Then full `node --test` → no regressions.
++
++## Step 8 — commit
++```
++git add -A
++git commit -m "feat: rename recover to doctor and add basis + cross-fingerprint scan"
++```
++
++## Global constraints
++Node ≥18, zero deps. `node --test` green. Use `readInput(args)` for CLI input (already in cli.mjs). Do not change unrelated behavior.
+diff --git a/.superpowers/sdd/task-1.2-report.md b/.superpowers/sdd/task-1.2-report.md
+new file mode 100644
+index 0000000..0ddbce0
+--- /dev/null
++++ b/.superpowers/sdd/task-1.2-report.md
+@@ -0,0 +1,81 @@
++# Task 1.2 Report — Rename recover → doctor and expand diagnosis
++
++## Status: DONE
++
++## What changed per file
++
++### `core/hooks/handoff.mjs`
++- Added imports: `projectFingerprintInfo` from fingerprint.mjs, `readdirSync`, `readFileSync`, `existsSync`, `realpathSync` from node:fs, `join` from node:path, `dataRoot` from paths.mjs.
++- Removed `recoverFor` function.
++- Added `scanOtherPending(currentFp)` — walks `dataRoot()/projects/`, skips current fingerprint, collects AVAILABLE/DEGRADED_AVAILABLE capsules from other project dirs.
++- Added `doctorFor(cwd, { now })` — uses `projectFingerprintInfo` for `{ fingerprint, basis }`, resolves cwd, calls existing `findPendingCapsule`/`verifyStoredCapsule`/`findApproval`, and calls `scanOtherPending`. Returns full diagnostic object with `fingerprint, basis, cwdResolved, dataRoot, healthy, issues, pending, approval, otherPending`.
++
++### `core/cli.mjs`
++- Changed import from `recoverFor` to `doctorFor`.
++- Renamed handler `handoffRecover` → `handoffDoctor`, body uses `doctorFor`.
++- Dispatch map: `'handoff:recover'` → `'handoff:doctor'`.
++
++### `skills/handoff-recover/SKILL.md` → `skills/handoff-doctor/SKILL.md`
++- Renamed via `git mv skills/handoff-recover skills/handoff-doctor`.
++- Rewrote SKILL.md: name, description, and body updated to reflect `handoff:doctor`, basis/dataRoot/cwdResolved fields, and cross-fingerprint `otherPending` guidance.
++
++### `skills/handoff-session/SKILL.md`
++- Changed `/handoff recover` → `/handoff doctor` in the command list.
++- Changed `handoff:recover` → `handoff:doctor` in the "For skip and recover" line.
++- Changed `recover` → `doctor` in the list of commands that need nothing on stdin.
++
++### `tests/cli-doctor.test.mjs` (new)
++- Created per brief spec: verifies `handoff:doctor` reports `basis.type === 'path'` for a non-git tmp dir, `pending === null` (no capsule in projB), and `otherPending.length === 1` with `goal === 'find me'` from a capsule created for projA.
++
++### `tests/handoff-query.test.mjs`
++- Changed import from `recoverFor` to `doctorFor`.
++- Renamed test: `'recover diagnoses...'` → `'doctor diagnoses...'`, usage `recoverFor` → `doctorFor`.
++
++### `tests/skills-present.test.mjs`
++- Changed `'skills/handoff-recover/SKILL.md'` → `'skills/handoff-doctor/SKILL.md'`.
++
++### `README.md`, `README.ko.md`, `README.ja.md`, `README.zh.md`
++- Changed `handoff-recover` → `handoff-doctor` in the skills description paragraph (line 180).
++- Changed `| /handoff recover |` → `| /handoff doctor |` in the command table (line 204).
++
++## Test commands and output
++
++### Failing test (Step 2)
++```
++node --test tests/cli-doctor.test.mjs
++# Exit code 1
++# unknown command: handoff:doctor
++# ✖ handoff:doctor reports basis and cross-fingerprint pending capsules (238.6431ms)
++# tests 1, pass 0, fail 1
++```
++
++### Target tests after implementation (Step 7)
++```
++node --test tests/cli-doctor.test.mjs tests/skills-present.test.mjs
++# ✔ handoff:doctor reports basis and cross-fingerprint pending capsules (280.8693ms)
++# ✔ skill files exist with frontmatter (1.8887ms)
++# tests 2, pass 2, fail 0
++```
++
++### Full suite (Step 7)
++```
++node --test
++# tests 155, pass 154, fail 0, cancelled 0, skipped 1
++# (Skipped: reads live rate limit from codex app-server — always skipped, pre-existing)
++```
++
++## git grep result
++```
++git grep -n "handoff:recover\|recoverFor\|handoff-recover"
++```
++Returns matches only in:
++- `docs/superpowers/plans/2026-06-20-ai-handoff-v1.1-enhancements.md` — the plan document that describes the rename (historical; appropriate to preserve)
++- `docs/superpowers/specs/2026-06-20-ai-handoff-v1.1-enhancements-design.md` — the design spec that describes the rename (historical; appropriate to preserve)
++
++No matches in `tests/`, `core/`, `skills/`, or `README*.md`.
++
++## Commit hash
++02f0d40
++
++## Concerns
++None. The only remaining git grep matches are in `docs/superpowers/` plan and spec files that explicitly describe the `recover → doctor` rename. These are historical documentation artifacts and must preserve the old names to make sense. All production code, tests, skills, and READMEs are fully updated.
+diff --git a/README.ja.md b/README.ja.md
+index df20f3c..2abce22 100644
+--- a/README.ja.md
++++ b/README.ja.md
+@@ -170,21 +170,21 @@ Claude Code (80% 使用)  →  カプセル作成  →  Codex を開く  →  Co
+ ### 4. 検証済みメモリの呼び戻し
+ 
+ 一度きりのカプセルとは別に、プラグインはプロジェクトに関する **長期メモリ** を保持します——ただし証拠（成功したテスト、コマンド結果、ソースファイル）で裏づけられた事実だけ。セッションの最初のプロンプトで、関連かつ証拠のあるメモリだけをトークン予算（既定 800）の範囲で呼び戻します。推測・隠れた推論・会話の全文は決して保存しません。
+ 
+ ### 5. 段階的なプロジェクト知識
+ 
+ カプセルと一緒に、プロジェクトの指針・書式・落とし穴も運べます。薄い **INDEX** と **manifest**（ファイルハッシュ + dirty フラグ）により、受け取る側は全部を読み直さず、前回以降に **実際に変わったものだけ** を読みます——トークン節約。
+ 
+ ### 6. スキルとコマンド
+ 
+-3つのスキルが挙動をまとめます: `handoff-ratelimit`（5時間トリガー）、`handoff-session`（`/handoff` コマンド群）、`handoff-recover`（診断）。これらが下記の `/handoff` コマンドを駆動します。
++3つのスキルが挙動をまとめます: `handoff-ratelimit`（5時間トリガー）、`handoff-session`（`/handoff` コマンド群）、`handoff-doctor`（診断）。これらが下記の `/handoff` コマンドを駆動します。
+ 
+ ### 7. 組み込みの安全策
+ 
+ 保存前に秘密情報が伏せられ、カプセルは改ざんできず、カプセルは常に *参考* 資料として扱われます——現在のユーザー指示、リポジトリのポリシー、実際のファイル、Git、テストがすべてカプセルより上位です。[プライバシーと安全性](#プライバシーと安全性) を参照。
+ 
+ ### 8. 依存ゼロ・クロスプラットフォームのコア
+ 
+ コア全体が純粋な Node（基準 18）で、**npm 依存はありません**。コンパイルするものも、アップグレードで壊れるものもありません。Windows・macOS・Linux 上で Node 18/20/22 でテストされています。
+ 
+ ---
+@@ -194,21 +194,21 @@ Claude Code (80% 使用)  →  カプセル作成  →  Codex を開く  →  Co
+ > ⚠️ **Claude Code では、プラグインのコマンドはプラグイン名で名前空間化されます。** 下の各アクションはスラッシュメニューに **`/ai-handoff:handoff-<アクション>`** として個別に表示されます — 例: `/ai-handoff:handoff-status`、`/ai-handoff:handoff-config set notification.method off`。bare **`/ai-handoff:handoff`** は待機中のカプセルを再開します（`/ai-handoff:handoff <アクション>` 形式も受け付けます）。bare `/handoff` は *"Unknown command"* になります。下の表は読みやすさのため短い `/handoff <アクション>` 形式で書いています。**Codex** ではこれらのアクションはバンドルされたスキルから提供され、model-invoked です — 普通の言葉で頼んでください（例: *「私の ai-handoff の状態を見せて」*）。
+ 
+ | コマンド | 動作 |
+ |---|---|
+ | `/handoff` | 待機中のカプセルを再開します（最もよく使う操作）。 |
+ | `/handoff status` | 現在の引き継ぎ状態を表示します。 |
+ | `/handoff preview` | 注入する前にカプセルを確認します。 |
+ | `/handoff checkpoint` | いますぐカプセルを手動保存します。 |
+ | `/handoff create` | `ask` モードでカプセル作成を承認します。 |
+ | `/handoff skip` | `ask` モードで今回の使用ウィンドウをスキップします。 |
+-| `/handoff recover` | カプセル / フック / バージョンの問題を診断します。 |
++| `/handoff doctor` | カプセル / フック / バージョンの問題を診断します。 |
+ | `/handoff config` | 設定の表示/変更（しきい値・モード・通知・メモリ）。 |
+ 
+ メモリは **明示的** です: 自分で選んだときだけ、しかも実際の証拠（成功したテスト、コマンド結果、ソースファイル）があるときだけ事実を保存します。隠れた推論や会話の全文は決して保存しません。
+ 
+ ---
+ 
+ ## 設定
+ 
+ 以下は **既定値** で、プラグイン内の [`config/defaults.json`](config/defaults.json) に入っています:
+ 
+diff --git a/README.ko.md b/README.ko.md
+index b25dd4e..c662e8e 100644
+--- a/README.ko.md
++++ b/README.ko.md
+@@ -170,21 +170,21 @@ Claude Code (80% 사용)  →  캡슐 작성  →  Codex 열기  →  Codex가 
+ ### 4. 검증된 메모리 recall
+ 
+ 한 번 쓰는 캡슐과 별개로, 플러그인은 프로젝트에 대한 **장기 메모리**를 보관합니다 — 단, 증거(통과한 테스트, 명령 결과, 소스 파일)로 뒷받침되는 사실만. 세션의 첫 프롬프트에서, 관련 있고 증거 있는 메모리만 토큰 예산(기본 800) 안에서 가져옵니다. 추측·숨은 추론·전체 대화 기록은 절대 저장하지 않습니다.
+ 
+ ### 5. 점진적 프로젝트 지식
+ 
+ 캡슐과 함께 프로젝트 지침·양식·함정도 운반할 수 있습니다. 얇은 **INDEX** 와 **manifest**(파일 해시 + dirty 플래그)를 통해, 받는 에이전트가 전부 다시 읽지 않고 지난번 이후 **실제로 바뀐 것만** 읽습니다 — 토큰 절약.
+ 
+ ### 6. 스킬과 명령어
+ 
+-세 스킬이 동작을 묶습니다: `handoff-ratelimit`(5시간 트리거), `handoff-session`(`/handoff` 명령군), `handoff-recover`(진단). 이들이 아래 `/handoff` 명령을 구동합니다.
++세 스킬이 동작을 묶습니다: `handoff-ratelimit`(5시간 트리거), `handoff-session`(`/handoff` 명령군), `handoff-doctor`(진단). 이들이 아래 `/handoff` 명령을 구동합니다.
+ 
+ ### 7. 내장 안전장치
+ 
+ 저장 전에 비밀값이 가려지고, 캡슐은 변조될 수 없으며, 캡슐은 항상 *참고* 자료로만 취급됩니다 — 현재 사용자 지시, 저장소 정책, 실제 파일, Git, 테스트가 모두 캡슐보다 우선합니다. [개인정보 & 안전](#개인정보--안전) 참고.
+ 
+ ### 8. 의존성 0, 크로스플랫폼 코어
+ 
+ 코어 전체가 순수 Node(기준 18)이며 **npm 의존성이 없습니다**. 컴파일할 것도, 업그레이드 때 깨질 것도 없습니다. Windows·macOS·Linux에서 Node 18/20/22로 테스트됩니다.
+ 
+ ---
+@@ -194,21 +194,21 @@ Claude Code (80% 사용)  →  캡슐 작성  →  Codex 열기  →  Codex가 
+ > ⚠️ **Claude Code에서는 플러그인 명령이 플러그인 이름으로 네임스페이스됩니다.** 아래 각 동작은 슬래시 메뉴에 **`/ai-handoff:handoff-<동작>`** 로 각각 뜹니다 — 예: `/ai-handoff:handoff-status`, `/ai-handoff:handoff-config set notification.method off`. bare **`/ai-handoff:handoff`** 는 기다리는 캡슐을 이어받습니다(`/ai-handoff:handoff <동작>` 형태도 받음). bare `/handoff`는 *"Unknown command"* 가 뜹니다. 아래 표는 읽기 편하게 짧은 `/handoff <동작>` 형태로 적었습니다. **Codex**에서는 이 동작들이 번들 스킬에서 나오며 model-invoked입니다 — 그냥 말로 요청하세요 (예: *"내 ai-handoff 상태 보여줘"*).
+ 
+ | 명령어 | 하는 일 |
+ |---|---|
+ | `/handoff` | 기다리는 캡슐을 이어받습니다 (가장 흔한 동작). |
+ | `/handoff status` | 현재 인계 상태를 봅니다. |
+ | `/handoff preview` | 주입하기 전에 캡슐을 미리 봅니다. |
+ | `/handoff checkpoint` | 지금 바로 캡슐을 수동 저장합니다. |
+ | `/handoff create` | `ask` 모드에서 캡슐 생성을 승인합니다. |
+ | `/handoff skip` | `ask` 모드에서 이번 사용 창에 대해 건너뜁니다. |
+-| `/handoff recover` | 캡슐 / 훅 / 버전 문제를 진단합니다. |
++| `/handoff doctor` | 캡슐 / 훅 / 버전 문제를 진단합니다. |
+ | `/handoff config` | 설정 보기/변경 (임계치·모드·알림·메모리). |
+ 
+ 메모리는 **명시적**입니다: 직접 선택할 때만, 그리고 실제 증거(통과한 테스트, 명령 결과, 소스 파일)가 있을 때만 사실을 저장합니다. 숨은 추론이나 전체 대화 기록은 절대 저장하지 않습니다.
+ 
+ ---
+ 
+ ## 설정
+ 
+ 아래는 **기본값**이며, 플러그인 안의 [`config/defaults.json`](config/defaults.json) 에 들어 있습니다:
+ 
+diff --git a/README.md b/README.md
+index 57d28d0..17ee8b4 100644
+--- a/README.md
++++ b/README.md
+@@ -170,21 +170,21 @@ You choose how eager the plugin is, globally or per project: `auto` (hand off si
+ ### 4. Verified memory recall
+ 
+ Separate from the one-use capsule, the plugin keeps a **long-lived memory** of facts about your project — but only facts backed by evidence (a passing test, a command result, a source file). On your first prompt of a session, it recalls only the relevant, evidence-backed memory, within a token budget (default 800). It never stores guesses, hidden reasoning, or whole transcripts.
+ 
+ ### 5. Progressive project knowledge
+ 
+ Alongside the capsule, the plugin can carry project guidelines, formats, and gotchas. A thin **INDEX** plus a **manifest** (file hashes + dirty flags) lets the receiving agent read only what actually changed since last time, instead of re-reading everything — saving tokens.
+ 
+ ### 6. Skills and commands
+ 
+-Three skills package the behavior: `handoff-ratelimit` (the 5-hour trigger), `handoff-session` (the `/handoff` command family), and `handoff-recover` (diagnostics). They drive the `/handoff` commands listed below.
++Three skills package the behavior: `handoff-ratelimit` (the 5-hour trigger), `handoff-session` (the `/handoff` command family), and `handoff-doctor` (diagnostics). They drive the `/handoff` commands listed below.
+ 
+ ### 7. Built-in safety
+ 
+ Secrets are redacted before storage, capsules cannot be tampered with, and a capsule is always treated as *reference* material — your current instructions, the repo's policy, the real files, Git, and tests all outrank it. See [Privacy & safety](#privacy--safety).
+ 
+ ### 8. Zero-dependency, cross-platform core
+ 
+ The entire core is plain Node (baseline 18) with **no npm dependencies**, so there is nothing to compile and nothing to break on upgrade. It is tested on Node 18/20/22 across Windows, macOS, and Linux.
+ 
+ ---
+@@ -194,21 +194,21 @@ The entire core is plain Node (baseline 18) with **no npm dependencies**, so the
+ > ⚠️ **In Claude Code, plugin commands are namespaced by the plugin name.** Each action below is its own entry in the slash menu as **`/ai-handoff:handoff-<action>`** — e.g. `/ai-handoff:handoff-status`, `/ai-handoff:handoff-config set notification.method off`. The bare **`/ai-handoff:handoff`** resumes a pending capsule (it also accepts `/ai-handoff:handoff <action>`). A bare `/handoff` returns *"Unknown command"*. The table below uses the short `/handoff <action>` form for readability. In **Codex**, these actions come from the bundled skills and are model-invoked — just ask in plain language (e.g. *"show my ai-handoff status"*).
+ 
+ | Command | What it does |
+ |---|---|
+ | `/handoff` | Resume a waiting capsule (the most common action). |
+ | `/handoff status` | Show the current handoff state. |
+ | `/handoff preview` | Look at the capsule before injecting it. |
+ | `/handoff checkpoint` | Manually save a capsule right now. |
+ | `/handoff create` | In `ask` mode, approve creating the capsule. |
+ | `/handoff skip` | In `ask` mode, skip it for this usage window. |
+-| `/handoff recover` | Diagnose capsule / hook / version problems. |
++| `/handoff doctor` | Diagnose capsule / hook / version problems. |
+ | `/handoff config` | Show or change settings (threshold, mode, notification, memory). |
+ 
+ Memory is **explicit**: you save a fact only when you choose to, and only with real evidence (a passing test, a command result, a source file). It never stores hidden reasoning or full transcripts.
+ 
+ ---
+ 
+ ## Settings
+ 
+ These are the **defaults**, shipped inside the plugin at [`config/defaults.json`](config/defaults.json):
+ 
+diff --git a/README.zh.md b/README.zh.md
+index 021e9b7..38bc1bb 100644
+--- a/README.zh.md
++++ b/README.zh.md
+@@ -170,21 +170,21 @@ Claude Code (已用 80%)  →  写入胶囊  →  打开 Codex  →  Codex 接
+ ### 4. 已核实记忆的召回
+ 
+ 与一次性的胶囊不同，插件会保留关于项目的 **长期记忆** —— 但只保留有证据（通过的测试、命令结果、源文件）支撑的事实。在会话的第一条提示时，它只在 token 预算（默认 800）内召回相关且有证据的记忆。它绝不保存猜测、隐藏推理或完整对话记录。
+ 
+ ### 5. 渐进式项目知识
+ 
+ 除胶囊外，插件还能携带项目的规范、格式与坑点。借助精简的 **INDEX** 和 **manifest**（文件哈希 + dirty 标记），接收方只读取自上次以来 **真正改动的部分**，而不是全部重读 —— 节省 token。
+ 
+ ### 6. 技能与命令
+ 
+-三个技能封装了这些行为：`handoff-ratelimit`（五小时触发）、`handoff-session`（`/handoff` 命令族）、`handoff-recover`（诊断）。它们驱动下面列出的 `/handoff` 命令。
++三个技能封装了这些行为：`handoff-ratelimit`（五小时触发）、`handoff-session`（`/handoff` 命令族）、`handoff-doctor`（诊断）。它们驱动下面列出的 `/handoff` 命令。
+ 
+ ### 7. 内置安全机制
+ 
+ 机密在保存前被抹去，胶囊无法被篡改，而且胶囊始终被当作 *参考* 材料 —— 当前的用户指示、仓库策略、真实文件、Git 与测试都比它优先。见 [隐私与安全](#隐私与安全)。
+ 
+ ### 8. 零依赖、跨平台内核
+ 
+ 整个内核是纯 Node（基线 18），**没有 npm 依赖**，因此没有需要编译的东西，升级也不会被破坏。它在 Windows、macOS、Linux 上以 Node 18/20/22 进行测试。
+ 
+ ---
+@@ -194,21 +194,21 @@ Claude Code (已用 80%)  →  写入胶囊  →  打开 Codex  →  Codex 接
+ > ⚠️ **在 Claude Code 中，插件命令会按插件名加上命名空间。** 下面每个动作都会作为独立条目出现在斜杠菜单中，形如 **`/ai-handoff:handoff-<动作>`** —— 例如 `/ai-handoff:handoff-status`、`/ai-handoff:handoff-config set notification.method off`。裸的 **`/ai-handoff:handoff`** 用于恢复待处理的胶囊（也接受 `/ai-handoff:handoff <动作>` 形式）。裸的 `/handoff` 会返回 *“Unknown command”*。下表为便于阅读使用了简短的 `/handoff <动作>` 写法。在 **Codex** 中，这些动作来自内置技能，是 model-invoked 的 —— 直接用自然语言提出即可（例如 *“显示我的 ai-handoff 状态”*）。
+ 
+ | 命令 | 作用 |
+ |---|---|
+ | `/handoff` | 恢复一个等待中的胶囊（最常用的操作）。 |
+ | `/handoff status` | 查看当前交接状态。 |
+ | `/handoff preview` | 在注入之前先查看胶囊。 |
+ | `/handoff checkpoint` | 立刻手动保存一个胶囊。 |
+ | `/handoff create` | 在 `ask` 模式下批准创建胶囊。 |
+ | `/handoff skip` | 在 `ask` 模式下跳过本次使用窗口。 |
+-| `/handoff recover` | 诊断胶囊 / 钩子 / 版本问题。 |
++| `/handoff doctor` | 诊断胶囊 / 钩子 / 版本问题。 |
+ | `/handoff config` | 查看 / 修改设置（阈值、模式、通知、记忆）。 |
+ 
+ 记忆是 **显式的**：只有你主动选择、并且有真实证据（通过的测试、命令结果、源文件）时，才会保存事实。它绝不保存隐藏的推理或完整对话记录。
+ 
+ ---
+ 
+ ## 设置
+ 
+ 以下是 **默认值**，随插件内置于 [`config/defaults.json`](config/defaults.json)：
+ 
+diff --git a/core/cli.mjs b/core/cli.mjs
+index 3ed5373..3b7315f 100644
+--- a/core/cli.mjs
++++ b/core/cli.mjs
+@@ -9,21 +9,21 @@ import { recordClaudeRateLimit, readClaudeRateLimit } from './sensors/claude-sta
+ import { handleStop } from './hooks/stop.mjs';
+ import {
+   prepareSessionStart, finalizeSessionStart, abortSessionStart,
+ } from './hooks/session-start.mjs';
+ import { loadConfig } from './lib/config.mjs';
+ import { configPath } from './lib/paths.mjs';
+ import {
+   setConfigValue, unsetConfigValue, getAt, knownKeys,
+ } from './lib/config-edit.mjs';
+ import {
+-  statusFor, previewFor, createFromApproval, skipApproval, recoverFor,
++  statusFor, previewFor, createFromApproval, skipApproval, doctorFor,
+ } from './hooks/handoff.mjs';
+ import { buildCheckpointCapsule } from './capsule/checkpoint.mjs';
+ import { publishCapsule } from './capsule/store.mjs';
+ import {
+   installClaudeStatusline, restoreClaudeStatusline, defaultClaudeSettingsPath,
+   runPreviousStatusline,
+ } from './setup/claude-statusline.mjs';
+ import { buildMemoryShard, storeMemoryShard, readVerifiedShards } from './memory/store.mjs';
+ import { rankMemoryShards, renderMemoryRecall } from './memory/recall.mjs';
+ import { prepareUserPrompt, finalizeUserPrompt } from './hooks/user-prompt.mjs';
+@@ -190,23 +190,23 @@ async function handoffCreate(args) {
+   await writeStdout(JSON.stringify(createFromApproval({
+     cwd: input.cwd || process.cwd(), sentinel: input.sentinel || {},
+   })) + '\n');
+ }
+ 
+ async function handoffSkip(args) {
+   const input = await readInput(args);
+   await writeStdout(JSON.stringify(skipApproval({ cwd: input.cwd || process.cwd() })) + '\n');
+ }
+ 
+-async function handoffRecover(args) {
++async function handoffDoctor(args) {
+   const input = await readInput(args);
+-  await writeStdout(JSON.stringify(recoverFor(input.cwd || process.cwd()), null, 2) + '\n');
++  await writeStdout(JSON.stringify(doctorFor(input.cwd || process.cwd()), null, 2) + '\n');
+ }
+ 
+ async function hookUserPrompt(args) {
+   const input = await readInput(args);
+   const config = loadConfig({ path: configPath() });
+   if (config.memory?.auto_recall === false) return;
+   const result = prepareUserPrompt({
+     input, agent: argValue(args, '--agent', 'codex'),
+     tokenBudget: config.memory?.auto_recall_token_budget ?? 800,
+   });
+@@ -279,21 +279,21 @@ const commands = {
+   'sensor:claude-statusline': sensorClaudeStatusline,
+   'hook:stop': hookStop,
+   'hook:session-start': hookSessionStart,
+   'hook:user-prompt': hookUserPrompt,
+   'handoff:status': handoffStatus,
+   'handoff:preview': handoffPreview,
+   'handoff:resume': handoffResume,
+   'handoff:checkpoint': handoffCheckpoint,
+   'handoff:create': handoffCreate,
+   'handoff:skip': handoffSkip,
+-  'handoff:recover': handoffRecover,
++  'handoff:doctor': handoffDoctor,
+   'memory:remember': memoryRemember,
+   'memory:recall': memoryRecall,
+   'setup:claude-statusline': setupClaudeStatusline,
+   'config:show': configShow,
+   'config:get': configGet,
+   'config:set': configSet,
+   'config:unset': configUnset,
+ };
+ 
+ const run = commands[command];
+diff --git a/core/hooks/handoff.mjs b/core/hooks/handoff.mjs
+index df3eba4..bba3f51 100644
+--- a/core/hooks/handoff.mjs
++++ b/core/hooks/handoff.mjs
+@@ -1,15 +1,18 @@
+-import { projectFingerprint } from '../lib/fingerprint.mjs';
++import { projectFingerprint, projectFingerprintInfo } from '../lib/fingerprint.mjs';
++import { readdirSync, readFileSync, existsSync, realpathSync } from 'node:fs';
++import { join } from 'node:path';
+ import { findPendingCapsule, verifyStoredCapsule } from '../capsule/store.mjs';
+ import { publishCapsule } from '../capsule/store.mjs';
+ import { findApproval, resolveApproval } from '../capsule/approval.mjs';
+ import { buildCheckpointCapsule } from '../capsule/checkpoint.mjs';
++import { dataRoot } from '../lib/paths.mjs';
+ 
+ export function statusFor(cwd) {
+   const fp = projectFingerprint(cwd);
+   const p = findPendingCapsule(fp);
+   const approval = findApproval(fp);
+   return {
+     fingerprint: fp,
+     pending: !!(p && p.capsule),
+     taskId: p && p.taskId,
+     state: p && p.state && p.state.status,
+@@ -65,33 +68,68 @@ export function previewFor(cwd) {
+   return {
+     pending: true,
+     valid: true,
+     taskId: p.taskId,
+     goal: c.task && c.task.goal,
+     source: c.source && c.source.agent,
+     next_actions: (c.task && c.task.next_actions) || [],
+   };
+ }
+ 
+-export function recoverFor(cwd, { now = Date.now() } = {}) {
+-  const fingerprint = projectFingerprint(cwd);
++function scanOtherPending(currentFp) {
++  const projects = join(dataRoot(), 'projects');
++  const out = [];
++  let names = [];
++  try { names = readdirSync(projects); } catch { return out; }
++  for (const fp of names) {
++    if (fp === currentFp) continue;
++    const hdir = join(projects, fp, 'handoff');
++    let tasks = [];
++    try { tasks = readdirSync(hdir); } catch { continue; }
++    for (const taskId of tasks) {
++      const statePath = join(hdir, taskId, 'state.json');
++      const capPath = join(hdir, taskId, 'capsule.json');
++      if (!existsSync(statePath) || !existsSync(capPath)) continue;
++      let state; let cap;
++      try { state = JSON.parse(readFileSync(statePath, 'utf8')); cap = JSON.parse(readFileSync(capPath, 'utf8')); }
++      catch { continue; }
++      if (state.status !== 'AVAILABLE' && state.status !== 'DEGRADED_AVAILABLE') continue;
++      out.push({
++        fingerprint: fp, taskId,
++        goal: cap.task && cap.task.goal,
++        source: cap.source && cap.source.agent,
++        branch: cap.project && cap.project.git_branch,
++      });
++    }
++  }
++  return out;
++}
++
++export function doctorFor(cwd, { now = Date.now() } = {}) {
++  const { fingerprint, basis } = projectFingerprintInfo(cwd);
++  let cwdResolved = cwd;
++  try { cwdResolved = realpathSync(cwd); } catch {}
+   const pending = findPendingCapsule(fingerprint, { now });
+   const approval = findApproval(fingerprint);
+   const issues = [];
+   let verified = null;
+   if (pending?.capsule) {
+     verified = verifyStoredCapsule(fingerprint, pending.taskId, { now });
+     issues.push(...verified.errors);
+   }
+   return {
+     fingerprint,
++    basis,
++    cwdResolved,
++    dataRoot: dataRoot(),
+     healthy: issues.length === 0,
+     issues,
+     pending: pending ? {
+       taskId: pending.taskId,
+       status: pending.state.status,
+       recoveredAt: pending.state.recovered_at || null,
+       verified: verified?.valid ?? false,
+     } : null,
+     approval: approval ? { key: approval.key, status: approval.status } : null,
++    otherPending: scanOtherPending(fingerprint),
+   };
+ }
+diff --git a/skills/handoff-doctor/SKILL.md b/skills/handoff-doctor/SKILL.md
+new file mode 100644
+index 0000000..17a7477
+--- /dev/null
++++ b/skills/handoff-doctor/SKILL.md
+@@ -0,0 +1,15 @@
++---
++name: handoff-doctor
++description: Diagnose why a handoff is not appearing — fingerprint/basis, store location, capsule integrity, stale claims, approval state, and capsules pending under a different directory/fingerprint.
++---
++
++# handoff-doctor
++
++Run `handoff:doctor --cwd "<project dir>"`. Report `basis` (how the project
++fingerprint was derived: git remote / git root / path), `dataRoot` (where
++capsules live), `cwdResolved`, current `pending`/`issues`, and `approval`.
++
++If `otherPending` is non-empty, a capsule exists under a DIFFERENT fingerprint —
++tell the user which directory/remote it belongs to and that both agents must run
++from the same project (a git repo gives a path-independent remote-based
++fingerprint). Do not consume, rewrite, or delete a capsule during diagnosis.
+diff --git a/skills/handoff-recover/SKILL.md b/skills/handoff-recover/SKILL.md
+deleted file mode 100644
+index f88ceca..0000000
+--- a/skills/handoff-recover/SKILL.md
++++ /dev/null
+@@ -1,14 +0,0 @@
+----
+-name: handoff-recover
+-description: Diagnose capsule integrity, stale claims, target mismatch, and pending approval state when automatic handoff does not arrive.
+----
+-
+-# handoff-recover
+-
+-Run `handoff:recover` with the current working directory. Report its concrete
+-`issues`, pending lifecycle state, recovery timestamp, and approval state.
+-
+-Do not consume, rewrite, or delete a capsule during diagnosis. Expired claim
+-leases may be recovered automatically to `AVAILABLE`; invalid capsules remain
+-diagnostic findings and must not be injected. Recommend reinstalling or trusting
+-hooks only when the package files are valid and the user has reviewed them.
+diff --git a/skills/handoff-session/SKILL.md b/skills/handoff-session/SKILL.md
+index fe1af7f..9d81115 100644
+--- a/skills/handoff-session/SKILL.md
++++ b/skills/handoff-session/SKILL.md
+@@ -6,29 +6,29 @@ description: Use when the user runs /handoff or wants to resume, inspect, create
+ # handoff-session
+ 
+ Backs the `/handoff` command for both Claude Code and Codex.
+ 
+ - `/handoff` (bare) -> resume: ingest the pending capsule and continue.
+ - `/handoff status` -> show whether a capsule is pending.
+ - `/handoff preview` -> show the pending capsule without consuming it.
+ - `/handoff checkpoint` -> author a rich capsule now (provide goal + next_actions).
+ - `/handoff create` -> approve the pending ask and author a rich capsule.
+ - `/handoff skip` -> decline the pending ask for this usage window.
+-- `/handoff recover` -> diagnose capsule integrity, claim recovery, and approval state.
++- `/handoff doctor` -> diagnose capsule integrity, claim recovery, and approval state.
+ - `/handoff remember` -> store one verified durable fact with concrete evidence.
+ - `/handoff recall` -> retrieve relevant verified memory without consuming it.
+ - `/handoff config` -> show or change settings (threshold, mode, notification, memory).
+ 
+ Run the underlying CLI. Pass the project directory with the `--cwd` flag rather
+ than embedding it in JSON — argv keeps backslashes literal, so Windows paths
+ need no escaping. If you omit `--cwd`, the CLI uses the process working
+-directory. `status`, `preview`, `skip`, `create`, and `recover` then need
++directory. `status`, `preview`, `skip`, `create`, and `doctor` then need
+ nothing on stdin:
+ 
+     node <pluginRoot>/core/cli.mjs handoff:status --cwd "<project dir>"
+ 
+ For payloads with rich JSON (`checkpoint`, `memory:remember`), do NOT pipe the
+ JSON through the shell on Windows: PowerShell prepends a UTF-8 BOM and mangles
+ backslashes. Write the JSON to a UTF-8 file with your native file API and pass
+ its path with `--input`:
+ 
+     node <pluginRoot>/core/cli.mjs handoff:checkpoint --agent <agent> --input <file.json>
+@@ -38,21 +38,21 @@ where `<file.json>` holds
+ Piping JSON on stdin still works (a leading BOM is stripped automatically) and
+ is fine on macOS/Linux:
+ 
+     echo '{"cwd":"<cwd>","sentinel":{...}}' | node <pluginRoot>/core/cli.mjs handoff:checkpoint --agent <agent>
+ 
+ `<agent>` must be your own runtime identity: `claude-code` on Claude Code or
+ `codex` on Codex. These are the only accepted values; any other string (e.g.
+ `claude`) fails capsule validation.
+ 
+ For `create`, use `handoff:create` and the same sentinel. For `skip` and
+-`recover`, use `handoff:skip` and `handoff:recover`.
++`doctor`, use `handoff:skip` and `handoff:doctor`.
+ 
+ For `remember`, call `memory:remember` with `fact`, `evidence`, optional `tags`
+ and `paths`. Only call it after evidence was actually checked. Never store model
+ guesses, hidden reasoning, secrets, or transcript text. For `recall`, call
+ `memory:recall` with the user's query as `prompt`.
+ 
+ For `config`, translate the user's request into one CLI call. The settings are
+ written to the user config file; the bundled `config/defaults.json` is never
+ touched.
+ 
+diff --git a/tests/cli-doctor.test.mjs b/tests/cli-doctor.test.mjs
+new file mode 100644
+index 0000000..811bdfe
+--- /dev/null
++++ b/tests/cli-doctor.test.mjs
+@@ -0,0 +1,25 @@
++import { test } from 'node:test';
++import assert from 'node:assert/strict';
++import { execFileSync } from 'node:child_process';
++import { mkdtempSync } from 'node:fs';
++import { tmpdir } from 'node:os';
++import { dirname, join } from 'node:path';
++import { fileURLToPath } from 'node:url';
++
++const cli = join(dirname(fileURLToPath(import.meta.url)), '..', 'core', 'cli.mjs');
++const run = (args, input, env) =>
++  execFileSync(process.execPath, [cli, ...args], { input, encoding: 'utf8', env: { ...process.env, ...env } });
++
++test('handoff:doctor reports basis and cross-fingerprint pending capsules', () => {
++  const root = mkdtempSync(join(tmpdir(), 'ah-doc-'));
++  const projA = mkdtempSync(join(tmpdir(), 'ah-a-'));
++  const projB = mkdtempSync(join(tmpdir(), 'ah-b-'));
++  const env = { AI_HANDOFF_ROOT: root };
++  run(['handoff:checkpoint', '--agent', 'codex', '--cwd', projA],
++    JSON.stringify({ session_id: 's', sentinel: { goal: 'find me', next_actions: ['x'] } }), env);
++  const out = JSON.parse(run(['handoff:doctor', '--cwd', projB], '', env));
++  assert.equal(out.basis.type, 'path');
++  assert.equal(out.pending, null);
++  assert.equal(out.otherPending.length, 1);
++  assert.equal(out.otherPending[0].goal, 'find me');
++});
+diff --git a/tests/handoff-query.test.mjs b/tests/handoff-query.test.mjs
+index 9307a87..b1dc414 100644
+--- a/tests/handoff-query.test.mjs
++++ b/tests/handoff-query.test.mjs
+@@ -1,16 +1,16 @@
+ import { test } from 'node:test';
+ import assert from 'node:assert/strict';
+ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+ import { tmpdir } from 'node:os';
+ import { join } from 'node:path';
+-import { statusFor, previewFor, recoverFor } from '../core/hooks/handoff.mjs';
++import { statusFor, previewFor, doctorFor } from '../core/hooks/handoff.mjs';
+ import { projectFingerprint } from '../core/lib/fingerprint.mjs';
+ import { publishCapsule, findPendingCapsule } from '../core/capsule/store.mjs';
+ import { buildCapsule } from '../core/capsule/create.mjs';
+ 
+ function withRoot(fn) {
+   const prev = process.env.AI_HANDOFF_ROOT;
+   process.env.AI_HANDOFF_ROOT = mkdtempSync(join(tmpdir(), 'ah-hq-'));
+   try { return fn(); } finally {
+     if (prev === undefined) delete process.env.AI_HANDOFF_ROOT; else process.env.AI_HANDOFF_ROOT = prev;
+   }
+@@ -36,25 +36,25 @@ test('statusFor and previewFor report pending without consuming', () => withRoot
+   assert.equal(p.goal, 'do X');
+   assert.ok(findPendingCapsule(fp));
+ }));
+ 
+ test('no pending → not pending', () => withRoot(() => {
+   const cwd = mkdtempSync(join(tmpdir(), 'ah-proj-'));
+   assert.equal(statusFor(cwd).pending, false);
+   assert.equal(previewFor(cwd).pending, false);
+ }));
+ 
+-test('recover diagnoses pending capsule integrity without consuming it', () => withRoot(() => {
++test('doctor diagnoses pending capsule integrity without consuming it', () => withRoot(() => {
+   const cwd = mkdtempSync(join(tmpdir(), 'ah-proj-'));
+   const fp = projectFingerprint(cwd);
+   publishCapsule(fp, cap(fp), { now: 1 });
+-  const result = recoverFor(cwd, { now: 2 });
++  const result = doctorFor(cwd, { now: 2 });
+   assert.equal(result.healthy, true);
+   assert.equal(result.pending.status, 'AVAILABLE');
+   assert.deepEqual(result.issues, []);
+   assert.ok(findPendingCapsule(fp));
+ }));
+ 
+ test('preview never exposes an unverified tampered capsule', () => withRoot(() => {
+   const cwd = mkdtempSync(join(tmpdir(), 'ah-proj-'));
+   const fp = projectFingerprint(cwd);
+   const published = publishCapsule(fp, cap(fp), { now: 1 });
+diff --git a/tests/skills-present.test.mjs b/tests/skills-present.test.mjs
+index 3416359..bdead27 100644
+--- a/tests/skills-present.test.mjs
++++ b/tests/skills-present.test.mjs
+@@ -1,21 +1,21 @@
+ import { test } from 'node:test';
+ import assert from 'node:assert/strict';
+ import { readFileSync } from 'node:fs';
+ import { dirname, join } from 'node:path';
+ import { fileURLToPath } from 'node:url';
+ 
+ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+ const files = [
+   'skills/handoff-ratelimit/SKILL.md',
+   'skills/handoff-session/SKILL.md',
+-  'skills/handoff-recover/SKILL.md',
++  'skills/handoff-doctor/SKILL.md',
+   'skills/handoff/SKILL.md',
+   'skills/handoff-status/SKILL.md',
+   'skills/handoff-preview/SKILL.md',
+   'skills/handoff-checkpoint/SKILL.md',
+   'skills/handoff-create/SKILL.md',
+   'skills/handoff-skip/SKILL.md',
+   'skills/handoff-config/SKILL.md',
+ ];
+ 
+ test('skill files exist with frontmatter', () => {

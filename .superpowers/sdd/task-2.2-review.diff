@@ -1,0 +1,244 @@
+=== COMMITS f063ea6..HEAD ===
+0a50fce feat: record handoff lifecycle events and add handoff:history
+
+=== STAT ===
+ core/capsule/store.mjs     | 10 +++++++++-
+ core/cli.mjs               |  9 +++++++++
+ core/hooks/handoff.mjs     |  3 +++
+ tests/cli-handoff.test.mjs | 10 ++++++++++
+ 4 files changed, 31 insertions(+), 1 deletion(-)
+
+=== DIFF -U10 ===
+diff --git a/core/capsule/store.mjs b/core/capsule/store.mjs
+index 7c7087d..0e7761b 100644
+--- a/core/capsule/store.mjs
++++ b/core/capsule/store.mjs
+@@ -1,18 +1,19 @@
+-import { join } from 'node:path';
++import { join, basename, dirname } from 'node:path';
+ import { existsSync, readFileSync, readdirSync, statSync, unlinkSync } from 'node:fs';
+ import { handoffDir } from '../lib/paths.mjs';
+ import { writeFileAtomic, acquireLock, releaseLock, ownsLock } from '../lib/fsx.mjs';
+ import { sha256Hex } from '../lib/hash.mjs';
+ import { transition } from './lifecycle.mjs';
+ import { validateCapsule, capsulePayloadHash } from './create.mjs';
+ import { refreshProjectIndex } from '../project/index-store.mjs';
++import { appendHistory } from './history.mjs';
+ 
+ function taskDir(fingerprint, taskId) { return join(handoffDir(fingerprint), taskId); }
+ const PENDING = new Set(['AVAILABLE', 'DEGRADED_AVAILABLE']);
+ 
+ export function readState(statePath) {
+   try { return JSON.parse(readFileSync(statePath, 'utf8')); } catch { return {}; }
+ }
+ 
+ export function writeState(statePath, obj) {
+   writeFileAtomic(statePath, JSON.stringify(obj, null, 2) + '\n');
+@@ -43,20 +44,25 @@ export function publishCapsule(fingerprint, capsule, { status = 'AVAILABLE', now
+       if (!existsSync(statePath)) {
+         refreshProjectIndex(fingerprint, capsule.task_id, { now });
+         writeState(statePath, { status, task_id: capsule.task_id, updated_at: now });
+       }
+       return { dir, capsulePath, statePath };
+     }
+     writeFileAtomic(capsulePath, text);
+     writeFileAtomic(shaPath, sha256Hex(text) + '\n');
+     refreshProjectIndex(fingerprint, capsule.task_id, { now });
+     writeState(statePath, { status, task_id: capsule.task_id, updated_at: now });
++    appendHistory(fingerprint, {
++      event: 'created', taskId: capsule.task_id,
++      agent: capsule.source?.agent, source: capsule.source?.agent, target: capsule.target?.agent,
++      trigger: capsule.trigger?.type, observed_percent: capsule.trigger?.observed_percent ?? null,
++    }, { now });
+     expireOtherPending(fingerprint, capsule.task_id, { now });
+     return { dir, capsulePath, statePath };
+   } finally {
+     releaseLock(publishLock);
+   }
+ }
+ 
+ function expireOtherPending(fingerprint, keepTaskId, { now = Date.now() } = {}) {
+   const hd = handoffDir(fingerprint);
+   if (!existsSync(hd)) return;
+@@ -114,20 +120,22 @@ export function claimCapsule(fingerprint, taskId, { leaseMs = 30000, now = Date.
+     return null;
+   }
+ }
+ 
+ export function consumeCapsule(claim, { now = Date.now() } = {}) {
+   if (!ownsLock(claim?.lock)) throw new Error('stale claim cannot consume capsule');
+   const st = readState(claim.statePath);
+   const next = { ...st, status: transition(st.status, 'CONSUMED'), consumed_at: now };
+   delete next.claim_expires_at;
+   writeState(claim.statePath, next);
++  const fp = basename(dirname(dirname(dirname(claim.statePath))));
++  appendHistory(fp, { event: 'resumed', taskId: next.task_id ?? st.task_id }, { now });
+   releaseLock(claim.lock);
+ }
+ 
+ export function releaseClaim(claim) {
+   if (!ownsLock(claim?.lock)) throw new Error('stale claim cannot release capsule');
+   const st = readState(claim.statePath);
+   const next = { ...st, status: transition(st.status, 'AVAILABLE') };
+   delete next.claim_expires_at;
+   writeState(claim.statePath, next);
+   releaseLock(claim.lock);
+diff --git a/core/cli.mjs b/core/cli.mjs
+index 3b7315f..e319fe1 100644
+--- a/core/cli.mjs
++++ b/core/cli.mjs
+@@ -21,20 +21,21 @@ import {
+ import { buildCheckpointCapsule } from './capsule/checkpoint.mjs';
+ import { publishCapsule } from './capsule/store.mjs';
+ import {
+   installClaudeStatusline, restoreClaudeStatusline, defaultClaudeSettingsPath,
+   runPreviousStatusline,
+ } from './setup/claude-statusline.mjs';
+ import { buildMemoryShard, storeMemoryShard, readVerifiedShards } from './memory/store.mjs';
+ import { rankMemoryShards, renderMemoryRecall } from './memory/recall.mjs';
+ import { prepareUserPrompt, finalizeUserPrompt } from './hooks/user-prompt.mjs';
+ import { projectFingerprint } from './lib/fingerprint.mjs';
++import { readHistory } from './capsule/history.mjs';
+ import { gitContext } from './lib/gitctx.mjs';
+ 
+ function writeStdout(text) {
+   return new Promise((resolve, reject) => {
+     process.stdout.write(text, (error) => error ? reject(error) : resolve());
+   });
+ }
+ 
+ async function sensorRatelimit(args) {
+   const shadow = args.includes('--shadow');
+@@ -195,20 +196,27 @@ async function handoffCreate(args) {
+ async function handoffSkip(args) {
+   const input = await readInput(args);
+   await writeStdout(JSON.stringify(skipApproval({ cwd: input.cwd || process.cwd() })) + '\n');
+ }
+ 
+ async function handoffDoctor(args) {
+   const input = await readInput(args);
+   await writeStdout(JSON.stringify(doctorFor(input.cwd || process.cwd()), null, 2) + '\n');
+ }
+ 
++async function handoffHistory(args) {
++  const input = await readInput(args);
++  const limit = Number(argValue(args, '--limit', '20')) || 20;
++  const fp = projectFingerprint(input.cwd || process.cwd());
++  await writeStdout(JSON.stringify(readHistory(fp, { limit }), null, 2) + '\n');
++}
++
+ async function hookUserPrompt(args) {
+   const input = await readInput(args);
+   const config = loadConfig({ path: configPath() });
+   if (config.memory?.auto_recall === false) return;
+   const result = prepareUserPrompt({
+     input, agent: argValue(args, '--agent', 'codex'),
+     tokenBudget: config.memory?.auto_recall_token_budget ?? 800,
+   });
+   if (!result.injected) return;
+   await writeStdout(result.context + '\n');
+@@ -280,20 +288,21 @@ const commands = {
+   'hook:stop': hookStop,
+   'hook:session-start': hookSessionStart,
+   'hook:user-prompt': hookUserPrompt,
+   'handoff:status': handoffStatus,
+   'handoff:preview': handoffPreview,
+   'handoff:resume': handoffResume,
+   'handoff:checkpoint': handoffCheckpoint,
+   'handoff:create': handoffCreate,
+   'handoff:skip': handoffSkip,
+   'handoff:doctor': handoffDoctor,
++  'handoff:history': handoffHistory,
+   'memory:remember': memoryRemember,
+   'memory:recall': memoryRecall,
+   'setup:claude-statusline': setupClaudeStatusline,
+   'config:show': configShow,
+   'config:get': configGet,
+   'config:set': configSet,
+   'config:unset': configUnset,
+ };
+ 
+ const run = commands[command];
+diff --git a/core/hooks/handoff.mjs b/core/hooks/handoff.mjs
+index bba3f51..196388f 100644
+--- a/core/hooks/handoff.mjs
++++ b/core/hooks/handoff.mjs
+@@ -1,11 +1,12 @@
+ import { projectFingerprint, projectFingerprintInfo } from '../lib/fingerprint.mjs';
++import { appendHistory } from '../capsule/history.mjs';
+ import { readdirSync, readFileSync, existsSync, realpathSync } from 'node:fs';
+ import { join } from 'node:path';
+ import { findPendingCapsule, verifyStoredCapsule } from '../capsule/store.mjs';
+ import { publishCapsule } from '../capsule/store.mjs';
+ import { findApproval, resolveApproval } from '../capsule/approval.mjs';
+ import { buildCheckpointCapsule } from '../capsule/checkpoint.mjs';
+ import { dataRoot } from '../lib/paths.mjs';
+ 
+ export function statusFor(cwd) {
+   const fp = projectFingerprint(cwd);
+@@ -40,28 +41,30 @@ export function createFromApproval({ cwd, sentinel = {}, now = Date.now() }) {
+     checkpointKey: approval.key,
+     now,
+     trigger: {
+       type: 'rate_limit',
+       threshold_percent: context.threshold,
+       observed_percent: context.reading?.usedPercent,
+       measurement_source: context.reading?.source,
+     },
+   });
+   publishCapsule(fp, capsule, { status: semantic ? 'AVAILABLE' : 'DEGRADED_AVAILABLE', now });
++  appendHistory(fp, { event: 'created_from_approval', taskId: capsule.task_id, agent: context.agent }, { now });
+   return { created: true, taskId: capsule.task_id, fingerprint: fp, degraded: !semantic };
+ }
+ 
+ export function skipApproval({ cwd, now = Date.now() }) {
+   const fp = projectFingerprint(cwd);
+   const approval = findApproval(fp);
+   if (!approval) return { skipped: false, reason: 'no-awaiting-approval' };
+   resolveApproval(fp, { key: approval.key, decision: 'skip', now });
++  appendHistory(fp, { event: 'skipped', key: approval.key }, { now });
+   return { skipped: true, fingerprint: fp };
+ }
+ 
+ export function previewFor(cwd) {
+   const fp = projectFingerprint(cwd);
+   const p = findPendingCapsule(fp);
+   if (!p || !p.capsule) return { pending: false };
+   const verified = verifyStoredCapsule(fp, p.taskId);
+   if (!verified.valid) return { pending: true, valid: false, taskId: p.taskId, errors: verified.errors };
+   const c = verified.capsule;
+diff --git a/tests/cli-handoff.test.mjs b/tests/cli-handoff.test.mjs
+index e815d59..eee8ff3 100644
+--- a/tests/cli-handoff.test.mjs
++++ b/tests/cli-handoff.test.mjs
+@@ -73,20 +73,30 @@ test('handoff:create resolves persisted ask state and publishes capsule', () =>
+     else process.env.AI_HANDOFF_ROOT = previous;
+   }
+   const env = { AI_HANDOFF_ROOT: root };
+   const output = JSON.parse(run(['handoff:create'], JSON.stringify({
+     cwd, sentinel: { goal: 'approved cli capsule', next_actions: ['continue'] },
+   }), env));
+   assert.equal(output.created, true);
+   assert.equal(JSON.parse(run(['handoff:status'], JSON.stringify({ cwd }), env)).pending, true);
+ });
+ 
++test('handoff:history records created then resumed', () => {
++  const root = mkdtempSync(join(tmpdir(), 'ah-cliH-'));
++  const cwd = mkdtempSync(join(tmpdir(), 'ah-proj-'));
++  const env = { AI_HANDOFF_ROOT: root };
++  run(['handoff:checkpoint', '--agent', 'codex'], JSON.stringify({ cwd, session_id: 's', sentinel: { goal: 'g' } }), env);
++  run(['handoff:resume', '--agent', 'claude-code'], JSON.stringify({ cwd }), env);
++  const hist = JSON.parse(run(['handoff:history', '--cwd', cwd], '', env));
++  assert.deepEqual(hist.map((h) => h.event), ['created', 'resumed']);
++});
++
+ test('memory:remember stores evidence and memory:recall returns only relevant memory', () => {
+   const root = mkdtempSync(join(tmpdir(), 'ah-cliH-'));
+   const cwd = mkdtempSync(join(tmpdir(), 'ah-proj-'));
+   const env = { AI_HANDOFF_ROOT: root };
+   const remembered = JSON.parse(run(['memory:remember'], JSON.stringify({
+     cwd, fact: 'OAuth refresh tokens rotate', tags: ['oauth'],
+     evidence: [{ type: 'test', value: 'tests/auth passed' }],
+   }), env));
+   assert.equal(remembered.stored, true);
+   assert.match(run(['memory:recall'], JSON.stringify({ cwd, prompt: 'fix oauth' }), env), /OAuth refresh/);

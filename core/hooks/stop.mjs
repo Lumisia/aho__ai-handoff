@@ -10,6 +10,7 @@ import {
   generationSlotKey, saveGeneration, findGeneration, finishGeneration,
 } from '../capsule/generation.mjs';
 import { buildCheckpointCapsule } from '../capsule/checkpoint.mjs';
+import { appendSample, readSamples } from '../sensors/samples.mjs';
 
 function extractSentinel(text) {
   const match = String(text || '').match(/<handoff-capsule>\s*([\s\S]*?)\s*<\/handoff-capsule>/i);
@@ -74,6 +75,9 @@ export async function handleStop({ input, config, readSensor, agent, now = Date.
   if (tcfg.enabled === false) return { action: 'none', reason: 'disabled', fingerprint: fp };
 
   const reading = await readSensor();
+  if (reading && typeof reading.usedPercent === 'number') {
+    appendSample(fp, agent, { usedPercent: reading.usedPercent, at: now });
+  }
   const gpath = globalStatePath();
   const gstate = readState(gpath);
   const dkey = dedupeKey({
@@ -89,6 +93,9 @@ export async function handleStop({ input, config, readSensor, agent, now = Date.
     threshold: tcfg.threshold_percent,
     mode: tcfg.mode,
     deduped: hasSeen(gstate, dkey),
+    samples: readSamples(fp, agent),
+    burnRate: tcfg.burn_rate && { enabled: tcfg.burn_rate.enabled, runwayMinutes: tcfg.burn_rate.runway_minutes },
+    now,
   });
   if (ev.action === 'none') return { action: 'none', reason: ev.reason, fingerprint: fp };
 

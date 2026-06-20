@@ -1,0 +1,164 @@
+=== COMMITS 0a50fce..HEAD ===
+d3905fc feat: add Claude status-line handoff segment (AH <pct> + pending)
+
+=== STAT ===
+ config/defaults.json              |  3 ++-
+ core/cli.mjs                      | 11 ++++++++++-
+ core/lib/config-edit.mjs          |  1 +
+ core/lib/statusline-segment.mjs   | 10 ++++++++++
+ tests/statusline-segment.test.mjs | 29 +++++++++++++++++++++++++++++
+ 5 files changed, 52 insertions(+), 2 deletions(-)
+
+=== DIFF -U10 ===
+diff --git a/config/defaults.json b/config/defaults.json
+index d9550a4..6425d07 100644
+--- a/config/defaults.json
++++ b/config/defaults.json
+@@ -1,10 +1,11 @@
+ {
+   "triggers": {
+     "five_hour": { "enabled": true, "threshold_percent": 80, "mode": "ask" }
+   },
+   "capsule": { "completed_autocreate": false, "semantic_retry_limit": 0 },
+   "notification": { "method": "os", "fallback": "terminal" },
+   "handoff": { "target": "other-agent", "launcher": "notify", "already_running_requires_manual": true },
+   "memory": { "auto_recall": true, "auto_recall_token_budget": 800 },
+-  "sensors": { "claude": { "freshness_ms": 120000 } }
++  "sensors": { "claude": { "freshness_ms": 120000 } },
++  "statusline": { "show_handoff": true }
+ }
+diff --git a/core/cli.mjs b/core/cli.mjs
+index e319fe1..cab27cb 100644
+--- a/core/cli.mjs
++++ b/core/cli.mjs
+@@ -23,20 +23,21 @@ import { publishCapsule } from './capsule/store.mjs';
+ import {
+   installClaudeStatusline, restoreClaudeStatusline, defaultClaudeSettingsPath,
+   runPreviousStatusline,
+ } from './setup/claude-statusline.mjs';
+ import { buildMemoryShard, storeMemoryShard, readVerifiedShards } from './memory/store.mjs';
+ import { rankMemoryShards, renderMemoryRecall } from './memory/recall.mjs';
+ import { prepareUserPrompt, finalizeUserPrompt } from './hooks/user-prompt.mjs';
+ import { projectFingerprint } from './lib/fingerprint.mjs';
+ import { readHistory } from './capsule/history.mjs';
+ import { gitContext } from './lib/gitctx.mjs';
++import { statuslineSegment } from './lib/statusline-segment.mjs';
+ 
+ function writeStdout(text) {
+   return new Promise((resolve, reject) => {
+     process.stdout.write(text, (error) => error ? reject(error) : resolve());
+   });
+ }
+ 
+ async function sensorRatelimit(args) {
+   const shadow = args.includes('--shadow');
+   const readApp = process.env.AH_NO_APPSERVER === '1'
+@@ -108,22 +109,30 @@ function sensorReader(agent, input, config) {
+       freshnessMs: config.sensors?.claude?.freshness_ms ?? 120_000,
+     });
+   }
+   return codexSensorReader();
+ }
+ 
+ async function sensorClaudeStatusline() {
+   const raw = (await readStdin()) || '{}';
+   const input = JSON.parse(raw);
+   recordClaudeRateLimit(input);
+-  try { await writeStdout(runPreviousStatusline(raw)); }
++  const cfg = loadConfig({ path: configPath() });
++  const seg = statuslineSegment({
++    usedPercent: input?.rate_limits?.five_hour?.used_percentage,
++    cwd: input.cwd || input.workspace?.current_dir,
++    show: cfg.statusline?.show_handoff !== false,
++  });
++  let prev = '';
++  try { prev = runPreviousStatusline(raw); }
+   catch (error) { process.stderr.write(`[handoff] previous statusLine failed: ${error.message}\n`); }
++  await writeStdout(seg ? (prev ? `${seg} | ${prev}` : seg + '\n') : prev);
+ }
+ 
+ async function hookStop(args) {
+   const agent = argValue(args, '--agent', 'codex');
+   const config = loadConfig({ path: configPath() });
+   const modeOverride = argValue(args, '--mode', null);
+   if (modeOverride) config.triggers.five_hour.mode = modeOverride;
+   const input = await readInput(args);
+   const result = await handleStop({ input, config, readSensor: sensorReader(agent, input, config), agent });
+   process.stderr.write(`[handoff] stop: ${result.action} (${result.reason})\n`);
+diff --git a/core/lib/config-edit.mjs b/core/lib/config-edit.mjs
+index 717e2aa..6d76ad3 100644
+--- a/core/lib/config-edit.mjs
++++ b/core/lib/config-edit.mjs
+@@ -6,20 +6,21 @@ import { writeFileAtomic } from './fsx.mjs';
+ // a typo can't silently write a config the runtime ignores.
+ export const CONFIG_KEYS = {
+   'triggers.five_hour.enabled': { type: 'boolean' },
+   'triggers.five_hour.threshold_percent': { type: 'number', min: 1, max: 100 },
+   'triggers.five_hour.mode': { type: 'enum', values: ['auto', 'ask', 'off'] },
+   'capsule.completed_autocreate': { type: 'boolean' },
+   'notification.method': { type: 'enum', values: ['os', 'terminal', 'off'] },
+   'notification.fallback': { type: 'enum', values: ['terminal', 'off'] },
+   'memory.auto_recall': { type: 'boolean' },
+   'memory.auto_recall_token_budget': { type: 'number', min: 1 },
++  'statusline.show_handoff': { type: 'boolean' },
+ };
+ 
+ function isObject(v) { return v && typeof v === 'object' && !Array.isArray(v); }
+ function clone(v) { return isObject(v) ? JSON.parse(JSON.stringify(v)) : {}; }
+ 
+ export function knownKeys() { return Object.keys(CONFIG_KEYS); }
+ 
+ // Accepts already-typed JSON values and forgiving strings ("80", "true").
+ export function validateKeyValue(key, raw) {
+   const spec = CONFIG_KEYS[key];
+diff --git a/core/lib/statusline-segment.mjs b/core/lib/statusline-segment.mjs
+new file mode 100644
+index 0000000..80cdfb2
+--- /dev/null
++++ b/core/lib/statusline-segment.mjs
+@@ -0,0 +1,10 @@
++import { statusFor } from '../hooks/handoff.mjs';
++
++export function statuslineSegment({ usedPercent, cwd, show = true } = {}) {
++  if (!show) return '';
++  const pct = typeof usedPercent === 'number' ? `${Math.round(usedPercent)}%` : null;
++  let pending = 0;
++  if (cwd) { try { if (statusFor(cwd).pending) pending = 1; } catch {} }
++  const head = pct ? `AH ${pct}` : 'AH';
++  return pending ? `${head} · ⏳${pending}` : head;
++}
+diff --git a/tests/statusline-segment.test.mjs b/tests/statusline-segment.test.mjs
+new file mode 100644
+index 0000000..a01c2bc
+--- /dev/null
++++ b/tests/statusline-segment.test.mjs
+@@ -0,0 +1,29 @@
++import { test } from 'node:test';
++import assert from 'node:assert/strict';
++import { mkdtempSync } from 'node:fs';
++import { tmpdir } from 'node:os';
++import { dirname, join } from 'node:path';
++import { fileURLToPath } from 'node:url';
++import { execFileSync } from 'node:child_process';
++import { statuslineSegment } from '../core/lib/statusline-segment.mjs';
++
++const cli = join(dirname(fileURLToPath(import.meta.url)), '..', 'core', 'cli.mjs');
++
++test('statuslineSegment shows usage only when no pending capsule', () => {
++  const cwd = mkdtempSync(join(tmpdir(), 'ah-sl-'));
++  assert.equal(statuslineSegment({ usedPercent: 82, cwd, show: true }), 'AH 82%');
++});
++
++test('statuslineSegment adds pending marker when a capsule is pending', () => {
++  const root = mkdtempSync(join(tmpdir(), 'ah-slr-'));
++  const cwd = mkdtempSync(join(tmpdir(), 'ah-slp-'));
++  process.env.AI_HANDOFF_ROOT = root;
++  execFileSync(process.execPath, [cli, 'handoff:checkpoint', '--agent', 'codex', '--cwd', cwd],
++    { input: JSON.stringify({ session_id: 's', sentinel: { goal: 'g' } }), encoding: 'utf8', env: process.env });
++  assert.equal(statuslineSegment({ usedPercent: 82, cwd, show: true }), 'AH 82% · ⏳1');
++  delete process.env.AI_HANDOFF_ROOT;
++});
++
++test('statuslineSegment returns empty when show is false', () => {
++  assert.equal(statuslineSegment({ usedPercent: 82, cwd: undefined, show: false }), '');
++});
