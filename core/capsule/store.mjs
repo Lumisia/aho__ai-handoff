@@ -22,7 +22,12 @@ export function publishCapsule(fingerprint, capsule, { status = 'AVAILABLE', now
   const validation = validateCapsule(capsule);
   const integrityOk = capsule.integrity?.payload_sha256 === `sha256:${capsulePayloadHash(capsule)}`;
   if (!validation.valid || !integrityOk || capsule.project?.fingerprint !== fingerprint) {
-    throw new Error('invalid capsule: schema, integrity, or project fingerprint mismatch');
+    const reasons = [...validation.errors];
+    if (!integrityOk) reasons.push('integrity payload_sha256 mismatch');
+    if (capsule.project?.fingerprint !== fingerprint) {
+      reasons.push(`project fingerprint mismatch (capsule=${capsule.project?.fingerprint ?? 'none'}, expected=${fingerprint})`);
+    }
+    throw new Error(`invalid capsule: ${reasons.join('; ') || 'schema, integrity, or project fingerprint mismatch'}`);
   }
   const dir = taskDir(fingerprint, capsule.task_id);
   const capsulePath = join(dir, 'capsule.json');

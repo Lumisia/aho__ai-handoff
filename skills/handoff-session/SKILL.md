@@ -27,6 +27,10 @@ For `checkpoint`, emit a sentinel JSON with your semantic summary:
     echo '{"cwd":"<cwd>","session_id":"<id>","sentinel":{"goal":"...","next_actions":["..."]}}' \
       | node <pluginRoot>/core/cli.mjs handoff:checkpoint --agent <agent>
 
+`<agent>` must be your own runtime identity: `claude-code` on Claude Code or
+`codex` on Codex. These are the only accepted values; any other string (e.g.
+`claude`) fails capsule validation.
+
 For `create`, use `handoff:create` and the same sentinel. For `skip` and
 `recover`, use `handoff:skip` and `handoff:recover`.
 

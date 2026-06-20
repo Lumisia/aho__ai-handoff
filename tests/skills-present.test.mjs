@@ -9,19 +9,20 @@ const files = [
   'skills/handoff-ratelimit/SKILL.md',
   'skills/handoff-session/SKILL.md',
   'skills/handoff-recover/SKILL.md',
-  'commands/handoff.md',
-  'commands/handoff-status.md',
-  'commands/handoff-preview.md',
-  'commands/handoff-checkpoint.md',
-  'commands/handoff-create.md',
-  'commands/handoff-skip.md',
-  'commands/handoff-config.md',
+  'skills/handoff/SKILL.md',
+  'skills/handoff-status/SKILL.md',
+  'skills/handoff-preview/SKILL.md',
+  'skills/handoff-checkpoint/SKILL.md',
+  'skills/handoff-create/SKILL.md',
+  'skills/handoff-skip/SKILL.md',
+  'skills/handoff-config/SKILL.md',
 ];
 
-test('skill/command files exist with frontmatter', () => {
+test('skill files exist with frontmatter', () => {
   for (const f of files) {
     const text = readFileSync(join(root, f), 'utf8');
     assert.match(text, /^---/, `${f} should start with frontmatter`);
+    assert.match(text, /name:/, `${f} should have a name`);
     assert.match(text, /description:/, `${f} should have a description`);
   }
 });

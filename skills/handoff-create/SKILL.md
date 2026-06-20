@@ -1,5 +1,6 @@
 ---
-description: Approve the pending ask and create a handoff capsule
+name: handoff-create
+description: Approve the pending ask and create a handoff capsule.
 ---
 
 Use the handoff-session skill to run `handoff:create`: approve the pending
