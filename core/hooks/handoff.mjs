@@ -7,6 +7,7 @@ import { publishCapsule } from '../capsule/store.mjs';
 import { findApproval, resolveApproval } from '../capsule/approval.mjs';
 import { buildCheckpointCapsule } from '../capsule/checkpoint.mjs';
 import { dataRoot } from '../lib/paths.mjs';
+import { stateReport } from '../lib/state-report.mjs';
 
 export function statusFor(cwd) {
   const fp = projectFingerprint(cwd);
@@ -134,5 +135,6 @@ export function doctorFor(cwd, { now = Date.now() } = {}) {
     } : null,
     approval: approval ? { key: approval.key, status: approval.status } : null,
     otherPending: scanOtherPending(fingerprint),
+    stateFiles: stateReport(fingerprint),
   };
 }
