@@ -19,7 +19,7 @@ That re-explaining is slow, error-prone, and easy to get wrong.
 Think of it like a **relay race**. When the first runner is about to tire, they pass the baton to the next runner — who keeps running from the exact same spot.
 
 1. **It watches your usage.** A small sensor reads how much of your 5-hour window you have used.
-2. **When you get close to the limit** (default: **80%**), it writes down exactly where you are — your goal, key decisions, next steps, current Git branch — into a small file called a **capsule**.
+2. **When you get close to the limit** (default: **80%**), it writes down exactly where you are — your goal, what you finished, what's left to do, and your current Git branch — into a small file called a **capsule**.
 3. **When you open the other tool**, it reads that capsule and shows the new agent precisely where to pick up.
 4. **It also remembers verified facts** about your project, and brings the relevant ones back in later sessions.
 
@@ -29,7 +29,7 @@ Everything happens **on your own computer**. There is no cloud server, no backgr
 
 | Word | What it really means |
 |---|---|
-| **Capsule** | A short, saved snapshot of your current task (goal, decisions, next actions, branch). Used **once**, then marked as consumed. |
+| **Capsule** | A short, saved snapshot of your current task (goal, completed work, open issues, next actions, changed files, branch). Used **once**, then marked as consumed. |
 | **Handoff** | Passing that snapshot from one agent (Claude Code or Codex) to the other. |
 | **Verified memory** | A durable fact about your project that is backed by evidence (a passing test, a command result, a source file) — never a guess. |
 | **Hook** | A small script the agent runs automatically at certain moments (when it starts, when it stops, when you send a prompt). |
@@ -165,7 +165,7 @@ The plugin never guesses your usage; it reads it from each tool's real interface
 
 ### 2. Automatic capsule handoff
 
-When you cross the threshold, the plugin builds a **capsule**: your goal, decisions, constraints, open issues, next actions, plus the real Git branch/commit and changed files. It is written with an atomic publish (temp file → flush → rename) so a half-written capsule can never be read. A capsule is **immutable** and **integrity-checked** (a hash signs its bytes); the receiving agent claims it with a short lease, verifies it, injects it, and only then marks it **consumed**. Each capsule is used once.
+When you cross the threshold, the plugin builds a **capsule**: your goal, completed work, open issues, next actions, plus the real Git branch/commit and the files changed so far. It is written with an atomic publish (temp file → flush → rename) so a half-written capsule can never be read. A capsule is **immutable** and **integrity-checked** (a content hash covers its bytes to detect corruption or edits); the receiving agent claims it with a short lease, verifies it, injects it, and only then marks it **consumed**. Each capsule is used once.
 
 ### 3. Three trigger modes
 
@@ -177,7 +177,7 @@ Separate from the one-use capsule, the plugin keeps a **long-lived memory** of f
 
 ### 5. Progressive project knowledge
 
-Alongside the capsule, the plugin can carry project guidelines, formats, and gotchas. A thin **INDEX** plus a **manifest** (file hashes + dirty flags) lets the receiving agent read only what actually changed since last time, instead of re-reading everything — saving tokens.
+Alongside the capsule, the plugin can carry project guidelines, formats, and gotchas. A thin **INDEX** plus a **manifest** (file hashes + dirty flags) lets the receiving agent read only what actually changed since last time, instead of re-reading everything — saving tokens. **Note:** this store is not auto-populated yet — there is no built-in command to register knowledge files, so by default the INDEX is empty. Explicit registration is planned.
 
 ### 6. Skills and commands
 
@@ -185,7 +185,7 @@ Three skills package the behavior: `handoff-ratelimit` (the 5-hour trigger), `ha
 
 ### 7. Built-in safety
 
-Secrets are redacted before storage, capsules cannot be tampered with, and a capsule is always treated as *reference* material — your current instructions, the repo's policy, the real files, Git, and tests all outrank it. See [Privacy & safety](#privacy--safety).
+Secrets are redacted before storage, capsules are integrity-checked (so corruption or edits are detected), and a capsule is always treated as *reference* material — your current instructions, the repo's policy, the real files, Git, and tests all outrank it. See [Privacy & safety](#privacy--safety).
 
 ### 8. Zero-dependency, cross-platform core
 
@@ -301,7 +301,7 @@ To override any of the above for a single project only, add a `project_overrides
 
 - **Local only.** Capsules and memory never leave your machine. No cloud, no telemetry.
 - **Secrets are scrubbed.** Before anything is saved, common secret patterns (API keys, tokens, bearer headers, private keys) are replaced with `[REDACTED]`.
-- **Capsules can't be tampered with.** Once published, a capsule is immutable and integrity-checked with a hash; only its delivery *state* changes. A capsule that fails verification is rejected.
+- **Capsules are integrity-checked.** Once published, a capsule is immutable and verified with a content hash, so corruption or post-write edits are detected and a failing capsule is rejected; only its delivery *state* changes. (This catches accidental damage and edits — it is not a cryptographic signature, so it does not defend against a determined attacker with write access to your local store, who could recompute the hash.)
 - **Your instructions always win.** A capsule is reference material. Your current instructions, the repository's own policy, the real files, Git, and test results all take precedence over it.
 
 ---
