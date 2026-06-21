@@ -33,6 +33,27 @@ test('changedFiles returns [] outside a git repo', () => {
   assert.deepEqual(changedFiles(dir), []);
 });
 
+test('changedFiles includes untracked files', () => {
+  const { dir } = gitRepo();
+  writeFileSync(join(dir, 'new-untracked.txt'), 'x\n');
+  assert.deepEqual(changedFiles(dir), ['new-untracked.txt']);
+});
+
+test('changedFiles merges tracked edits and untracked files without duplicates', () => {
+  const { dir } = gitRepo();
+  writeFileSync(join(dir, 'a.txt'), 'two\n'); // tracked edit
+  writeFileSync(join(dir, 'b.txt'), 'new\n'); // untracked
+  assert.deepEqual(changedFiles(dir).sort(), ['a.txt', 'b.txt']);
+});
+
+test('changedFiles caps the list and appends a truncation marker', () => {
+  const { dir } = gitRepo();
+  for (let i = 0; i < 5; i++) writeFileSync(join(dir, `f${i}.txt`), 'x\n');
+  const out = changedFiles(dir, { max: 3 });
+  assert.equal(out.length, 4, 'three files plus one marker');
+  assert.match(out[3], /\+2 more/);
+});
+
 test('session-start injection carries completed, open_issues and changed_files', () => {
   const data = mkdtempSync(join(tmpdir(), 'ah-ctxdata-'));
   process.env.AI_HANDOFF_ROOT = data;

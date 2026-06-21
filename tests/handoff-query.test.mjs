@@ -43,6 +43,25 @@ test('no pending → not pending', () => withRoot(() => {
   assert.equal(previewFor(cwd).pending, false);
 }));
 
+test('previewFor surfaces completed, open_issues and changed_files', () => withRoot(() => {
+  const cwd = mkdtempSync(join(tmpdir(), 'ah-proj-'));
+  const fp = projectFingerprint(cwd);
+  const c = buildCapsule({
+    capsuleId: 'c2', taskId: 't-x-eeeeeeeeeeee', now: '2026-06-19T00:00:00Z',
+    source: { agent: 'codex' }, target: { agent: 'claude-code' }, trigger: { type: 'test' },
+    project: { fingerprint: fp }, checkpoint: { status: 'in_progress' },
+    task: {
+      goal: 'do X', next_actions: ['a'],
+      completed: ['done thing'], open_issues: ['open thing'], changed_files: ['f.txt'],
+    },
+  });
+  publishCapsule(fp, c, { now: 1 });
+  const p = previewFor(cwd);
+  assert.deepEqual(p.completed, ['done thing']);
+  assert.deepEqual(p.open_issues, ['open thing']);
+  assert.deepEqual(p.changed_files, ['f.txt']);
+}));
+
 test('doctor diagnoses pending capsule integrity without consuming it', () => withRoot(() => {
   const cwd = mkdtempSync(join(tmpdir(), 'ah-proj-'));
   const fp = projectFingerprint(cwd);

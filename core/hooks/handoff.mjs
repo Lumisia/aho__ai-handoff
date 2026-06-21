@@ -69,13 +69,17 @@ export function previewFor(cwd) {
   const verified = verifyStoredCapsule(fp, p.taskId);
   if (!verified.valid) return { pending: true, valid: false, taskId: p.taskId, errors: verified.errors };
   const c = verified.capsule;
+  const task = c.task || {};
   return {
     pending: true,
     valid: true,
     taskId: p.taskId,
-    goal: c.task && c.task.goal,
+    goal: task.goal,
     source: c.source && c.source.agent,
-    next_actions: (c.task && c.task.next_actions) || [],
+    next_actions: task.next_actions || [],
+    completed: task.completed || [],
+    open_issues: task.open_issues || [],
+    changed_files: task.changed_files || [],
   };
 }
 

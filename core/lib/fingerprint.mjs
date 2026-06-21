@@ -10,12 +10,18 @@ function git(cwd, args) {
   }
 }
 
-// Strip scheme://userinfo@ credentials (e.g. https://user:TOKEN@host) so a token
-// embedded in the remote URL never reaches the fingerprint hash or doctor output.
-// scp-style SSH ("git@host:path") has no "://" and is left untouched — git@ is a
-// conventional username, not a secret.
+// Strip credentials embedded in the remote URL so a token never reaches the
+// fingerprint hash or doctor output. Two carriers are removed for scheme://
+// URLs: userinfo (https://user:TOKEN@host) and the query/fragment
+// (https://host/repo.git?access_token=TOKEN#frag). scp-style SSH
+// ("git@host:path") has no "://" and is left untouched — git@ is a conventional
+// username, not a secret, and it has no query/fragment grammar.
 function sanitizeRemoteUrl(url) {
-  return url.replace(/^([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)[^/@]*@/, '$1');
+  let out = url.replace(/^([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)[^/@]*@/, '$1');
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(out)) {
+    out = out.replace(/[?#].*$/, '');
+  }
+  return out;
 }
 
 export function projectFingerprintInfo(cwd) {

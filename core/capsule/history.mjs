@@ -14,20 +14,22 @@ export function appendHistory(fingerprint, entry, { now = Date.now(), max = 500 
   const path = historyPath(fingerprint);
   try { mkdirSync(projectDir(fingerprint), { recursive: true }); } catch {}
   const line = JSON.stringify({ ts: now, ...entry }) + '\n';
-  // Append-only: a pure append never reads existing lines, so it cannot clobber
-  // a write that landed between a read and a rewrite. The lock serializes the
-  // best-effort trim below; if the trim's read transiently fails we skip it and
-  // the cap self-heals on the next append (no entry is ever lost).
-  withLock(`${path}.lock`, () => {
-    // Retry transient Windows fs errors (AV/indexer briefly locking the file);
-    // never throw — appendHistory runs on the unguarded publishCapsule path.
-    for (let i = 0; i < 20; i++) {
-      try { appendFileSync(path, line); break; }
-      catch (error) {
-        if (i === 19) { process.stderr.write(`[handoff] history append failed: ${error.message}\n`); return; }
-        sleepSync(10);
-      }
+  // A pure append never reads existing lines, so it cannot clobber a write that
+  // landed between a read and a rewrite — it needs no lock and always lands, so
+  // no entry is ever lost even when the trim below is skipped. Retry only
+  // transient Windows fs errors (AV/indexer briefly locking the file); never
+  // throw — appendHistory runs on the unguarded publishCapsule path.
+  for (let i = 0; i < 20; i++) {
+    try { appendFileSync(path, line); break; }
+    catch (error) {
+      if (i === 19) { process.stderr.write(`[handoff] history append failed: ${error.message}\n`); return; }
+      sleepSync(10);
     }
+  }
+  // The trim is a read-modify-write, so it must hold the lock to avoid clobbering
+  // a concurrent append. If the lock can't be acquired we skip the trim; the cap
+  // self-heals on the next append.
+  withLock(`${path}.lock`, () => {
     try {
       const lines = readLines(path);
       if (lines.length > max) writeFileAtomic(path, lines.slice(-max).join('\n') + '\n');

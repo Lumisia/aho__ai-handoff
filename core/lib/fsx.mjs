@@ -65,19 +65,22 @@ export function sleepSync(ms) {
 }
 
 // Run `fn` while holding a short lease lock, retrying with backoff so concurrent
-// read-modify-write appends serialize instead of clobbering each other. After the
-// retry budget is exhausted it runs `fn` anyway: a best-effort write beats throwing
-// from a fire-and-forget hook path (e.g. publishCapsule -> appendHistory).
+// read-modify-write sections serialize instead of clobbering each other. If the
+// retry budget is exhausted it gives up WITHOUT running `fn`: a skipped
+// best-effort write is safe, but running an unsynchronized read-modify-write can
+// silently clobber a concurrent writer. Returns true if `fn` ran under the lock,
+// false if the lock could not be acquired. Callers on fire-and-forget hook paths
+// treat false as a benign skip rather than throwing.
 export function withLock(lockPath, fn, { leaseMs = 3000, tries = 600, waitMs = 15 } = {}) {
   for (let i = 0; i < tries; i++) {
     const lock = acquireLock(lockPath, { leaseMs, now: Date.now() });
     if (lock) {
-      try { return fn(); }
+      try { fn(); return true; }
       finally { releaseLock(lock); }
     }
     sleepSync(waitMs);
   }
-  return fn();
+  return false;
 }
 
 export function ownsLock(lock) {

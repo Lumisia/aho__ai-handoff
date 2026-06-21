@@ -21,3 +21,4 @@ export function claudeRateLimitDir() { return join(dataRoot(), 'sensors', 'claud
 export function claudeStatuslineStatePath() { return join(dataRoot(), 'claude-statusline.json'); }
 export function memoryDir(fingerprint) { return join(projectDir(fingerprint), 'memory'); }
 export function memoryRecallStatePath() { return join(dataRoot(), 'memory-recall-state.json'); }
+export function handoffInjectStatePath() { return join(dataRoot(), 'handoff-inject-state.json'); }

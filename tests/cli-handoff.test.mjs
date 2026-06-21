@@ -85,9 +85,13 @@ test('handoff:history records created then resumed', () => {
   const cwd = mkdtempSync(join(tmpdir(), 'ah-proj-'));
   const env = { AI_HANDOFF_ROOT: root };
   run(['handoff:checkpoint', '--agent', 'codex'], JSON.stringify({ cwd, session_id: 's', sentinel: { goal: 'g' } }), env);
-  run(['handoff:resume', '--agent', 'claude-code'], JSON.stringify({ cwd }), env);
+  run(['handoff:resume', '--agent', 'claude-code'], JSON.stringify({ cwd, session_id: 'r' }), env);
   const hist = JSON.parse(run(['handoff:history', '--cwd', cwd], '', env));
-  assert.deepEqual(hist.map((h) => h.event), ['created', 'resumed']);
+  // resume now injects read-only (logged) before consuming, so the trail shows both.
+  assert.deepEqual(hist.map((h) => h.event), ['created', 'injected', 'resumed']);
+  const resumed = hist.find((h) => h.event === 'resumed');
+  assert.equal(resumed.session_id, 'r');
+  assert.equal(resumed.agent, 'claude-code');
 });
 
 test('memory:remember stores evidence and memory:recall returns only relevant memory', () => {

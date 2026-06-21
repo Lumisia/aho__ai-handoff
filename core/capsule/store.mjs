@@ -107,7 +107,7 @@ export function findPendingCapsule(fingerprint, { now = Date.now() } = {}) {
   return { ...best, capsule };
 }
 
-export function claimCapsule(fingerprint, taskId, { leaseMs = 30000, now = Date.now() } = {}) {
+export function claimCapsule(fingerprint, taskId, { leaseMs = 30000, now = Date.now(), claimedBy = null } = {}) {
   const dir = taskDir(fingerprint, taskId);
   const statePath = join(dir, 'state.json');
   const lock = acquireLock(join(dir, '.claim.lock'), { leaseMs, now });
@@ -117,9 +117,12 @@ export function claimCapsule(fingerprint, taskId, { leaseMs = 30000, now = Date.
     const next = transition(st.status, 'CLAIMED');
     // Remember whether the capsule was AVAILABLE or DEGRADED_AVAILABLE so a
     // release or lease-expiry restores the original quality, not always AVAILABLE.
-    writeState(statePath, {
+    const state = {
       ...st, status: next, previous_status: st.status, claimed_at: now, claim_expires_at: now + leaseMs,
-    });
+    };
+    // Attribute the claim so state alone shows which agent/session took it.
+    if (claimedBy) state.claimed_by = claimedBy;
+    writeState(statePath, state);
     return { lock, statePath };
   } catch {
     releaseLock(lock);
@@ -127,14 +130,20 @@ export function claimCapsule(fingerprint, taskId, { leaseMs = 30000, now = Date.
   }
 }
 
-export function consumeCapsule(claim, { now = Date.now() } = {}) {
+export function consumeCapsule(claim, { now = Date.now(), consumedBy = null } = {}) {
   if (!ownsLock(claim?.lock)) throw new Error('stale claim cannot consume capsule');
   const st = readState(claim.statePath);
   const next = { ...st, status: transition(st.status, 'CONSUMED'), consumed_at: now };
+  // Record which agent/session actually consumed the capsule so "who read it" is
+  // provable from state, not merely inferred from timing.
+  if (consumedBy) next.consumed_by = consumedBy;
   delete next.claim_expires_at;
   writeState(claim.statePath, next);
   const fp = basename(dirname(dirname(dirname(claim.statePath))));
-  appendHistory(fp, { event: 'resumed', taskId: next.task_id ?? st.task_id }, { now });
+  appendHistory(fp, {
+    event: 'resumed', taskId: next.task_id ?? st.task_id,
+    agent: consumedBy?.agent, session_id: consumedBy?.session_id,
+  }, { now });
   releaseLock(claim.lock);
 }
 

@@ -26,19 +26,20 @@ function cap(fp) {
   });
 }
 
-test('prepares injection without consuming, then consumes only after finalize', () => withRoot(() => {
+test('inject is read-only: prepare and finalize never change the capsule status', () => withRoot(() => {
   const cwd = mkdtempSync(join(tmpdir(), 'ah-proj-'));
   const fp = projectFingerprint(cwd);
   const published = publishCapsule(fp, cap(fp), { now: 1 });
-  const r = prepareSessionStart({ input: { cwd }, agent: 'claude-code', now: 10 });
+  const r = prepareSessionStart({ input: { cwd, session_id: 's1' }, agent: 'claude-code', now: 10 });
   assert.equal(r.injected, true);
   assert.match(r.context, /fix the thing/);
   assert.match(r.context, /CURRENT HANDOFF/);
   assert.match(r.context, /CURRENT TASK/);
-  assert.equal(readState(published.statePath).status, 'CLAIMED');
+  assert.equal(readState(published.statePath).status, 'AVAILABLE', 'prepare must not claim');
   finalizeSessionStart(r.delivery, { now: 11 });
-  assert.equal(readState(published.statePath).status, 'CONSUMED');
-  assert.equal(prepareSessionStart({ input: { cwd }, agent: 'claude-code', now: 12 }).injected, false);
+  assert.equal(readState(published.statePath).status, 'AVAILABLE', 'finalize records inject but never consumes');
+  // The capsule remains injectable for a subsequent session.
+  assert.equal(prepareSessionStart({ input: { cwd, session_id: 's2' }, agent: 'claude-code', now: 12 }).injected, true);
 }));
 
 test('no pending capsule → not injected', () => withRoot(() => {
@@ -46,11 +47,11 @@ test('no pending capsule → not injected', () => withRoot(() => {
   assert.equal(prepareSessionStart({ input: { cwd }, agent: 'claude-code', now: 1 }).injected, false);
 }));
 
-test('aborting output delivery releases the claim', () => withRoot(() => {
+test('aborting output delivery leaves the capsule available (inject was read-only)', () => withRoot(() => {
   const cwd = mkdtempSync(join(tmpdir(), 'ah-proj-'));
   const fp = projectFingerprint(cwd);
   const published = publishCapsule(fp, cap(fp), { now: 1 });
-  const r = prepareSessionStart({ input: { cwd }, agent: 'claude-code', now: 10 });
+  const r = prepareSessionStart({ input: { cwd, session_id: 's1' }, agent: 'claude-code', now: 10 });
   abortSessionStart(r.delivery);
   assert.equal(readState(published.statePath).status, 'AVAILABLE');
 }));

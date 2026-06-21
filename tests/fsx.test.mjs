@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { writeFileAtomic, acquireLock, releaseLock } from '../core/lib/fsx.mjs';
+import { writeFileAtomic, acquireLock, releaseLock, withLock } from '../core/lib/fsx.mjs';
 
 test('writeFileAtomic writes data and leaves no temp file', () => {
   const dir = mkdtempSync(join(tmpdir(), 'ah-fsx-'));
@@ -23,4 +23,25 @@ test('acquireLock blocks a second holder until lease expires', () => {
   assert.ok(c);
   releaseLock(c);
   assert.ok(acquireLock(lp, { leaseMs: 1000, now: 4000 }));
+});
+
+test('withLock runs fn under the lock and reports success', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ah-wl-'));
+  const lp = join(dir, '.lock');
+  let ran = false;
+  const ok = withLock(lp, () => { ran = true; });
+  assert.equal(ran, true);
+  assert.equal(ok, true);
+});
+
+test('withLock skips fn and reports failure when the lock is held', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ah-wl-'));
+  const lp = join(dir, '.lock');
+  const held = acquireLock(lp, { leaseMs: 60_000 });
+  assert.ok(held);
+  let ran = false;
+  const ok = withLock(lp, () => { ran = true; }, { tries: 2, waitMs: 1, leaseMs: 60_000 });
+  assert.equal(ran, false, 'fn must not run without holding the lock');
+  assert.equal(ok, false);
+  releaseLock(held);
 });

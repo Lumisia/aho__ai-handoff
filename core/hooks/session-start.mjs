@@ -3,11 +3,11 @@ import { gitContext } from '../lib/gitctx.mjs';
 import {
   findPendingCapsule,
   claimCapsule,
-  consumeCapsule,
-  releaseClaim,
   rejectCapsule,
   verifyStoredCapsule,
 } from '../capsule/store.mjs';
+import { recordInject } from '../capsule/inject-track.mjs';
+import { appendHistory } from '../capsule/history.mjs';
 import { readThinProjectIndex } from '../project/index-store.mjs';
 
 function renderInjection(cap, warnings = [], projectIndex = '') {
@@ -39,6 +39,14 @@ export function prepareSessionStart({ input, agent, now = Date.now() }) {
   const pending = findPendingCapsule(fp, { now });
   if (!pending || !pending.capsule) return { injected: false, reason: 'no-pending' };
 
+  // A capsule is addressed to exactly one agent. If it targets the peer agent,
+  // leave it untouched — do NOT verify or reject it, or this agent would destroy
+  // a handoff meant for its peer (a peer-targeted capsule fails the expectedAgent
+  // check and would otherwise be claimed+rejected).
+  if (pending.capsule.target?.agent !== agent) {
+    return { injected: false, reason: 'not-target-agent' };
+  }
+
   const currentGitHead = gitContext(cwd).head;
   const verified = verifyStoredCapsule(fp, pending.taskId, {
     expectedAgent: agent,
@@ -46,30 +54,39 @@ export function prepareSessionStart({ input, agent, now = Date.now() }) {
     now,
   });
   if (!verified.valid) {
+    // A tampered/invalid capsule is cleaned up (claim then reject) even on the
+    // read-only inject path — we never inject unverified content.
     const invalidClaim = claimCapsule(fp, pending.taskId, { now });
     if (invalidClaim) rejectCapsule(invalidClaim, { now });
     return { injected: false, reason: 'invalid-capsule', errors: verified.errors };
   }
 
-  const claim = claimCapsule(fp, pending.taskId, { now });
-  if (!claim) return { injected: false, reason: 'claim-failed' };
-
+  // Inject is read-only: the capsule status is NOT changed here. Consuming it
+  // would lose the handoff to an ephemeral session whose SessionStart hook ran
+  // but which never reached a prompt. The capsule is consumed only once the
+  // session proves it is live (its first UserPromptSubmit, via consumeOnPrompt).
   return {
     injected: true,
     taskId: pending.taskId,
     context: renderInjection(verified.capsule, verified.warnings, readThinProjectIndex(fp)),
-    delivery: claim,
     warnings: verified.warnings,
+    delivery: { fingerprint: fp, taskId: pending.taskId, sessionId: input && input.session_id, agent },
   };
 }
 
+// Record the injection so the session's first prompt can consume the capsule.
+// This deliberately does NOT consume: a SessionStart that never reaches a prompt
+// leaves the capsule pending for the next session.
 export function finalizeSessionStart(delivery, { now = Date.now() } = {}) {
-  consumeCapsule(delivery, { now });
+  recordInject({ fingerprint: delivery.fingerprint, sessionId: delivery.sessionId, taskId: delivery.taskId, now });
+  appendHistory(delivery.fingerprint, {
+    event: 'injected', taskId: delivery.taskId, agent: delivery.agent, session_id: delivery.sessionId,
+  }, { now });
 }
 
-export function abortSessionStart(delivery) {
-  releaseClaim(delivery);
-}
+// Output delivery failed after prepare. Inject is read-only until finalize, so
+// nothing was claimed or recorded and there is nothing to roll back.
+export function abortSessionStart() { /* no-op */ }
 
 // Compatibility alias. It prepares a delivery; callers must finalize after writing output.
 export const handleSessionStart = prepareSessionStart;

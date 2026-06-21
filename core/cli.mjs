@@ -20,6 +20,7 @@ import {
 } from './hooks/handoff.mjs';
 import { buildCheckpointCapsule } from './capsule/checkpoint.mjs';
 import { publishCapsule } from './capsule/store.mjs';
+import { consumeOnPrompt } from './capsule/inject-track.mjs';
 import {
   installClaudeStatusline, restoreClaudeStatusline, defaultClaudeSettingsPath,
   runPreviousStatusline,
@@ -180,7 +181,11 @@ async function handoffResume(args) {
   const agent = argValue(args, '--agent', 'codex');
   const input = await readInput(args);
   const result = await deliverSession(input, agent);
-  if (!result.injected) process.stderr.write(`[handoff] resume: ${result.reason}\n`);
+  if (!result.injected) { process.stderr.write(`[handoff] resume: ${result.reason}\n`); return; }
+  // An explicit /handoff resume is a deliberate user action — proof of life — so
+  // consume now rather than waiting for the next prompt.
+  const consumed = consumeOnPrompt({ input, agent });
+  process.stderr.write(`[handoff] resume: injected, consumed=${consumed.consumed}\n`);
 }
 
 async function handoffCheckpoint(args) {
@@ -219,11 +224,16 @@ async function handoffHistory(args) {
 }
 
 async function hookUserPrompt(args) {
+  const agent = argValue(args, '--agent', 'codex');
   const input = await readInput(args);
+  // The first prompt of a session is proof it is live: consume the handoff that
+  // SessionStart injected read-only. Best-effort — never break the prompt path.
+  try { consumeOnPrompt({ input, agent }); }
+  catch (error) { process.stderr.write(`[handoff] consume-on-prompt failed: ${error.message}\n`); }
   const config = loadConfig({ path: configPath() });
   if (config.memory?.auto_recall === false) return;
   const result = prepareUserPrompt({
-    input, agent: argValue(args, '--agent', 'codex'),
+    input, agent,
     tokenBudget: config.memory?.auto_recall_token_budget ?? 800,
   });
   if (!result.injected) return;
