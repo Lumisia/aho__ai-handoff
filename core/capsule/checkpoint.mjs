@@ -1,4 +1,4 @@
-import { gitContext } from '../lib/gitctx.mjs';
+import { gitContext, changedFiles } from '../lib/gitctx.mjs';
 import { projectFingerprint } from '../lib/fingerprint.mjs';
 import { instanceKey, deriveTaskId } from '../lib/taskid.mjs';
 import { buildCapsule } from './create.mjs';
@@ -15,6 +15,7 @@ export function buildCheckpointCapsule({
     next_actions: sentinel.next_actions || [],
     completed: sentinel.completed || [],
     open_issues: sentinel.open_issues || [],
+    changed_files: changedFiles(cwd),
   };
   const { value: task, count } = redactJson(taskRaw);
   const taskId = deriveTaskId({

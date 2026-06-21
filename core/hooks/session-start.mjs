@@ -20,6 +20,11 @@ function renderInjection(cap, warnings = [], projectIndex = '') {
     `branch: ${p.git_branch || ''} @ ${p.git_head || ''}`,
     `next_actions: ${(t.next_actions || []).join('; ')}`,
   ];
+  // Surface the rest of the capsule the receiver would otherwise re-derive.
+  // Only emit non-empty fields to keep the injection token-lean.
+  if ((t.completed || []).length) lines.push(`completed: ${t.completed.join('; ')}`);
+  if ((t.open_issues || []).length) lines.push(`open_issues: ${t.open_issues.join('; ')}`);
+  if ((t.changed_files || []).length) lines.push(`changed_files: ${t.changed_files.join(', ')}`);
   if (warnings.includes('git-head-mismatch')) {
     lines.push('warning: capsule Git HEAD differs from current workspace; re-verify files.');
   }

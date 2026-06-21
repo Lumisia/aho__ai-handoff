@@ -14,7 +14,17 @@
       "required": ["status"],
       "properties": { "status": { "type": "string", "enum": ["in_progress", "blocked", "completed"] } }
     },
-    "task": { "type": "object", "required": ["goal"], "properties": { "goal": { "type": "string" } } },
+    "task": {
+      "type": "object",
+      "required": ["goal"],
+      "properties": {
+        "goal": { "type": "string" },
+        "next_actions": { "type": "array", "items": { "type": "string" } },
+        "completed": { "type": "array", "items": { "type": "string" } },
+        "open_issues": { "type": "array", "items": { "type": "string" } },
+        "changed_files": { "type": "array", "items": { "type": "string" } }
+      }
+    },
     "integrity": { "type": "object", "required": ["payload_sha256"], "properties": { "payload_sha256": { "type": "string" } } }
   }
 }
