@@ -36,7 +36,9 @@ test('shared automatic hooks hand off Codex → Claude → Codex', () => {
   }));
 
   const common = { AI_HANDOFF_ROOT: data, AH_NO_APPSERVER: '1', CODEX_HOME: codexHome };
-  const codexEnv = { ...common, PLUGIN_ROOT: root, CLAUDE_PLUGIN_ROOT: root };
+  // Codex sets PLUGIN_ROOT (not CLAUDE_PLUGIN_ROOT) — simulate that faithfully so
+  // the dispatcher's agent detection is actually exercised.
+  const codexEnv = { ...common, PLUGIN_ROOT: root, CLAUDE_PLUGIN_ROOT: '' };
   const claudeEnv = { ...common, CLAUDE_PLUGIN_ROOT: root };
 
   const first = JSON.parse(run(dispatcher, ['stop'], { cwd, session_id: 'codex-s' }, codexEnv));
