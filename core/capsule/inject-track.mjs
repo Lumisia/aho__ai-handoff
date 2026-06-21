@@ -47,6 +47,14 @@ export function recordInject({ fingerprint, sessionId, taskId, now = Date.now() 
   return writeInjectState((injected) => { injected[key(fingerprint, sessionId)] = { taskId, at: now }; }, { now });
 }
 
+// The taskId SessionStart injected (read-only) into this session, or undefined
+// once it has been consumed/pruned. Lets a separate concern (the newer-pending
+// nudge) tell "the capsule this session already saw" apart from a fresh one.
+export function injectedTaskIdFor({ fingerprint, sessionId }) {
+  if (!sessionId) return undefined;
+  return readInjectState().injected?.[key(fingerprint, sessionId)]?.taskId;
+}
+
 // Consume the capsule this session was injected, on the session's first prompt.
 // No marker (capsule never injected to this session) or a pending capsule that
 // does not match the injected task → no-op, so a capsule the model never saw is

@@ -22,3 +22,4 @@ export function claudeStatuslineStatePath() { return join(dataRoot(), 'claude-st
 export function memoryDir(fingerprint) { return join(projectDir(fingerprint), 'memory'); }
 export function memoryRecallStatePath() { return join(dataRoot(), 'memory-recall-state.json'); }
 export function handoffInjectStatePath() { return join(dataRoot(), 'handoff-inject-state.json'); }
+export function handoffNoticeStatePath() { return join(dataRoot(), 'handoff-notice-state.json'); }

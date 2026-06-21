@@ -1,6 +1,6 @@
 ---
 name: handoff
-description: Resume, create, diagnose, or recall a cross-agent handoff. Accepts [status|preview|checkpoint|create|skip|doctor|history|remember|recall|config] as an argument.
+description: Resume, create, diagnose, or recall a cross-agent handoff. Accepts [status|preview|checkpoint|create|skip|doctor|history|recent|remember|recall|config] as an argument.
 ---
 
 Use the handoff-session skill to handle `/handoff` with the provided ARGUMENTS.

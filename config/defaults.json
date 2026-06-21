@@ -4,7 +4,7 @@
   },
   "capsule": { "completed_autocreate": false, "semantic_retry_limit": 0 },
   "notification": { "method": "os", "fallback": "terminal" },
-  "handoff": { "target": "other-agent", "launcher": "notify", "already_running_requires_manual": true },
+  "handoff": { "target": "other-agent", "launcher": "notify", "already_running_requires_manual": true, "notify_newer_pending": true },
   "memory": { "auto_recall": true, "auto_recall_token_budget": 800 },
   "sensors": { "claude": { "freshness_ms": 120000 } },
   "statusline": { "show_handoff": true },

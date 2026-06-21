@@ -14,6 +14,7 @@ Backs the `/handoff` command for both Claude Code and Codex.
 - `/handoff create` -> approve the pending ask and author a rich capsule.
 - `/handoff skip` -> decline the pending ask for this usage window.
 - `/handoff doctor` -> diagnose capsule integrity, claim recovery, and approval state.
+- `/handoff recent` -> list recent capsules across all projects, newest first.
 - `/handoff remember` -> store one verified durable fact with concrete evidence.
 - `/handoff recall` -> retrieve relevant verified memory without consuming it.
 - `/handoff config` -> show or change settings (threshold, mode, notification, memory).
@@ -46,6 +47,12 @@ is fine on macOS/Linux:
 
 For `create`, use `handoff:create` and the same sentinel. For `skip` and
 `doctor`, use `handoff:skip` and `handoff:doctor`.
+
+For `recent`, call `handoff:recent` (optionally `--limit <n>`, default 10). It
+scans every project bucket and returns recent capsules newest-first with status,
+source→target, goal, branch, and a `current` flag for this project's bucket:
+
+    node <pluginRoot>/core/cli.mjs handoff:recent --cwd "<project dir>" --limit 10
 
 For `remember`, call `memory:remember` with `fact`, `evidence`, optional `tags`
 and `paths`. Only call it after evidence was actually checked. Never store model

@@ -16,11 +16,12 @@ import {
   setConfigValue, unsetConfigValue, getAt, knownKeys,
 } from './lib/config-edit.mjs';
 import {
-  statusFor, previewFor, createFromApproval, skipApproval, doctorFor,
+  statusFor, previewFor, createFromApproval, skipApproval, doctorFor, recentCapsules,
 } from './hooks/handoff.mjs';
 import { buildCheckpointCapsule } from './capsule/checkpoint.mjs';
 import { publishCapsule } from './capsule/store.mjs';
 import { consumeOnPrompt } from './capsule/inject-track.mjs';
+import { findNewerPending, recordNotified, renderPendingNotice } from './capsule/pending-notice.mjs';
 import {
   installClaudeStatusline, restoreClaudeStatusline, defaultClaudeSettingsPath,
   runPreviousStatusline,
@@ -229,6 +230,13 @@ async function handoffHistory(args) {
   await writeStdout(JSON.stringify(readHistory(fp, { limit }), null, 2) + '\n');
 }
 
+async function handoffRecent(args) {
+  const input = await readInput(args);
+  const limit = Number(argValue(args, '--limit', '10')) || 10;
+  const currentFingerprint = projectFingerprint(input.cwd || process.cwd());
+  await writeStdout(JSON.stringify(recentCapsules({ limit, currentFingerprint }), null, 2) + '\n');
+}
+
 async function hookUserPrompt(args) {
   const agent = argValue(args, '--agent', 'codex');
   const input = await readInput(args);
@@ -237,14 +245,33 @@ async function hookUserPrompt(args) {
   try { consumeOnPrompt({ input, agent }); }
   catch (error) { process.stderr.write(`[handoff] consume-on-prompt failed: ${error.message}\n`); }
   const config = loadConfig({ path: configPath() });
-  if (config.memory?.auto_recall === false) return;
-  const result = prepareUserPrompt({
-    input, agent,
-    tokenBudget: config.memory?.auto_recall_token_budget ?? 800,
-  });
-  if (!result.injected) return;
-  await writeStdout(result.context + '\n');
-  finalizeUserPrompt(result.delivery);
+  const parts = [];
+
+  // A peer checkpoint created after this session started never reaches a running
+  // session on its own (SessionStart injects once). Surface it as a one-time
+  // nudge with key info so the model can pull it with /handoff. Best-effort.
+  if (config.handoff?.notify_newer_pending !== false) {
+    try {
+      const notice = findNewerPending({ input, agent });
+      if (notice.notify) {
+        parts.push(renderPendingNotice(notice.capsule, config.locale || 'en'));
+        recordNotified({ fingerprint: notice.fingerprint, sessionId: notice.sessionId, taskId: notice.taskId });
+      }
+    } catch (error) { process.stderr.write(`[handoff] newer-pending notice failed: ${error.message}\n`); }
+  }
+
+  if (config.memory?.auto_recall !== false) {
+    const result = prepareUserPrompt({
+      input, agent,
+      tokenBudget: config.memory?.auto_recall_token_budget ?? 800,
+    });
+    if (result.injected) {
+      parts.push(result.context);
+      finalizeUserPrompt(result.delivery);
+    }
+  }
+
+  if (parts.length) await writeStdout(parts.join('\n\n') + '\n');
 }
 
 async function memoryRemember(args) {
@@ -320,6 +347,7 @@ const commands = {
   'handoff:skip': handoffSkip,
   'handoff:doctor': handoffDoctor,
   'handoff:history': handoffHistory,
+  'handoff:recent': handoffRecent,
   'memory:remember': memoryRemember,
   'memory:recall': memoryRecall,
   'setup:claude-statusline': setupClaudeStatusline,

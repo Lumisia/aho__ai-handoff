@@ -122,6 +122,47 @@ function scanOtherPending(currentFp) {
   return out;
 }
 
+// Newest-first view of capsules across every project bucket. SessionStart and
+// findPendingCapsule are per-fingerprint, so this is the only place that answers
+// "what handoffs exist globally, regardless of which project I'm in". Read-only:
+// it never claims, expires, or recovers a capsule. `current` flags the bucket of
+// `currentFingerprint` so a caller can tell "this project" from the rest.
+export function recentCapsules({ limit = 10, currentFingerprint = null } = {}) {
+  const projects = join(dataRoot(), 'projects');
+  const out = [];
+  let names = [];
+  try { names = readdirSync(projects); } catch { return out; }
+  for (const fp of names) {
+    const hdir = join(projects, fp, 'handoff');
+    let tasks = [];
+    try { tasks = readdirSync(hdir); } catch { continue; }
+    for (const taskId of tasks) {
+      const statePath = join(hdir, taskId, 'state.json');
+      const capPath = join(hdir, taskId, 'capsule.json');
+      if (!existsSync(statePath) || !existsSync(capPath)) continue;
+      let state; let cap;
+      try { state = JSON.parse(readFileSync(statePath, 'utf8')); cap = JSON.parse(readFileSync(capPath, 'utf8')); }
+      catch { continue; }
+      const sortMs = Date.parse(cap.created_at) || (typeof state.updated_at === 'number' ? state.updated_at : 0);
+      const row = {
+        fingerprint: fp,
+        taskId,
+        status: state.status,
+        source: cap.source && cap.source.agent,
+        target: cap.target && cap.target.agent,
+        goal: cap.task && cap.task.goal,
+        branch: cap.project && cap.project.git_branch,
+        created_at: cap.created_at || null,
+        sortMs,
+      };
+      if (currentFingerprint) row.current = fp === currentFingerprint;
+      out.push(row);
+    }
+  }
+  out.sort((a, b) => b.sortMs - a.sortMs);
+  return out.slice(0, Math.max(0, limit)).map(({ sortMs, ...rest }) => rest);
+}
+
 export function doctorFor(cwd, { now = Date.now() } = {}) {
   const { fingerprint, basis } = projectFingerprintInfo(cwd);
   let cwdResolved = cwd;
