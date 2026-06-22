@@ -1,10 +1,10 @@
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { acquireLock } from '../core/lib/fsx.mjs';
+import { acquireLock, releaseLock } from '../core/lib/fsx.mjs';
 
 const EVENT_COMMANDS = {
   'session-start': 'hook:session-start',
@@ -35,7 +35,27 @@ export function resolveHookInvocation(event, env = process.env) {
 // agent, and exact payload: the first firing takes the lease, an identical sibling
 // within the window is rejected, and the lease expires so the next real event runs.
 // Returns true if this process should run the hook, false if a sibling already did.
+// Every distinct payload mints a new <key>.lock that is never released, so
+// without pruning the hookguard dir grows forever (hundreds of stale files were
+// observed). Reclaim each lock through the lock protocol itself: acquireLock
+// succeeds only on an expired/stale lease (a live lease returns null and is left
+// untouched), and releaseLock then deletes the one we own. This is token-safe —
+// no stat-then-unlink TOCTOU that could drop a freshly reacquired live lock.
+// Bounded per firing so a huge backlog cannot stall the hook path.
+function pruneStaleLocks(dir, now, windowMs) {
+  let names;
+  try { names = readdirSync(dir); } catch { return; }
+  let examined = 0;
+  for (const name of names) {
+    if (!name.endsWith('.lock')) continue;
+    if (++examined > 500) break;
+    const lock = acquireLock(join(dir, name), { leaseMs: windowMs, now });
+    if (lock) releaseLock(lock);
+  }
+}
+
 export function claimHookEvent({ event, agent, raw, dir = join(tmpdir(), 'ai-handoff-hookguard'), now = Date.now(), windowMs = DEDUPE_WINDOW_MS }) {
+  pruneStaleLocks(dir, now, windowMs);
   const key = createHash('sha256').update(`${event}\0${agent}\0`).update(raw ?? '').digest('hex').slice(0, 32);
   return acquireLock(join(dir, `${key}.lock`), { leaseMs: windowMs, now }) !== null;
 }

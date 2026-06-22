@@ -14,6 +14,12 @@ export function validate(value, schema, path = '$') {
     if (sch.enum && !sch.enum.includes(val)) {
       errors.push(`${p}: ${JSON.stringify(val)} not in enum`);
     }
+    if (sch.type === 'string' && typeof sch.maxLength === 'number' && val.length > sch.maxLength) {
+      errors.push(`${p}: string length ${val.length} exceeds maxLength ${sch.maxLength}`);
+    }
+    if (sch.type === 'array' && typeof sch.maxItems === 'number' && val.length > sch.maxItems) {
+      errors.push(`${p}: array length ${val.length} exceeds maxItems ${sch.maxItems}`);
+    }
     if (sch.type === 'object') {
       for (const r of sch.required || []) {
         if (!(r in val)) errors.push(`${p}.${r}: required`);

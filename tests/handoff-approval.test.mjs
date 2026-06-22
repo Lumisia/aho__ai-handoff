@@ -37,7 +37,7 @@ test('create resolves awaiting approval and publishes user-authored capsule', ()
   const result = createFromApproval({ cwd, sentinel: { goal: 'approved goal', next_actions: ['continue'] }, now: 20 });
   assert.equal(result.created, true);
   assert.equal(findApproval(fp), null);
-  assert.equal(findPendingCapsule(fp).capsule.task.goal, 'approved goal');
+  assert.equal(findPendingCapsule(fp, { now: 20 }).capsule.task.goal, 'approved goal');
 }));
 
 test('skip resolves awaiting approval without publishing', () => withRoot(() => {

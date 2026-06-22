@@ -56,6 +56,29 @@ function findGitDirFs(cwd) {
   }
 }
 
+// Decode a git config value so it matches what `git config --get` returns:
+// strip an inline comment from an unquoted value, and for a quoted value honour
+// the closing quote and backslash escapes (\" \\ \n \t \b). Without this a quoted
+// URL would keep its quotes and produce a different fingerprint than working git
+// (and could defeat the credential sanitizer). Mixed quoted/unquoted segments
+// (rare for URLs) are handled in a single pass.
+function decodeGitConfigValue(raw) {
+  let out = '';
+  let inQuote = false;
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i];
+    if (ch === '\\' && i + 1 < raw.length) {
+      const n = raw[++i];
+      out += n === 'n' ? '\n' : n === 't' ? '\t' : n === 'b' ? '\b' : n;
+      continue;
+    }
+    if (ch === '"') { inQuote = !inQuote; continue; }
+    if (!inQuote && (ch === '#' || ch === ';')) break; // inline comment
+    out += ch;
+  }
+  return out.trim();
+}
+
 // Parse `remote.origin.url` out of a git config file's text. Git writes
 // `[remote "origin"]` then an indented `url = ...`; the last value wins for a
 // single-valued key. Returns null if origin has no url.
@@ -69,7 +92,7 @@ function parseRemoteOriginUrl(text) {
     if (sec) { inOrigin = sec[1].toLowerCase() === 'remote' && sec[2] === 'origin'; continue; }
     if (inOrigin) {
       const kv = line.match(/^([A-Za-z0-9_-]+)\s*=\s*(.*)$/);
-      if (kv && kv[1].toLowerCase() === 'url') url = kv[2].trim();
+      if (kv && kv[1].toLowerCase() === 'url') url = decodeGitConfigValue(kv[2]);
     }
   }
   return url;
@@ -77,6 +100,9 @@ function parseRemoteOriginUrl(text) {
 
 // Filesystem fallback for `git config --get remote.origin.url`. The shared
 // (common dir) config carries remotes; a linked worktree's own config does not.
+// Limitation: an origin url defined indirectly via `[include]`/conditional
+// includes or a per-worktree config override is not resolved (very rare for a
+// remote); such a repo degrades to the gitroot basis when git is blocked.
 function readRemoteOriginUrlFs(gitInfo) {
   if (!gitInfo) return null;
   for (const base of [gitInfo.commonDir, gitInfo.gitDir]) {

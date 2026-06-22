@@ -11,8 +11,24 @@ import { appendHistory } from './history.mjs';
 function taskDir(fingerprint, taskId) { return join(handoffDir(fingerprint), taskId); }
 const PENDING = new Set(['AVAILABLE', 'DEGRADED_AVAILABLE']);
 
+// The capsule's own TTL (expires_at), in epoch ms, or null when absent/unparsable.
+function capsuleExpiry(hd, name) {
+  try {
+    const cap = JSON.parse(readFileSync(join(hd, name, 'capsule.json'), 'utf8'));
+    const t = cap && cap.expires_at ? Date.parse(cap.expires_at) : NaN;
+    return Number.isFinite(t) ? t : null;
+  } catch { return null; }
+}
+
 export function readState(statePath) {
-  try { return JSON.parse(readFileSync(statePath, 'utf8')); } catch { return {}; }
+  // A malformed state.json that parses to a non-object (literal `null`, an array,
+  // a primitive) must not reach callers as-is: `state.status` would throw and
+  // crash the read paths (findPendingCapsule, doctor). Collapse anything that is
+  // not a plain object to {} so it is simply treated as "no usable status".
+  try {
+    const v = JSON.parse(readFileSync(statePath, 'utf8'));
+    return v && typeof v === 'object' && !Array.isArray(v) ? v : {};
+  } catch { return {}; }
 }
 
 export function writeState(statePath, obj) {
@@ -107,6 +123,23 @@ function recoverExpiredClaim(hd, name, statePath, now) {
   }
 }
 
+// Expire a past-TTL pending capsule UNDER ITS CLAIM LOCK, mirroring
+// recoverExpiredClaim. Writing EXPIRED with only the publish lock held could
+// clobber a concurrent claimCapsule (which writes CLAIMED under the claim lock),
+// leaving a claimant about to consume an EXPIRED state. Acquiring the claim lock
+// first proves no live claim is in flight; if one is, we skip and let it finish.
+function expireTtlCapsule(hd, name, statePath, now) {
+  const lock = acquireLock(join(hd, name, '.claim.lock'), { now });
+  if (!lock) return;
+  try {
+    const fresh = readState(statePath);
+    if (!PENDING.has(fresh.status)) return; // claimed/consumed/expired since the scan
+    writeState(statePath, {
+      ...fresh, status: transition(fresh.status, 'EXPIRED'), expired_at: now, expiration_reason: 'ttl',
+    });
+  } finally { releaseLock(lock); }
+}
+
 export function findPendingCapsule(fingerprint, { now = Date.now() } = {}) {
   const hd = handoffDir(fingerprint);
   if (!existsSync(hd)) return null;
@@ -139,6 +172,15 @@ export function findPendingCapsule(fingerprint, { now = Date.now() } = {}) {
       if (!existsSync(statePath)) continue;
       const state = readState(statePath);
       if (!PENDING.has(state.status)) continue;
+      // TTL: a pending capsule past its expires_at is dead even though state
+      // still says AVAILABLE. Persist the EXPIRED transition under the publish
+      // lock so status/recent/preview agree, then skip it. If a publish holds the
+      // lock we only skip selecting it (the owner won't pick an expired one).
+      const expiry = capsuleExpiry(hd, name);
+      if (expiry != null && expiry <= now) {
+        if (publishLock) expireTtlCapsule(hd, name, statePath, now);
+        continue;
+      }
       const order = typeof state.updated_at === 'number' ? state.updated_at : statSync(statePath).mtimeMs;
       if (order > bestOrder) { bestOrder = order; best = { taskId: name, statePath, state }; }
     }

@@ -38,7 +38,7 @@ test('second Stop uses stored trigger context and publishes rich AVAILABLE capsu
     now: 2000,
   });
   assert.equal(second.action, 'create');
-  const pending = findPendingCapsule(second.fingerprint);
+  const pending = findPendingCapsule(second.fingerprint, { now: 2000 });
   assert.equal(pending.state.status, 'AVAILABLE');
   assert.equal(pending.capsule.task.goal, 'finish packaging');
   assert.deepEqual(pending.capsule.task.next_actions, ['add hooks']);
@@ -55,5 +55,5 @@ test('invalid summary publishes DEGRADED_AVAILABLE and never requests another tu
   });
   assert.equal(result.action, 'create');
   assert.equal(result.degraded, true);
-  assert.equal(findPendingCapsule(result.fingerprint).state.status, 'DEGRADED_AVAILABLE');
+  assert.equal(findPendingCapsule(result.fingerprint, { now: 2000 }).state.status, 'DEGRADED_AVAILABLE');
 }));

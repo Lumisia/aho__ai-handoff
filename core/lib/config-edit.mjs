@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { writeFileAtomic } from './fsx.mjs';
+import { writeFileAtomic, withLock } from './fsx.mjs';
 
 // Allowlist of user-settable keys. Editing the file by hand can set anything,
 // but `config:set` is guided: only these keys, with type/range/enum checks, so
@@ -80,14 +80,23 @@ export function writeUserConfig(path, obj) {
   writeFileAtomic(path, JSON.stringify(obj, null, 2) + '\n');
 }
 
+// The read-modify-write must hold a lock: two concurrent `config:set` calls on
+// different keys would otherwise both read the old file and the last writer would
+// drop the other's change (lost update). Unlike best-effort hook writes, a
+// dropped config edit must NOT pass silently — surface it so the caller retries.
+function lockedConfigWrite(path, mutate) {
+  const ran = withLock(`${path}.lock`, () => { writeUserConfig(path, mutate(readUserConfig(path))); });
+  if (!ran) throw new Error(`config is locked, try again: ${path}`);
+}
+
 export function setConfigValue(path, key, rawValue) {
   const value = validateKeyValue(key, rawValue);
-  writeUserConfig(path, setAt(readUserConfig(path), key, value));
+  lockedConfigWrite(path, (cfg) => setAt(cfg, key, value));
   return { key, value };
 }
 
 export function unsetConfigValue(path, key) {
   if (!CONFIG_KEYS[key]) throw new Error(`unknown config key: ${key}. known keys: ${knownKeys().join(', ')}`);
-  writeUserConfig(path, unsetAt(readUserConfig(path), key));
+  lockedConfigWrite(path, (cfg) => unsetAt(cfg, key));
   return { key };
 }

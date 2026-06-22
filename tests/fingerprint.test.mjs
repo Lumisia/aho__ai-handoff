@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { projectFingerprint, projectFingerprintInfo } from '../core/lib/fingerprint.mjs';
@@ -81,6 +81,22 @@ test('git that ran but found no repo does NOT trigger the fs fallback (non-block
   const info = projectFingerprintInfo(dir, { gitRunner: () => ({ ok: false, blocked: false }) });
   assert.equal(info.basis.type, 'path');
   assert.match(info.fingerprint, /^[0-9a-f]{24}$/);
+});
+
+test('git failure decodes a quoted remote URL in .git/config to match working git', () => {
+  const dir = repoWithRemote('https://example.invalid/org/repo.git');
+  const cfgPath = join(dir, '.git', 'config');
+  // Re-quote the url value the way git tolerates; working `git config --get`
+  // returns it unquoted, so the fs fallback must decode the quotes to match.
+  const cfg = readFileSync(cfgPath, 'utf8').replace(
+    'url = https://example.invalid/org/repo.git',
+    'url = "https://example.invalid/org/repo.git"',
+  );
+  writeFileSync(cfgPath, cfg);
+  const withGit = projectFingerprintInfo(dir);
+  const noGit = projectFingerprintInfo(dir, { gitRunner: BLOCKED });
+  assert.equal(noGit.basis.value, 'remote:https://example.invalid/org/repo.git');
+  assert.equal(noGit.fingerprint, withGit.fingerprint);
 });
 
 test('git failure in a linked worktree resolves the shared remote config', () => {

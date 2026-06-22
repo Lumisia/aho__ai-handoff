@@ -2,7 +2,7 @@
   "type": "object",
   "required": ["schema_version", "capsule_id", "task_id", "created_at", "source", "target", "checkpoint", "task", "integrity"],
   "properties": {
-    "schema_version": { "type": "string" },
+    "schema_version": { "type": "string", "enum": ["1.0.0"] },
     "capsule_id": { "type": "string" },
     "task_id": { "type": "string" },
     "created_at": { "type": "string" },
@@ -18,11 +18,11 @@
       "type": "object",
       "required": ["goal"],
       "properties": {
-        "goal": { "type": "string" },
-        "next_actions": { "type": "array", "items": { "type": "string" } },
-        "completed": { "type": "array", "items": { "type": "string" } },
-        "open_issues": { "type": "array", "items": { "type": "string" } },
-        "changed_files": { "type": "array", "items": { "type": "string" } }
+        "goal": { "type": "string", "maxLength": 4096 },
+        "next_actions": { "type": "array", "maxItems": 100, "items": { "type": "string", "maxLength": 2048 } },
+        "completed": { "type": "array", "maxItems": 100, "items": { "type": "string", "maxLength": 2048 } },
+        "open_issues": { "type": "array", "maxItems": 100, "items": { "type": "string", "maxLength": 2048 } },
+        "changed_files": { "type": "array", "maxItems": 100, "items": { "type": "string", "maxLength": 2048 } }
       }
     },
     "integrity": { "type": "object", "required": ["payload_sha256"], "properties": { "payload_sha256": { "type": "string" } } }
