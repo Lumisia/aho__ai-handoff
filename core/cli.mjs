@@ -30,7 +30,7 @@ import { buildMemoryShard, storeMemoryShard, readVerifiedShards } from './memory
 import { rankMemoryShards, renderMemoryRecall } from './memory/recall.mjs';
 import { prepareUserPrompt, finalizeUserPrompt } from './hooks/user-prompt.mjs';
 import { projectFingerprint } from './lib/fingerprint.mjs';
-import { t } from './lib/i18n.mjs';
+import { t, askInstruction } from './lib/i18n.mjs';
 import { readHistory } from './capsule/history.mjs';
 import { gitContext } from './lib/gitctx.mjs';
 import { statuslineSegment } from './lib/statusline-segment.mjs';
@@ -143,7 +143,7 @@ async function hookStop(args) {
   if (result.action === 'request-summary') {
     await writeStdout(JSON.stringify({ decision: 'block', reason: result.prompt }) + '\n');
   } else if (result.action === 'ask') {
-    await writeStdout(JSON.stringify({ decision: 'block', reason: t('ask.create_or_skip', {}, locale) }) + '\n');
+    await writeStdout(JSON.stringify({ decision: 'block', reason: askInstruction(agent, locale) }) + '\n');
   } else {
     await writeStdout(JSON.stringify({ continue: true }) + '\n');
   }

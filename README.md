@@ -171,6 +171,15 @@ When you cross the threshold, the plugin builds a **capsule**: your goal, comple
 
 You choose how eager the plugin is, globally or per project: `auto` (hand off silently), `ask` (ask once per usage window), or `off`. The default threshold is **80%**, so the capsule is written while there is still headroom — the semantic write itself costs a little usage.
 
+In `ask` mode the question is put to **you**, not decided for you: the agent surfaces a one-question picker — **Yes** (create), **No** (skip), and a free-text **Other** for a custom request. In Claude Code this is the native `AskUserQuestion` picker. In Codex it is the native `request_user_input` picker, which works out of the box in **Plan mode**; to get it in **Default mode** you can opt in to an experimental Codex feature:
+
+```bash
+codex features enable default_mode_request_user_input   # then restart Codex, open a new thread
+codex features list                                     # expect: default_mode_request_user_input  under development  true
+```
+
+This is **optional**. The plugin never edits your Codex config or enables the flag for you, and if the picker is unavailable it falls back to a plain text question (`Yes / No / Other`) — `ask` mode works either way. The exact flag name is experimental and may change between Codex versions.
+
 ### 4. Verified memory recall
 
 Separate from the one-use capsule, the plugin keeps a **long-lived memory** of facts about your project — but only facts backed by evidence (a passing test, a command result, a source file). On your first prompt of a session, it recalls only the relevant, evidence-backed memory, within a token budget (default 800). It never stores guesses, hidden reasoning, or whole transcripts.
