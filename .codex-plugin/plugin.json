@@ -1,7 +1,7 @@
 {
   "id": "ai-handoff",
   "name": "ai-handoff",
-  "version": "1.1.15",
+  "version": "1.1.16",
   "description": "Automatic, integrity-checked handoff and verified memory recall between Claude Code and Codex.",
   "skills": "skills",
   "hooks": "./hooks/hooks-codex.json",
