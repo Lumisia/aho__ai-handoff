@@ -182,7 +182,6 @@ monitor 需要 Claude Code v2.1.105 或更高版本、interactive CLI session，
 - API key、token 等机密会在保存前被隐藏。
 - capsule 只是参考资料。真实文件、Git 状态和测试结果更重要。
 - monitor 不会中断正在生成的回答，可能会在当前回答结束后才响应。
-- project knowledge INDEX 目前还不会自动填充。
 
 ## 开发者测试
 

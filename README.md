@@ -182,7 +182,6 @@ Start a new session after changing settings.
 - Secrets such as API keys and tokens are redacted before saving.
 - A capsule is reference material. Real files, Git state, and test results matter more.
 - The monitor does not interrupt an active answer. It may react after the current answer finishes.
-- The project knowledge INDEX is not auto-filled yet.
 
 ## Developer tests
 
