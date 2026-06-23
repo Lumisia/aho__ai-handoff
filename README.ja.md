@@ -1,3 +1,6 @@
+<img width="1008" height="508" alt="Main_Image" src="https://github.com/user-attachments/assets/56155bd5-6fed-4ad2-a949-6c2df2912f17" />
+
+
 [English](README.md) | [한국어](README.ko.md) | **日本語** | [中文](README.zh.md)
 
 # claude-codex-auto-handoff
