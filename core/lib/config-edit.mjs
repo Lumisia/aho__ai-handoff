@@ -17,6 +17,8 @@ export const CONFIG_KEYS = {
   'memory.auto_recall': { type: 'boolean' },
   'memory.auto_recall_token_budget': { type: 'number', min: 1 },
   'statusline.show_handoff': { type: 'boolean' },
+  'sensors.claude.freshness_ms': { type: 'number', min: 1000 },
+  'debug.stop_log': { type: 'boolean' },
   'locale': { type: 'enum', values: ['en', 'ko', 'ja', 'zh'] },
 };
 

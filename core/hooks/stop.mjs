@@ -1,9 +1,19 @@
+import { appendFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { projectFingerprint } from '../lib/fingerprint.mjs';
 import { evaluateTrigger } from './trigger.mjs';
 import { resolveProject } from '../lib/config.mjs';
 import { publishCapsule, readState, writeState } from '../capsule/store.mjs';
 import { dedupeKey, hasSeen, markSeen } from '../lib/dedupe.mjs';
-import { globalStatePath } from '../lib/paths.mjs';
+import { dataRoot, globalStatePath } from '../lib/paths.mjs';
+
+// Opt-in trace of every Stop decision, written to <dataRoot>/stop-debug.log, so
+// a live "why didn't it ask?" can be diagnosed from ground truth instead of
+// guesswork. Off unless config.debug.stop_log (or AI_HANDOFF_STOP_DEBUG) is set.
+function stopDebugLog(enabled, entry) {
+  if (!enabled) return;
+  try { appendFileSync(join(dataRoot(), 'stop-debug.log'), JSON.stringify(entry) + '\n'); } catch {}
+}
 import { saveApproval } from '../capsule/approval.mjs';
 import { sendNotification } from '../lib/notify.mjs';
 import {
@@ -32,6 +42,7 @@ export async function handleStop({ input, config, readSensor, agent, now = Date.
   const noticeMethod = notification.method ?? 'os';
   const noticeOpts = { method: noticeMethod, fallback: notification.fallback ?? 'terminal' };
   const sendNotice = (title, body) => { if (noticeMethod !== 'off') notifyFn(title, body, noticeOpts); };
+  const debugStop = !!(config.debug?.stop_log) || !!(pcfg.debug?.stop_log) || !!process.env.AI_HANDOFF_STOP_DEBUG;
   const slotKey = generationSlotKey({ agent, sessionId: input.session_id, projectFingerprint: fp });
 
   if (input.stop_hook_active) {
@@ -90,6 +101,14 @@ export async function handleStop({ input, config, readSensor, agent, now = Date.
     samples: readSamples(fp, agent),
     burnRate: tcfg.burn_rate && { enabled: tcfg.burn_rate.enabled, runwayMinutes: tcfg.burn_rate.runway_minutes },
     now,
+  });
+  stopDebugLog(debugStop, {
+    at: new Date(now).toISOString(),
+    agent, sessionId: input.session_id, fingerprint: fp,
+    mode: tcfg.mode, threshold: tcfg.threshold_percent,
+    sensor: reading ? { usedPercent: reading.usedPercent, source: reading.source, capturedAt: reading.capturedAt } : null,
+    deduped: hasSeen(gstate, dkey),
+    action: ev.action, reason: ev.reason,
   });
   if (ev.action === 'none') return { action: 'none', reason: ev.reason, fingerprint: fp };
 
