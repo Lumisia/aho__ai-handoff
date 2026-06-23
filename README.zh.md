@@ -1,5 +1,4 @@
-<img width="1008" height="508" alt="Main_Image" src="https://github.com/user-attachments/assets/56155bd5-6fed-4ad2-a949-6c2df2912f17" />
-
+<img width="1008" height="508" alt="Main_Image" src="https://github.com/user-attachments/assets/a9c741a2-0e24-403f-9f19-d3f6f6a2b86c" />
 
 [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | **中文**
 
