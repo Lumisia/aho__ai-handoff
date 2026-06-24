@@ -20,6 +20,10 @@ function sentinel(goal) {
   return `<handoff-capsule>${JSON.stringify({ goal, next_actions: ['continue'], completed: [], open_issues: [], status: 'in_progress' })}</handoff-capsule>`;
 }
 
+function inlineSentinel(goal) {
+  return `done\n\n\`\`\`ai-handoff-capsule\n${JSON.stringify({ goal, next_actions: ['continue'], completed: [], open_issues: [], status: 'in_progress' })}\n\`\`\``;
+}
+
 test('shared automatic hooks hand off Codex → Claude → Codex', () => {
   const data = mkdtempSync(join(tmpdir(), 'ah-bi-'));
   const cwd = mkdtempSync(join(tmpdir(), 'ah-project-'));
@@ -42,11 +46,11 @@ test('shared automatic hooks hand off Codex → Claude → Codex', () => {
   const codexEnv = { ...common, PLUGIN_ROOT: root, CLAUDE_PLUGIN_ROOT: '' };
   const claudeEnv = { ...common, CLAUDE_PLUGIN_ROOT: root };
 
-  const first = JSON.parse(run(dispatcher, ['stop'], { cwd, session_id: 'codex-s' }, codexEnv));
-  assert.equal(first.decision, 'block');
+  const first = run(dispatcher, ['user-prompt'], { cwd, session_id: 'codex-s', turn_id: 'codex-t1' }, codexEnv);
+  assert.match(first, /ai-handoff-capsule/);
   run(dispatcher, ['stop'], {
-    cwd, session_id: 'codex-s', stop_hook_active: true,
-    last_assistant_message: sentinel('Codex to Claude automatic'),
+    cwd, session_id: 'codex-s', turn_id: 'codex-t1',
+    last_assistant_message: inlineSentinel('Codex to Claude automatic'),
   }, codexEnv);
   assert.match(run(dispatcher, ['session-start'], { cwd, session_id: 'claude-s' }, claudeEnv), /Codex to Claude automatic/);
 
@@ -55,8 +59,7 @@ test('shared automatic hooks hand off Codex → Claude → Codex', () => {
       five_hour: { used_percentage: 91, resets_at: 9999999999 },
     },
   }, claudeEnv);
-  // Claude's Stop continuation is non-error feedback via additionalContext,
-  // whereas Codex (the `first` hop above) uses decision:block.
+  // Claude keeps its Stop continuation behavior; Codex now injects before Stop.
   const second = JSON.parse(run(dispatcher, ['stop'], { cwd, session_id: 'claude-s' }, claudeEnv));
   assert.equal(second.decision, undefined);
   assert.match(second.hookSpecificOutput.additionalContext, /handoff-capsule/);

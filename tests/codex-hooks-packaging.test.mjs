@@ -45,5 +45,7 @@ test('the declared Codex Stop command fires with only PLUGIN_ROOT in the environ
     encoding: 'utf8',
     env: { ...process.env, PLUGIN_ROOT: root, AI_HANDOFF_ROOT: data, AH_NO_APPSERVER: '1', CODEX_HOME: codexHome, CLAUDE_PLUGIN_ROOT: '' },
   });
-  assert.equal(JSON.parse(out).decision, 'block', 'Stop hook should request a summary at 90% usage');
+  const parsed = JSON.parse(out);
+  assert.equal(parsed.continue, true, 'Codex Stop hook should not create a continuation prompt at 90% usage');
+  assert.equal(parsed.decision, undefined);
 });

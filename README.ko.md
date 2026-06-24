@@ -104,6 +104,12 @@ Codex는 별도 센서 설정이 필요 없습니다.
 4. `auto` 모드에서는 자동으로 캡슐을 만듭니다.
 5. 다른 도구를 열면 캡슐을 읽고 이어서 작업합니다.
 
+### Codex 캡슐 동작
+
+Codex는 기본적으로 Stop hook에서 모델을 다시 불러 캡슐을 만들지 않습니다. Codex의 Stop `decision: "block"`과 `reason`은 사용자에게 보이는 continuation prompt가 되므로, 캡슐 생성 지시가 대화에 노출될 수 있기 때문입니다.
+
+대신 ai-handoff는 `UserPromptSubmit` 또는 `PostToolUse` 때 developer context를 주입합니다. `auto` 모드에서는 Codex가 최종 답변 맨 아래에 `ai-handoff-capsule` fenced JSON을 붙이고, Stop hook은 그 내용을 파싱해 저장만 합니다. `ask` 모드에서는 Stop 전에 `request_user_input`으로 묻도록 지시합니다. threshold를 Stop 시점에 처음 알게 되면, Codex를 다시 실행하지 않고 조용히 `DEGRADED_AVAILABLE` 캡슐을 저장합니다.
+
 Claude Code에서는 plugin monitor가 자동으로 사용량을 지켜볼 수 있습니다. 사용자가 `scripts/usage-monitor.mjs`를 직접 실행하지 않아도 됩니다.
 
 monitor가 동작하려면 Claude Code v2.1.105 이상, interactive CLI 세션, user/personal 범위의 플러그인 설치가 필요합니다. monitor를 쓸 수 없는 환경에서는 Stop hook이 대신 동작합니다.
@@ -156,6 +162,10 @@ Claude Code에서는 명령이 `/ai-handoff:handoff-...`처럼 보일 수 있습
 |---|---:|---|
 | `triggers.five_hour.threshold_percent` | `80` | 몇 %에서 인계를 준비할지 |
 | `triggers.five_hour.mode` | `ask` | `ask`, `auto`, `off` 중 하나 |
+| `codex.inline_final_capsule` | `true` | Codex auto 모드에서 최종 답변 fenced 캡슐 흐름을 사용할지 |
+| `codex.stop_continuation_auto_summary` | `false` | 기존 Codex Stop `decision:block` 요약 continuation을 허용할지 |
+| `codex.stop_continuation_ask` | `false` | 기존 Codex Stop `decision:block` ask continuation을 허용할지 |
+| `codex.degraded_fallback_on_stop` | `true` | Codex가 Stop 시점에 처음 threshold를 넘으면 degraded 캡슐을 저장할지 |
 | `clear.older_than_days` | `30` | used 캡슐 정리 기준, 기본 30일 |
 | `clear.auto.enabled` | `false` | SessionStart 때 오래된 used 캡슐 자동 삭제를 켤지 |
 | `approval.ttl_ms` | `900000` | 질문 응답이 유효한 시간, 기본 15분 |

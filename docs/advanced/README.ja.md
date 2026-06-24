@@ -12,6 +12,7 @@ ai-handoff が期待どおりに動かないときに見るページです。
 4. [保存場所と AI_HANDOFF_ROOT](#保存場所と-ai_handoff_root)
 5. [高度な設定キー](#高度な設定キー)
 6. [設定できる引数](#handoff-clear-arguments)
+7. [Codex capsule の動作](#codex-capsule-の動作)
 
 ## 最初に確認すること
 
@@ -96,6 +97,10 @@ export AI_HANDOFF_ROOT="$HOME/ai-handoff-store"
 | `triggers.five_hour.burn_rate.enabled` | 使用量の減りが速いとき、早めに引き継ぎを準備するか |
 | `triggers.five_hour.burn_rate.runway_minutes` | 残り時間が何分以下なら準備するか、5-120 |
 | `capsule.completed_autocreate` | 作業完了に見える状態でも自動 capsule を作るか |
+| `codex.inline_final_capsule` | Codex auto mode で最終回答の fenced capsule flow を使うか。既定値は `true` |
+| `codex.stop_continuation_auto_summary` | 旧 Codex Stop `decision:block` summary continuation を許可するか。既定値は `false` |
+| `codex.stop_continuation_ask` | 旧 Codex Stop `decision:block` ask continuation を許可するか。既定値は `false` |
+| `codex.degraded_fallback_on_stop` | Codex が Stop 時点で初めて threshold を超えた場合に degraded capsule を保存するか。既定値は `true` |
 | `clear.auto.enabled` | SessionStart 時に古い used capsule の自動削除をオン/オフするか。既定値は `false` |
 | `clear.older_than_days` | used capsule を削除する既定の経過日数。既定値は 30 日 |
 | `handoff.notify_newer_pending` | より新しい待機中 capsule があるとき通知するか |
@@ -146,3 +151,23 @@ export AI_HANDOFF_ROOT="$HOME/ai-handoff-store"
 scope なしで `--older-than` だけを指定すると、scope は `used` になります。`--older-than` を省略した場合、used 系 scope は `clear.older_than_days` の設定値を使います。既定値は 30 日です。
 
 自動削除は手動コマンドとは別です。`clear.auto.enabled` を `true` にすると、SessionStart 時に古い `used` capsule の削除を実行します。既定値はオフ (`false`) です。バックグラウンドで常時動くのではなく、SessionStart hook が実行されたときだけ動きます。自動削除の経過日数は `clear.older_than_days` を使い、既定値は 30 日です。
+
+## Codex capsule の動作
+
+Codex Stop hook は capsule 作成のために既定で `decision: "block"` を使いません。Codex ではこの値が `reason` をユーザーに見える continuation prompt にするため、内部指示のような capsule 作成文が hook feedback や通常の assistant 出力として表示される可能性があります。
+
+既定の流れは次のとおりです。
+
+```text
+UserPromptSubmit または PostToolUse
+  -> threshold を検知
+  -> 最終回答に ai-handoff-capsule footer を付ける developer context を注入
+Assistant final answer
+  -> ユーザーへ通常どおり回答
+  -> fenced ai-handoff-capsule JSON を追加
+Stop
+  -> capsule を parse して publish
+  -> {"continue": true} を返す
+```
+
+Codex が Stop 時点で初めて threshold 超過を検知した場合、回答はすでに終わっているため自然に footer を追加できません。既定では `DEGRADED_AVAILABLE` capsule を保存し、静かに続行します。旧来の visible continuation を明示的に使いたい場合だけ、`codex.stop_continuation_auto_summary` または `codex.stop_continuation_ask` を `true` にしてください。

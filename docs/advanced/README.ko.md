@@ -12,6 +12,7 @@
 4. [저장 위치와 AI_HANDOFF_ROOT](#저장-위치와-ai_handoff_root)
 5. [고급 설정 키](#고급-설정-키)
 6. [설정할 수 있는 인자 값](#handoff-clear-arguments)
+7. [Codex 캡슐 동작](#codex-캡슐-동작)
 
 ## 먼저 확인할 것
 
@@ -96,6 +97,10 @@ export AI_HANDOFF_ROOT="$HOME/ai-handoff-store"
 | `triggers.five_hour.burn_rate.enabled` | 빠르게 사용량이 줄어들 때 더 일찍 인계를 준비할지 |
 | `triggers.five_hour.burn_rate.runway_minutes` | 남은 시간이 몇 분 이하일 때 준비할지, 5-120 |
 | `capsule.completed_autocreate` | 작업 완료 상태에서도 자동 캡슐을 만들지 |
+| `codex.inline_final_capsule` | Codex auto 모드에서 최종 답변 fenced 캡슐 흐름을 사용할지, 기본값 `true` |
+| `codex.stop_continuation_auto_summary` | 기존 Codex Stop `decision:block` 요약 continuation을 허용할지, 기본값 `false` |
+| `codex.stop_continuation_ask` | 기존 Codex Stop `decision:block` ask continuation을 허용할지, 기본값 `false` |
+| `codex.degraded_fallback_on_stop` | Codex가 Stop 시점에 처음 threshold를 넘으면 degraded 캡슐을 저장할지, 기본값 `true` |
 | `clear.auto.enabled` | SessionStart 때 오래된 used 캡슐 자동 삭제를 켤지, 기본값 `false` |
 | `clear.older_than_days` | used 캡슐 정리 기준일, 기본 30일 |
 | `handoff.notify_newer_pending` | 더 새로운 대기 캡슐이 있으면 알려줄지 |
@@ -146,3 +151,23 @@ export AI_HANDOFF_ROOT="$HOME/ai-handoff-store"
 scope 없이 `--older-than`만 쓰면 scope는 `used`로 처리됩니다. `--older-than`을 생략하면 used 계열 scope는 `clear.older_than_days` 설정값을 사용하며 기본값은 30일입니다.
 
 자동 정리는 수동 명령과 별도입니다. `clear.auto.enabled`를 `true`로 설정하면 SessionStart 때 오래된 `used` 캡슐 정리를 실행합니다. 기본값은 꺼짐(`false`)이며, 백그라운드에서 계속 실행되는 방식이 아니라 SessionStart hook이 실행될 때만 동작합니다. 자동 정리 기준일은 `clear.older_than_days`를 사용하며 기본값은 30일입니다.
+
+## Codex 캡슐 동작
+
+Codex Stop hook은 캡슐 생성을 위해 기본값으로 `decision: "block"`을 쓰지 않습니다. Codex에서 이 값은 `reason`을 사용자에게 보이는 continuation prompt로 만들기 때문에, 숨은 내부 지시처럼 보이는 캡슐 생성 문구가 hook feedback과 일반 assistant 답변으로 노출될 수 있습니다.
+
+기본 흐름은 다음과 같습니다.
+
+```text
+UserPromptSubmit 또는 PostToolUse
+  -> threshold 감지
+  -> 최종 답변에 ai-handoff-capsule footer를 붙이라는 developer context 주입
+Assistant 최종 답변
+  -> 사용자 요청을 정상 답변
+  -> fenced ai-handoff-capsule JSON 추가
+Stop
+  -> 캡슐을 파싱하고 publish
+  -> {"continue": true} 반환
+```
+
+Codex가 Stop 시점에 처음 threshold를 넘은 것을 알게 되면, 이미 답변이 끝난 뒤라 자연스럽게 footer를 붙일 수 없습니다. 기본값은 `DEGRADED_AVAILABLE` 캡슐을 저장하고 조용히 계속하는 것입니다. 예전처럼 보이는 continuation을 명시적으로 원할 때만 `codex.stop_continuation_auto_summary` 또는 `codex.stop_continuation_ask`를 `true`로 설정하세요.

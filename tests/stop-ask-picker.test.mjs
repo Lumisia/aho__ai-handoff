@@ -24,7 +24,7 @@ function askEnv() {
   return { AI_HANDOFF_ROOT: data, AH_NO_APPSERVER: '1' };
 }
 
-test('codex ask branch tells the model to use request_user_input', () => {
+test('codex ask branch injects request_user_input before Stop', () => {
   const cwd = mkdtempSync(join(tmpdir(), 'ah-askp-'));
   const codexHome = mkdtempSync(join(tmpdir(), 'ah-askc-'));
   const sessions = join(codexHome, 'sessions', '2026', '06', '22');
@@ -36,9 +36,12 @@ test('codex ask branch tells the model to use request_user_input', () => {
   }) + '\n');
   const env = { ...askEnv(), CODEX_HOME: codexHome };
 
-  const out = JSON.parse(run(['hook:stop', '--agent', 'codex'], { cwd, session_id: 'codex-s' }, env));
-  assert.equal(out.decision, 'block');
-  assert.match(out.reason, /request_user_input/);
+  const out = run(['hook:user-prompt', '--agent', 'codex'], { cwd, session_id: 'codex-s', turn_id: 't1' }, env);
+  assert.match(out, /request_user_input/);
+  assert.match(out, /\/handoff create/);
+
+  const stop = JSON.parse(run(['hook:stop', '--agent', 'codex'], { cwd, session_id: 'codex-s', turn_id: 't1' }, env));
+  assert.deepEqual(stop, { continue: true });
 });
 
 test('claude-code ask branch tells the model to use AskUserQuestion', () => {

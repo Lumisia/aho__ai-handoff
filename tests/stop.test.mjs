@@ -4,6 +4,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { handleStop } from '../core/hooks/stop.mjs';
+import { prepareTurnHandoff } from '../core/hooks/turn-handoff.mjs';
 import { projectFingerprint } from '../core/lib/fingerprint.mjs';
 import { findPendingCapsule } from '../core/capsule/store.mjs';
 import { loadConfig } from '../core/lib/config.mjs';
@@ -23,24 +24,26 @@ cfgAuto.triggers.five_hour.mode = 'auto';
 
 const reading = { usedPercent: 85, windowMinutes: 300, resetsAt: 111, source: 'app-server' };
 
-test('auto over threshold requests exactly one semantic summary turn', async () => {
+test('Codex Stop-only auto over threshold publishes degraded capsule without continuation', async () => {
   await withRoot(async () => {
     const cwd = mkdtempSync(join(tmpdir(), 'ah-proj-'));
     const r = await handleStop({ input: { session_id: 's1', cwd }, config: cfgAuto, readSensor: async () => reading, agent: 'codex', now: 1000 });
-    assert.equal(r.action, 'request-summary');
+    assert.equal(r.action, 'create');
+    assert.equal(r.degraded, true);
     const fp = projectFingerprint(cwd);
     assert.equal(r.fingerprint, fp);
-    assert.equal(findPendingCapsule(fp), null);
+    assert.equal(findPendingCapsule(fp, { now: 1000 }).state.status, 'DEGRADED_AVAILABLE');
   });
 });
 
-test('completed auto generation makes later Stop in same window deduped', async () => {
+test('inline auto generation makes later Stop in same window deduped', async () => {
   await withRoot(async () => {
     const cwd = mkdtempSync(join(tmpdir(), 'ah-proj-'));
     const args = { input: { session_id: 's1', cwd }, config: cfgAuto, readSensor: async () => reading, agent: 'codex', now: 1000 };
-    await handleStop(args);
-    const summary = '<handoff-capsule>{"goal":"continue task","next_actions":["run tests"]}</handoff-capsule>';
-    const created = await handleStop({ ...args, input: { ...args.input, stop_hook_active: true, last_assistant_message: summary }, now: 1500 });
+    const prepared = await prepareTurnHandoff({ ...args, input: { ...args.input, turn_id: 't1' } });
+    assert.equal(prepared.injected, true);
+    const summary = 'done\n\n```ai-handoff-capsule\n{"goal":"continue task","next_actions":["run tests"]}\n```';
+    const created = await handleStop({ ...args, input: { ...args.input, turn_id: 't1', last_assistant_message: summary }, now: 1500 });
     assert.equal(created.action, 'create');
     const r3 = await handleStop({ ...args, now: 2000 });
     assert.equal(r3.action, 'none');
@@ -71,7 +74,7 @@ test('disabled trigger never reads the sensor or creates a capsule', async () =>
   });
 });
 
-test('ask keeps re-asking until the user resolves it, then create marks the window seen', async () => {
+test('Claude ask keeps re-asking until the user resolves it, then create marks the window seen', async () => {
   await withRoot(async () => {
     const cwd = mkdtempSync(join(tmpdir(), 'ah-proj-'));
     const config = loadConfig({});
@@ -79,7 +82,7 @@ test('ask keeps re-asking until the user resolves it, then create marks the wind
     const notifications = [];
     const args = {
       input: { session_id: 's-ask', cwd }, config, readSensor: async () => reading,
-      agent: 'codex', now: 1000, notifyFn: (...values) => notifications.push(values),
+      agent: 'claude-code', now: 1000, notifyFn: (...values) => notifications.push(values),
     };
     const first = await handleStop(args);
     assert.equal(first.action, 'ask');
@@ -126,7 +129,7 @@ test('resolved ask dedupes across Claude session changes in the same usage windo
   });
 });
 
-test('notification off still asks but sends no notification', async () => {
+test('notification off still asks but sends no notification for Claude', async () => {
   await withRoot(async () => {
     const cwd = mkdtempSync(join(tmpdir(), 'ah-proj-'));
     const config = loadConfig({});
@@ -135,7 +138,7 @@ test('notification off still asks but sends no notification', async () => {
     const notifications = [];
     const r = await handleStop({
       input: { session_id: 's-off', cwd }, config, readSensor: async () => reading,
-      agent: 'codex', now: 1000, notifyFn: (...values) => notifications.push(values),
+      agent: 'claude-code', now: 1000, notifyFn: (...values) => notifications.push(values),
     });
     assert.equal(r.action, 'ask');
     assert.equal(findApproval(r.fingerprint, { now: 1000 }).status, 'AWAITING_USER');

@@ -12,13 +12,13 @@ test('handleStop fires on burn-rate below threshold when enabled', async () => {
   const cwd = mkdtempSync(join(tmpdir(), 'ah-brp-'));
   const fp = projectFingerprint(cwd);
   const now = 1000 * 60000;
-  appendSample(fp, 'codex', { usedPercent: 60, at: now - 10 * 60000 });
+  appendSample(fp, 'claude-code', { usedPercent: 60, at: now - 10 * 60000 });
   const config = {
     triggers: { five_hour: { enabled: true, threshold_percent: 95, mode: 'ask', burn_rate: { enabled: true, runway_minutes: 30 } } },
     notification: { method: 'off' },
   };
   const readSensor = async () => ({ usedPercent: 80, windowMinutes: 300, resetsAt: null });
-  const res = await handleStop({ input: { cwd, session_id: 's' }, config, readSensor, agent: 'codex', now, notifyFn: () => {} });
+  const res = await handleStop({ input: { cwd, session_id: 's' }, config, readSensor, agent: 'claude-code', now, notifyFn: () => {} });
   assert.equal(res.action, 'ask');
   assert.equal(res.reason, 'burn-rate');
   delete process.env.AI_HANDOFF_ROOT;

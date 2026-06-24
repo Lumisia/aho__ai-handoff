@@ -10,6 +10,7 @@ const EVENT_COMMANDS = {
   'session-start': 'hook:session-start',
   stop: 'hook:stop',
   'user-prompt': 'hook:user-prompt',
+  'post-tool-use': 'hook:post-tool-use',
 };
 
 // How long two firings of the same event count as the same occurrence. Duplicate
@@ -21,10 +22,13 @@ const DEDUPE_WINDOW_MS = 5000;
 export function resolveHookInvocation(event, env = process.env) {
   const command = EVENT_COMMANDS[event];
   if (!command) throw new Error(`unknown hook event: ${event}`);
-  const pluginRoot = env.PLUGIN_ROOT || env.CLAUDE_PLUGIN_ROOT;
-  if (!pluginRoot) throw new Error('plugin root environment variable is missing');
-  const agent = env.PLUGIN_ROOT ? 'codex' : 'claude-code';
-  return { pluginRoot, agent, command };
+  if (env.CLAUDE_PLUGIN_ROOT) {
+    return { pluginRoot: env.CLAUDE_PLUGIN_ROOT, agent: 'claude-code', command };
+  }
+  if (env.PLUGIN_ROOT) {
+    return { pluginRoot: env.PLUGIN_ROOT, agent: 'codex', command };
+  }
+  throw new Error('plugin root environment variable is missing');
 }
 
 // Claim a single event occurrence so duplicate firings run the hook once. Codex

@@ -22,8 +22,12 @@ function mutate(fn, now) {
   } finally { releaseLock(lock); }
 }
 
-export function generationSlotKey({ agent, sessionId, projectFingerprint }) {
-  return sha256OfJson({ agent, sessionId, projectFingerprint }).slice(0, 16);
+export function generationSlotKey({
+  agent, sessionId, projectFingerprint, turnId = null,
+}) {
+  return sha256OfJson({
+    agent, sessionId, projectFingerprint, turnId: turnId || null,
+  }).slice(0, 16);
 }
 
 export function saveGeneration({ slotKey, context, now = Date.now() }) {
@@ -37,6 +41,35 @@ export function saveGeneration({ slotKey, context, now = Date.now() }) {
 export function findGeneration(slotKey) {
   const value = read().generations?.[slotKey];
   return value?.status === 'GENERATING' ? value : null;
+}
+
+export function findGenerationForTurn({
+  agent, sessionId, projectFingerprint, turnId = null,
+}) {
+  const exactKey = generationSlotKey({
+    agent, sessionId, projectFingerprint, turnId: turnId || null,
+  });
+  const exact = findGeneration(exactKey);
+  if (exact) return { slotKey: exactKey, generation: exact };
+
+  if (turnId) {
+    const sessionKey = generationSlotKey({
+      agent, sessionId, projectFingerprint, turnId: null,
+    });
+    const session = findGeneration(sessionKey);
+    if (session) return { slotKey: sessionKey, generation: session };
+  }
+
+  const values = Object.values(read().generations || {});
+  const match = values.find((value) => {
+    const context = value?.context || {};
+    return value?.status === 'GENERATING'
+      && context.agent === agent
+      && context.sessionId === sessionId
+      && (!context.projectFingerprint || context.projectFingerprint === projectFingerprint)
+      && (!turnId || !context.turnId || context.turnId === turnId);
+  });
+  return match ? { slotKey: match.slotKey, generation: match } : null;
 }
 
 export function finishGeneration(slotKey, { now = Date.now() } = {}) {

@@ -12,6 +12,7 @@
 4. [存储位置和 AI_HANDOFF_ROOT](#存储位置和-ai_handoff_root)
 5. [高级设置键](#高级设置键)
 6. [可设置的参数值](#handoff-clear-arguments)
+7. [Codex capsule 行为](#codex-capsule-行为)
 
 ## 先检查这些
 
@@ -96,6 +97,10 @@ export AI_HANDOFF_ROOT="$HOME/ai-handoff-store"
 | `triggers.five_hour.burn_rate.enabled` | 用量下降很快时，是否更早准备交接 |
 | `triggers.five_hour.burn_rate.runway_minutes` | 预计剩余时间低于多少分钟时准备，5-120 |
 | `capsule.completed_autocreate` | 即使任务看起来已完成，是否也自动创建 capsule |
+| `codex.inline_final_capsule` | 在 Codex auto mode 中使用最终回答 fenced capsule 流程，默认 `true` |
+| `codex.stop_continuation_auto_summary` | 是否允许旧的 Codex Stop `decision:block` summary continuation，默认 `false` |
+| `codex.stop_continuation_ask` | 是否允许旧的 Codex Stop `decision:block` ask continuation，默认 `false` |
+| `codex.degraded_fallback_on_stop` | Codex 在 Stop 时才首次超过 threshold 时是否保存 degraded capsule，默认 `true` |
 | `clear.auto.enabled` | 是否在 SessionStart 时自动删除旧 used capsule，默认 `false` |
 | `clear.older_than_days` | 清理 used capsule 的默认时间阈值，默认 30 天 |
 | `handoff.notify_newer_pending` | 有更新的等待中 capsule 时是否通知 |
@@ -146,3 +151,23 @@ export AI_HANDOFF_ROOT="$HOME/ai-handoff-store"
 如果只传 `--older-than` 而不传 scope，scope 会按 `used` 处理。省略 `--older-than` 时，used 类 scope 使用 `clear.older_than_days` 配置值，默认 30 天。
 
 自动清理和手动命令是分开的。把 `clear.auto.enabled` 设为 `true` 后，会在 SessionStart 时清理旧的 `used` capsule。默认关闭（`false`）。它不会在后台持续运行，只会在 SessionStart hook 执行时运行。自动清理的时间阈值使用 `clear.older_than_days`，默认 30 天。
+
+## Codex capsule 行为
+
+Codex Stop hook 默认不会为了创建 capsule 使用 `decision: "block"`。在 Codex 中，这会把 `reason` 变成用户可见的 continuation prompt，因此看似内部的 capsule 创建指令可能显示成 hook feedback 和普通 assistant 输出。
+
+默认流程如下。
+
+```text
+UserPromptSubmit 或 PostToolUse
+  -> 检测 threshold
+  -> 注入 developer context，要求最终回答附加 ai-handoff-capsule footer
+Assistant final answer
+  -> 正常回答用户
+  -> 附加 fenced ai-handoff-capsule JSON
+Stop
+  -> 解析并 publish capsule
+  -> 返回 {"continue": true}
+```
+
+如果 Codex 到 Stop 时才第一次检测到超过 threshold，当前回答已经结束，无法自然附加 footer。默认行为是保存 `DEGRADED_AVAILABLE` capsule 并静默继续。只有明确想使用旧的 visible continuation 行为时，才把 `codex.stop_continuation_auto_summary` 或 `codex.stop_continuation_ask` 设为 `true`。

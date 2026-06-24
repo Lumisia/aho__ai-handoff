@@ -12,6 +12,7 @@ Use this page when ai-handoff does not behave as expected.
 4. [Storage Location and AI_HANDOFF_ROOT](#storage-location-and-ai_handoff_root)
 5. [Advanced Setting Keys](#advanced-setting-keys)
 6. [Clear Command Arguments](#handoff-clear-arguments)
+7. [Codex Capsule Behavior](#codex-capsule-behavior)
 
 ## First Checks
 
@@ -102,6 +103,10 @@ Restart both Claude Code and Codex after changing the environment variable.
 | `triggers.five_hour.burn_rate.enabled` | Prepare handoff earlier when usage is draining quickly |
 | `triggers.five_hour.burn_rate.runway_minutes` | Prepare when estimated runway is below this many minutes, 5-120 |
 | `capsule.completed_autocreate` | Create an automatic capsule even when the task looks complete |
+| `codex.inline_final_capsule` | Use the final-answer fenced capsule flow for Codex auto mode, default `true` |
+| `codex.stop_continuation_auto_summary` | Allow legacy Codex Stop `decision:block` summary continuation, default `false` |
+| `codex.stop_continuation_ask` | Allow legacy Codex Stop `decision:block` ask continuation, default `false` |
+| `codex.degraded_fallback_on_stop` | Save a degraded capsule if Codex first crosses the threshold at Stop, default `true` |
 | `clear.auto.enabled` | Turn SessionStart auto-clear on or off for old used capsules, default `false` |
 | `clear.older_than_days` | Default age cutoff for clearing used capsules, default 30 |
 | `handoff.notify_newer_pending` | Notify when a newer pending capsule exists |
@@ -161,3 +166,30 @@ Automatic cleanup is separate from the manual command. Set
 off by default (`false`) and does not run continuously in the background; it
 runs when a SessionStart hook fires. The automatic age cutoff uses
 `clear.older_than_days`, default 30 days.
+
+## Codex Capsule Behavior
+
+Codex Stop hooks should not use `decision: "block"` by default for capsule
+creation. In Codex, that field creates a visible continuation prompt from
+`reason`, so a hidden-looking capsule instruction can show up as hook feedback
+and normal assistant output.
+
+The default flow is:
+
+```text
+UserPromptSubmit or PostToolUse
+  -> detect threshold
+  -> inject developer context asking for a final ai-handoff-capsule footer
+Assistant final answer
+  -> answer the user normally
+  -> append fenced ai-handoff-capsule JSON
+Stop
+  -> parse and publish the capsule
+  -> return {"continue": true}
+```
+
+If Codex first crosses the threshold only when Stop runs, the current answer is
+already complete and cannot naturally receive a footer. The default is to save a
+`DEGRADED_AVAILABLE` capsule and continue silently. Set
+`codex.stop_continuation_auto_summary` or `codex.stop_continuation_ask` to
+`true` only if you explicitly want the older visible continuation behavior.

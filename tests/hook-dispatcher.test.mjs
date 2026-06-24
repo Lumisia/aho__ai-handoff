@@ -9,11 +9,17 @@ test('dispatcher maps shared hook events for Codex', () => {
   assert.deepEqual(resolveHookInvocation('session-start', { PLUGIN_ROOT: 'C:/p' }), {
     pluginRoot: 'C:/p', agent: 'codex', command: 'hook:session-start',
   });
+  assert.deepEqual(resolveHookInvocation('post-tool-use', { PLUGIN_ROOT: 'C:/p' }), {
+    pluginRoot: 'C:/p', agent: 'codex', command: 'hook:post-tool-use',
+  });
 });
 
 test('dispatcher maps shared hook events for Claude Code', () => {
   assert.deepEqual(resolveHookInvocation('stop', { CLAUDE_PLUGIN_ROOT: '/p' }), {
     pluginRoot: '/p', agent: 'claude-code', command: 'hook:stop',
+  });
+  assert.deepEqual(resolveHookInvocation('stop', { PLUGIN_ROOT: '/codex', CLAUDE_PLUGIN_ROOT: '/claude' }), {
+    pluginRoot: '/claude', agent: 'claude-code', command: 'hook:stop',
   });
 });
 

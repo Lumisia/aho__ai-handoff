@@ -103,6 +103,12 @@ Codex 不需要额外的传感器设置。
 4. 在 `auto` mode 下，会自动创建 capsule。
 5. 打开另一个工具时，它会读取 capsule 并继续工作。
 
+### Codex capsule 行为
+
+Codex 默认不会从 Stop hook 再次调用模型来创建 capsule。Codex 的 Stop `decision: "block"` 和 `reason` 会变成用户可见的 continuation prompt，因此 capsule 创建指令可能出现在对话里。
+
+ai-handoff 改为在 `UserPromptSubmit` 或 `PostToolUse` 阶段注入 developer context。`auto` mode 下，Codex 会在最终回答末尾附加 `ai-handoff-capsule` fenced JSON，Stop hook 只负责解析并保存。`ask` mode 下，会在 Stop 前指示 Codex 使用 `request_user_input` 提问。如果直到 Stop 时才第一次检测到 threshold，ai-handoff 会静默保存 `DEGRADED_AVAILABLE` capsule，不会启动新的 Codex 回合。
+
 在 Claude Code 中，plugin monitor 可以自动监控用量。不要手动运行 `scripts/usage-monitor.mjs`。
 
 monitor 需要 Claude Code v2.1.105 或更高版本、interactive CLI session，以及 user/personal-scope plugin install。monitor 不可用时，Stop hook 会作为 fallback 继续工作。
@@ -153,6 +159,10 @@ monitor 需要 Claude Code v2.1.105 或更高版本、interactive CLI session，
 |---|---:|---|
 | `triggers.five_hour.threshold_percent` | `80` | 到多少百分比时准备交接 |
 | `triggers.five_hour.mode` | `ask` | `ask`, `auto`, `off` 之一 |
+| `codex.inline_final_capsule` | `true` | 在 Codex auto mode 中使用最终回答 fenced capsule 流程 |
+| `codex.stop_continuation_auto_summary` | `false` | 是否允许旧的 Codex Stop `decision:block` summary continuation |
+| `codex.stop_continuation_ask` | `false` | 是否允许旧的 Codex Stop `decision:block` ask continuation |
+| `codex.degraded_fallback_on_stop` | `true` | Codex 在 Stop 时才首次超过 threshold 时是否保存 degraded capsule |
 | `clear.older_than_days` | `30` | 清理 used capsule 的默认时间阈值 |
 | `clear.auto.enabled` | `false` | 是否在 SessionStart 时自动删除旧 used capsule |
 | `approval.ttl_ms` | `900000` | 回答有效时间，默认 15 分钟 |

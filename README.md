@@ -105,6 +105,12 @@ Codex needs no extra sensor setup.
 4. In `auto` mode, it creates the capsule automatically.
 5. Run `/handoff` in the other tool to read the capsule and continue. If `handoff.session_start_auto_fetch` is enabled, a new session can fetch it automatically.
 
+### Codex capsule behavior
+
+Codex does not create capsules by calling the model again from the Stop hook by default. Codex treats Stop `decision: "block"` and `reason` as a visible continuation prompt, so capsule instructions could appear in the conversation.
+
+Instead, ai-handoff injects developer context during `UserPromptSubmit` or `PostToolUse`. In `auto` mode, Codex appends a final `ai-handoff-capsule` fenced JSON section to the answer, and the Stop hook only parses and saves it. In `ask` mode, Codex is instructed to ask with `request_user_input` before Stop. If the threshold is first detected only at Stop time, ai-handoff quietly saves a `DEGRADED_AVAILABLE` capsule and does not start another Codex turn.
+
 In Claude Code, a plugin monitor can watch usage automatically. Do not run `scripts/usage-monitor.mjs` yourself.
 
 The monitor requires Claude Code v2.1.105 or newer, an interactive CLI session, and a user/personal-scope plugin install. If monitors are unavailable, the Stop hook still works as a fallback.
@@ -156,6 +162,10 @@ Important settings:
 | `triggers.five_hour.threshold_percent` | `80` | Usage percent that prepares a handoff |
 | `triggers.five_hour.mode` | `ask` | One of `ask`, `auto`, `off` |
 | `handoff.session_start_auto_fetch` | `false` | Automatically inject a pending capsule on SessionStart |
+| `codex.inline_final_capsule` | `true` | Use the final-answer fenced capsule flow for Codex auto mode |
+| `codex.stop_continuation_auto_summary` | `false` | Allow legacy Codex Stop `decision:block` summary continuation |
+| `codex.stop_continuation_ask` | `false` | Allow legacy Codex Stop `decision:block` ask continuation |
+| `codex.degraded_fallback_on_stop` | `true` | Save a degraded capsule if Codex first crosses the threshold at Stop |
 | `clear.older_than_days` | `30` | Default age cutoff for clearing used capsules |
 | `clear.auto.enabled` | `false` | Turn SessionStart auto-clear on or off for old used capsules |
 | `approval.ttl_ms` | `900000` | How long an answer is valid, default 15 minutes |

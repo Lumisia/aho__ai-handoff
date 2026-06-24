@@ -33,9 +33,10 @@ import {
 import { buildMemoryShard, storeMemoryShard, readVerifiedShards } from './memory/store.mjs';
 import { rankMemoryShards, renderMemoryRecall } from './memory/recall.mjs';
 import { prepareUserPrompt, finalizeUserPrompt } from './hooks/user-prompt.mjs';
+import { prepareTurnHandoff } from './hooks/turn-handoff.mjs';
 import { projectFingerprint } from './lib/fingerprint.mjs';
 import { t, askInstruction } from './lib/i18n.mjs';
-import { stopContinuationOutput } from './lib/hook-output.mjs';
+import { additionalContextOutput, continueOutput, stopContinuationOutput } from './lib/hook-output.mjs';
 import { readHistory } from './capsule/history.mjs';
 import { gitContext } from './lib/gitctx.mjs';
 import { statuslineSegment } from './lib/statusline-segment.mjs';
@@ -176,11 +177,13 @@ async function hookStop(args) {
   const result = await handleStop({ input, config, readSensor: sensorReader(agent, input, config), agent });
   process.stderr.write(`[handoff] stop: ${result.action} (${result.reason})\n`);
   if (result.action === 'request-summary') {
-    await writeStdout(JSON.stringify(stopContinuationOutput(agent, result.prompt)) + '\n');
+    const allowCodex = agent !== 'codex' || config.codex?.stop_continuation_auto_summary === true;
+    await writeStdout(JSON.stringify(stopContinuationOutput(agent, result.prompt, { allowCodex })) + '\n');
   } else if (result.action === 'ask') {
-    await writeStdout(JSON.stringify(stopContinuationOutput(agent, askInstruction(agent, locale))) + '\n');
+    const allowCodex = agent !== 'codex' || config.codex?.stop_continuation_ask === true;
+    await writeStdout(JSON.stringify(stopContinuationOutput(agent, askInstruction(agent, locale), { allowCodex })) + '\n');
   } else {
-    await writeStdout(JSON.stringify({ continue: true }) + '\n');
+    await writeStdout(JSON.stringify(continueOutput()) + '\n');
   }
 }
 
@@ -356,6 +359,18 @@ async function hookUserPrompt(args) {
   }
   const parts = [];
 
+  try {
+    const handoff = await prepareTurnHandoff({
+      input,
+      config,
+      readSensor: sensorReader(agent, input, config),
+      agent,
+    });
+    if (handoff.injected) parts.push(handoff.context);
+  } catch (error) {
+    process.stderr.write(`[handoff] turn-handoff failed: ${error.message}\n`);
+  }
+
   // A peer checkpoint created after this session started will not reach a
   // running session on its own. Surface it as a one-time nudge with key info so
   // the model can pull it with /handoff. Best-effort.
@@ -381,6 +396,28 @@ async function hookUserPrompt(args) {
   }
 
   if (parts.length) await writeStdout(parts.join('\n\n') + '\n');
+}
+
+async function hookPostToolUse(args) {
+  const agent = argValue(args, '--agent', 'codex');
+  const input = await readInput(args);
+  const config = loadConfig({ path: configPath() });
+
+  try {
+    const handoff = await prepareTurnHandoff({
+      input,
+      config,
+      readSensor: sensorReader(agent, input, config),
+      agent,
+    });
+    const output = handoff.injected
+      ? additionalContextOutput('PostToolUse', handoff.context)
+      : continueOutput();
+    await writeStdout(JSON.stringify(output) + '\n');
+  } catch (error) {
+    process.stderr.write(`[handoff] post-tool-use handoff failed: ${error.message}\n`);
+    await writeStdout(JSON.stringify(continueOutput()) + '\n');
+  }
 }
 
 async function memoryRemember(args) {
@@ -454,6 +491,7 @@ const commands = {
   'hook:stop': hookStop,
   'hook:session-start': hookSessionStart,
   'hook:user-prompt': hookUserPrompt,
+  'hook:post-tool-use': hookPostToolUse,
   'handoff:status': handoffStatus,
   'handoff:preview': handoffPreview,
   'handoff:resume': handoffResume,
