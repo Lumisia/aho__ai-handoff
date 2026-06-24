@@ -120,6 +120,7 @@ monitor가 동작하려면 Claude Code v2.1.105 이상, interactive CLI 세션, 
 | `/handoff checkpoint` | 지금 상태를 수동 저장합니다 |
 | `/handoff history` | 현재 프로젝트의 인계 기록을 봅니다 |
 | `/handoff recent` | 모든 프로젝트의 최근 캡슐을 봅니다 |
+| `/handoff clear <this_project, used, consume, pending, expired>` | 다양한 인자 값으로 삭제할 범위를 정합니다. [자세한 설명을 보시기 바랍니다.](docs/advanced/README.ko.md#handoff-clear-arguments) |
 | `/handoff doctor` | 설정이나 캡슐 문제를 진단합니다 |
 | `/handoff config` | 설정을 봅니다 |
 

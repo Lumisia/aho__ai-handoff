@@ -117,6 +117,7 @@ monitor 需要 Claude Code v2.1.105 或更高版本、interactive CLI session，
 | `/handoff checkpoint` | 手动保存当前状态 |
 | `/handoff history` | 查看当前项目的交接历史 |
 | `/handoff recent` | 查看所有项目最近的 capsule |
+| `/handoff clear <this_project, used, consume, pending, expired>` | 使用不同参数指定删除范围。[请查看详细说明。](docs/advanced/README.zh.md#handoff-clear-arguments) |
 | `/handoff doctor` | 诊断设置或 capsule 问题 |
 | `/handoff config` | 显示设置 |
 

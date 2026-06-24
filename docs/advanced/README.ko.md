@@ -11,6 +11,7 @@
 3. [Claude Code와 Codex가 서로 안 이어져요](#claude-code와-codex가-서로-안-이어져요)
 4. [저장 위치와 AI_HANDOFF_ROOT](#저장-위치와-ai_handoff_root)
 5. [고급 설정 키](#고급-설정-키)
+6. [설정할 수 있는 인자 값](#handoff-clear-arguments)
 
 ## 먼저 확인할 것
 
@@ -104,3 +105,40 @@ export AI_HANDOFF_ROOT="$HOME/ai-handoff-store"
 | `notification.fallback` | OS 알림 실패 시 terminal 알림을 쓸지 |
 
 일반 사용자는 `threshold_percent`, `mode`, `realtime.enabled` 정도만 바꿔도 충분합니다.
+
+<a id="handoff-clear-arguments"></a>
+
+## 6. 설정할 수 있는 인자 값
+
+`/handoff clear`는 첫 번째 인자 값으로 삭제 범위를 정합니다.
+
+```text
+/handoff clear <this_project, used, consume, pending, expired> [--older-than 7d] [-c]
+```
+
+| 인자 값 | 설명 |
+|---|---|
+| `this_project` | 현재 프로젝트 fingerprint의 ai-handoff 상태 폴더 전체를 삭제합니다. 소스 저장소는 삭제하지 않습니다. 별칭: `this-project`, `project`. |
+| `used` | 사용이 끝난 터미널 상태의 캡슐을 삭제합니다. 대상 상태는 `CONSUMED`, `EXPIRED`, `REJECTED`, `SKIPPED`, `FAILED`입니다. |
+| `consume` | 소비된 캡슐만 삭제합니다. `consumed`의 별칭입니다. |
+| `consumed` | 소비된 캡슐만 삭제합니다. |
+| `pending` | 대기 중인 캡슐을 삭제합니다. 대상 상태는 `AVAILABLE`, `DEGRADED_AVAILABLE`입니다. |
+| `expired` | 만료된 캡슐만 삭제합니다. |
+
+| 옵션 | 설명 |
+|---|---|
+| `--older-than 7d` | 지정한 기간보다 오래된 캡슐만 삭제합니다. `ms`, `m`, `h`, `d` 단위를 지원하며 숫자만 쓰면 일 단위입니다. |
+| `-c`, `--confirm`, `--yes` | `this_project` 삭제를 즉시 승인합니다. 없으면 먼저 확인용 preview를 반환합니다. |
+
+예시:
+
+```text
+/handoff clear used
+/handoff clear used --older-than 7d
+/handoff clear --older-than 7d
+/handoff clear pending
+/handoff clear this_project
+/handoff clear this_project -c
+```
+
+scope 없이 `--older-than`만 쓰면 scope는 `used`로 처리됩니다. `--older-than`을 생략하면 used 계열 scope는 `clear.older_than_days` 설정값을 사용하며 기본값은 30일입니다.

@@ -118,6 +118,7 @@ monitor には Claude Code v2.1.105 以上、interactive CLI session、user/pers
 | `/handoff checkpoint` | 現在の状態を手動保存します |
 | `/handoff history` | 現在のプロジェクトの引き継ぎ履歴を表示します |
 | `/handoff recent` | 全プロジェクトの最近の capsule を表示します |
+| `/handoff clear <this_project, used, consume, pending, expired>` | さまざまな引数で削除範囲を指定します。[詳しい説明をご覧ください。](docs/advanced/README.ja.md#handoff-clear-arguments) |
 | `/handoff doctor` | 設定や capsule の問題を診断します |
 | `/handoff config` | 設定を表示します |
 

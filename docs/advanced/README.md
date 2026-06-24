@@ -11,6 +11,7 @@ Use this page when ai-handoff does not behave as expected.
 3. [Claude Code and Codex Do Not Connect](#claude-code-and-codex-do-not-connect)
 4. [Storage Location and AI_HANDOFF_ROOT](#storage-location-and-ai_handoff_root)
 5. [Advanced Setting Keys](#advanced-setting-keys)
+6. [Clear Command Arguments](#handoff-clear-arguments)
 
 ## First Checks
 
@@ -96,20 +97,6 @@ Restart both Claude Code and Codex after changing the environment variable.
 
 `/handoff config` shows the current settings. Values must match the expected type and range.
 
-Clear old local handoff state with:
-
-```text
-/handoff clear used
-/handoff clear used --older-than 7d
-/handoff clear --older-than 7d
-/handoff clear pending
-/handoff clear this_project
-/handoff clear this_project -c
-```
-
-`this_project` removes only this project's ai-handoff state folder, not the
-source repository. Without `-c`, it returns a confirmation preview first.
-
 | Key | Meaning |
 |---|---|
 | `triggers.five_hour.burn_rate.enabled` | Prepare handoff earlier when usage is draining quickly |
@@ -127,3 +114,44 @@ source repository. Without `-c`, it returns a confirmation preview first.
 | `notification.fallback` | Use terminal notification when OS notification fails |
 
 Most users only need `threshold_percent`, `mode`, and `realtime.enabled`.
+
+<a id="handoff-clear-arguments"></a>
+
+## Clear Command Arguments
+
+`/handoff clear` chooses what to delete from the first argument:
+
+```text
+/handoff clear <this_project, used, consume, pending, expired> [--older-than 7d] [-c]
+```
+
+| Argument | Meaning |
+|---|---|
+| `this_project` | Clear this project's entire ai-handoff state folder. It does not delete the source repository. Aliases: `this-project`, `project`. |
+| `used` | Clear old terminal capsules: `CONSUMED`, `EXPIRED`, `REJECTED`, `SKIPPED`, and `FAILED`. |
+| `consume` | Clear consumed capsules only. Alias for `consumed`. |
+| `consumed` | Clear consumed capsules only. |
+| `pending` | Clear pending capsules: `AVAILABLE` and `DEGRADED_AVAILABLE`. |
+| `expired` | Clear expired capsules only. |
+
+Options:
+
+| Option | Meaning |
+|---|---|
+| `--older-than 7d` | Only clear matching capsules older than the given age. Supports `ms`, `m`, `h`, and `d`; a bare number means days. |
+| `-c`, `--confirm`, `--yes` | Confirm `this_project` deletion immediately. Without this, `/handoff clear this_project` returns a confirmation preview first. |
+
+Examples:
+
+```text
+/handoff clear used
+/handoff clear used --older-than 7d
+/handoff clear --older-than 7d
+/handoff clear pending
+/handoff clear this_project
+/handoff clear this_project -c
+```
+
+If `--older-than` is supplied without a scope, the scope defaults to `used`.
+When no `--older-than` is supplied, used-like scopes use
+`clear.older_than_days` from config. The default is 30 days.

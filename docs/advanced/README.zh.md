@@ -11,6 +11,7 @@
 3. [Claude Code 和 Codex 不能互通](#claude-code-和-codex-不能互通)
 4. [存储位置和 AI_HANDOFF_ROOT](#存储位置和-ai_handoff_root)
 5. [高级设置键](#高级设置键)
+6. [可设置的参数值](#handoff-clear-arguments)
 
 ## 先检查这些
 
@@ -104,3 +105,40 @@ export AI_HANDOFF_ROOT="$HOME/ai-handoff-store"
 | `notification.fallback` | OS 通知失败时是否使用 terminal 通知 |
 
 大多数用户只需要改 `threshold_percent`、`mode` 和 `realtime.enabled`。
+
+<a id="handoff-clear-arguments"></a>
+
+## 6. 可设置的参数值
+
+`/handoff clear` 使用第一个参数决定删除范围。
+
+```text
+/handoff clear <this_project, used, consume, pending, expired> [--older-than 7d] [-c]
+```
+
+| 参数值 | 说明 |
+|---|---|
+| `this_project` | 删除当前项目 fingerprint 下的整个 ai-handoff 状态文件夹。不会删除源码仓库。别名：`this-project`, `project`。 |
+| `used` | 删除已经结束的 capsule。目标状态包括 `CONSUMED`, `EXPIRED`, `REJECTED`, `SKIPPED`, `FAILED`。 |
+| `consume` | 只删除已消费的 capsule。它是 `consumed` 的别名。 |
+| `consumed` | 只删除已消费的 capsule。 |
+| `pending` | 删除等待中的 capsule。目标状态包括 `AVAILABLE`, `DEGRADED_AVAILABLE`。 |
+| `expired` | 只删除已过期的 capsule。 |
+
+| 选项 | 说明 |
+|---|---|
+| `--older-than 7d` | 只删除早于指定时间的 capsule。支持 `ms`, `m`, `h`, `d`；只写数字时按天计算。 |
+| `-c`, `--confirm`, `--yes` | 立即确认 `this_project` 删除。不加该选项时会先返回确认 preview。 |
+
+示例：
+
+```text
+/handoff clear used
+/handoff clear used --older-than 7d
+/handoff clear --older-than 7d
+/handoff clear pending
+/handoff clear this_project
+/handoff clear this_project -c
+```
+
+如果只传 `--older-than` 而不传 scope，scope 会按 `used` 处理。省略 `--older-than` 时，used 类 scope 使用 `clear.older_than_days` 配置值，默认 30 天。

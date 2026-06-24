@@ -119,7 +119,7 @@ The monitor requires Claude Code v2.1.105 or newer, an interactive CLI session, 
 | `/handoff checkpoint` | Save the current state manually |
 | `/handoff history` | Show this project's handoff history |
 | `/handoff recent` | Show recent capsules across all projects |
-| `/handoff clear` | Clear pending/used capsules or this project's ai-handoff state |
+| `/handoff clear <this_project, used, consume, pending, expired>` | Choose the deletion scope with arguments. [See details.](docs/advanced/README.md#handoff-clear-arguments) |
 | `/handoff doctor` | Diagnose setup or capsule problems |
 | `/handoff config` | Show settings |
 

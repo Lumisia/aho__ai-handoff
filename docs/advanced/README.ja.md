@@ -11,6 +11,7 @@ ai-handoff が期待どおりに動かないときに見るページです。
 3. [Claude Code と Codex がつながりません](#claude-code-と-codex-がつながりません)
 4. [保存場所と AI_HANDOFF_ROOT](#保存場所と-ai_handoff_root)
 5. [高度な設定キー](#高度な設定キー)
+6. [設定できる引数](#handoff-clear-arguments)
 
 ## 最初に確認すること
 
@@ -104,3 +105,40 @@ export AI_HANDOFF_ROOT="$HOME/ai-handoff-store"
 | `notification.fallback` | OS 通知に失敗したとき terminal 通知を使うか |
 
 通常は `threshold_percent`, `mode`, `realtime.enabled` だけで十分です。
+
+<a id="handoff-clear-arguments"></a>
+
+## 6. 設定できる引数
+
+`/handoff clear` は最初の引数で削除範囲を決めます。
+
+```text
+/handoff clear <this_project, used, consume, pending, expired> [--older-than 7d] [-c]
+```
+
+| 引数 | 説明 |
+|---|---|
+| `this_project` | 現在のプロジェクト fingerprint の ai-handoff 状態フォルダ全体を削除します。ソースリポジトリは削除しません。別名: `this-project`, `project`. |
+| `used` | 終了状態の capsule を削除します。対象は `CONSUMED`, `EXPIRED`, `REJECTED`, `SKIPPED`, `FAILED` です。 |
+| `consume` | 消費済み capsule だけを削除します。`consumed` の別名です。 |
+| `consumed` | 消費済み capsule だけを削除します。 |
+| `pending` | 待機中の capsule を削除します。対象は `AVAILABLE`, `DEGRADED_AVAILABLE` です。 |
+| `expired` | 期限切れ capsule だけを削除します。 |
+
+| オプション | 説明 |
+|---|---|
+| `--older-than 7d` | 指定した期間より古い capsule だけを削除します。`ms`, `m`, `h`, `d` を使えます。数字だけなら日数です。 |
+| `-c`, `--confirm`, `--yes` | `this_project` の削除をすぐ承認します。指定しない場合は確認用 preview を返します。 |
+
+例:
+
+```text
+/handoff clear used
+/handoff clear used --older-than 7d
+/handoff clear --older-than 7d
+/handoff clear pending
+/handoff clear this_project
+/handoff clear this_project -c
+```
+
+scope なしで `--older-than` だけを指定すると、scope は `used` になります。`--older-than` を省略した場合、used 系 scope は `clear.older_than_days` の設定値を使います。既定値は 30 日です。
