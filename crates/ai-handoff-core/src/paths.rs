@@ -18,7 +18,7 @@ fn os_default_home() -> PathBuf {
     directories::BaseDirs::new()
         .as_ref()
         .map(|d| d.home_dir().to_path_buf())
-        .unwrap_or_default()
+        .expect("AI Handoff: could not determine the user home directory")
         .join(".ai-handoff")
 }
 
@@ -27,7 +27,7 @@ fn os_default_home() -> PathBuf {
     directories::BaseDirs::new()
         .as_ref()
         .map(|d| d.home_dir().to_path_buf())
-        .unwrap_or_default()
+        .expect("AI Handoff: could not determine the user home directory")
         .join("Library/Application Support/ai-handoff")
 }
 
@@ -42,7 +42,7 @@ fn os_default_home() -> PathBuf {
     directories::BaseDirs::new()
         .as_ref()
         .map(|d| d.home_dir().to_path_buf())
-        .unwrap_or_default()
+        .expect("AI Handoff: could not determine the user home directory")
         .join(".local/state/ai-handoff")
 }
 
