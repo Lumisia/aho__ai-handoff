@@ -129,6 +129,44 @@ pub fn parse(text: &str) -> Result<Config, toml::de::Error> {
     toml::from_str(text)
 }
 
+/// Resolve the effective trigger for a project: apply the matching
+/// `project_overrides[fingerprint]` (if any) over the global config, then clamp.
+pub fn resolve(cfg: &Config, fingerprint: &str) -> ResolvedTrigger {
+    let g = &cfg.triggers.five_hour;
+    let mut enabled = g.enabled;
+    let mut threshold = g.threshold_percent;
+    let mut mode = g.mode;
+    let mut burn = g.burn_rate;
+
+    if let Some(ov) = cfg.project_overrides.get(fingerprint) {
+        let f = &ov.triggers.five_hour;
+        if let Some(v) = f.enabled {
+            enabled = v;
+        }
+        if let Some(v) = f.threshold_percent {
+            threshold = v;
+        }
+        if let Some(v) = f.mode {
+            mode = v;
+        }
+        if let Some(b) = f.burn_rate.as_ref() {
+            if let Some(v) = b.enabled {
+                burn.enabled = v;
+            }
+            if let Some(v) = b.runway_minutes {
+                burn.runway_minutes = v;
+            }
+        }
+    }
+
+    ResolvedTrigger {
+        enabled,
+        threshold: threshold.clamp(0.0, 100.0),
+        mode: mode.to_trigger_mode(),
+        burn: burn.to_burn(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,5 +223,55 @@ mod tests {
         assert_eq!(f.threshold_percent, 55.0);
         assert_eq!(f.mode, ModeCfg::Ask);
         assert!(f.enabled);
+    }
+
+    #[test]
+    fn resolve_without_override_uses_global() {
+        let c = parse("[triggers.five_hour]\nthreshold_percent = 80\nmode = \"ask\"\n").unwrap();
+        let r = resolve(&c, "fp-none");
+        assert!(r.enabled);
+        assert_eq!(r.threshold, 80.0);
+        assert_eq!(r.mode, TriggerMode::Ask);
+        assert!(!r.burn.enabled);
+    }
+
+    #[test]
+    fn resolve_applies_matching_override_and_inherits_rest() {
+        let c = parse(
+            "[triggers.five_hour]\n\
+             threshold_percent = 80\n\
+             mode = \"ask\"\n\
+             [project_overrides.\"fpX\".triggers.five_hour]\n\
+             threshold_percent = 90\n\
+             mode = \"auto\"\n",
+        )
+        .unwrap();
+        let rx = resolve(&c, "fpX");
+        assert_eq!(rx.threshold, 90.0);
+        assert_eq!(rx.mode, TriggerMode::Auto);
+        // a different project still gets the global values
+        let ry = resolve(&c, "fpY");
+        assert_eq!(ry.threshold, 80.0);
+        assert_eq!(ry.mode, TriggerMode::Ask);
+    }
+
+    #[test]
+    fn resolve_override_with_only_threshold_keeps_global_mode() {
+        let c = parse(
+            "[triggers.five_hour]\nmode = \"auto\"\n\
+             [project_overrides.\"fpX\".triggers.five_hour]\nthreshold_percent = 50\n",
+        )
+        .unwrap();
+        let r = resolve(&c, "fpX");
+        assert_eq!(r.threshold, 50.0);
+        assert_eq!(r.mode, TriggerMode::Auto); // inherited
+    }
+
+    #[test]
+    fn resolve_clamps_threshold_into_0_100() {
+        let hi = parse("[triggers.five_hour]\nthreshold_percent = 150\n").unwrap();
+        assert_eq!(resolve(&hi, "x").threshold, 100.0);
+        let lo = parse("[triggers.five_hour]\nthreshold_percent = -5\n").unwrap();
+        assert_eq!(resolve(&lo, "x").threshold, 0.0);
     }
 }
