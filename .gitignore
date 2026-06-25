@@ -7,5 +7,13 @@ node_modules/
 /target/
 **/target/
 
+# Tauri desktop frontend build output + generated schemas
+apps/desktop/dist/
+apps/desktop/src-tauri/gen/
+
+# local runtime store + generated reports (per-machine, not source)
+.ai-handoff-store/
+ai-handoff-hooks-report.md
+
 # subagent-driven-development scratch (briefs, reports, diffs, ledger)
 .superpowers/
