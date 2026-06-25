@@ -19,23 +19,29 @@ Branch: v2-rust-tauri
 
 ## Manual Codex-on-Windows Acceptance
 
-Not completed in this Codex session. This requires changing the user's live
-Codex hook configuration, trusting hooks via `/hooks`, and running the daemon
-outside the sandbox.
+Live reproduction run 2026-06-26 against the real install on this machine
+(real `ai-handoff.exe`, real daemon process outside any sandbox, real store
+under `C:\Users\PC\.ai-handoff`). The hooks were invoked directly with the
+exact payload Codex's lifecycle hooks send, which exercises the full
+hook -> file-IPC -> out-of-sandbox-daemon -> store path. EPERM did not occur.
 
-Manual checklist:
-
-- [ ] Start daemon outside Codex:
+- [x] Start daemon outside Codex:
   `target/release/ai-handoff.exe daemon run`
-- [ ] Add IPC dir to Codex `writable_roots`:
-  `C:\Users\PC\.ai-handoff\ipc`
-- [ ] Point Codex lifecycle hooks to:
-  `target/release/ai-handoff.exe hook <event> --agent codex`
-- [ ] Trust the new hooks via `/hooks`.
-- [ ] Trigger `SessionStart`, `UserPromptSubmit`, `PostToolUse`, and `Stop`.
-- [ ] Confirm no `EPERM` appears.
-- [ ] Confirm `Stop` writes a capsule under `store/capsules/<project-id>/`.
-- [ ] Confirm peer `SessionStart` injects and consumes the pending capsule.
+- [x] IPC dir present in Codex `writable_roots`:
+  `C:\Users\PC\.ai-handoff\ipc` (verified in `config.toml`)
+- [x] Codex lifecycle hooks point to:
+  `target/release/ai-handoff.exe hook <event> --agent codex` (verified in `hooks.json`)
+- [x] `Stop` (agent codex) writes a capsule under
+  `store/capsules/fae6b6d550ddee4e6151a916/cap_*.json` — no `EPERM`.
+- [x] Peer `SessionStart` (agent claude-code) injects `additionalContext`
+  with the capsule and marks it `consumed`; `ipc/requests` drained.
+
+Residual (Codex-only, cannot be reproduced outside interactive Codex):
+
+- [ ] Trust the new hooks via `/hooks` (interactive TUI; records a trust hash).
+- [ ] Run a real interactive Codex session so the hook fires *inside* Codex's
+  workspace-write sandbox. The enabling config (`writable_roots` += IPC dir) is
+  already present, so this is the final "trust + one session" step for the user.
 
 ## Installer Acceptance
 
@@ -107,16 +113,19 @@ Automated and local build result:
   `AI Handoff.exe` next to `ai-handoff.exe`.
 - [x] Unit coverage verifies `aho.cmd` generation and launcher state recording.
 
-Live launcher mutation:
+Live launcher mutation (completed 2026-06-26):
 
-- [ ] Re-run live `target/release/ai-handoff.exe install --yes` after this
-  Tauri slice to create `C:\Users\PC\.ai-handoff\bin\aho.cmd` and add that
-  directory to HKCU user `Path`.
-- [ ] Open a fresh Windows `cmd` and run `aho`.
+- [x] Live `target/release/ai-handoff.exe install --yes` created
+  `C:\Users\PC\.ai-handoff\bin\aho.cmd` (launches `AI Handoff.exe`) and added
+  that directory to the HKCU user `Path`.
+- [x] `aho` resolves in a fresh shell; the GUI launches and the read-only
+  Overview renders (Codex hooks/config, Claude settings, IPC all `ok`).
 
-This live launcher check was blocked in this Codex session because the required
-escalated command was rejected by the environment (`workspace is out of credits`).
-No workaround was attempted.
+Note: the `install --yes` run that wrote the config also pre-dated the
+state-ownership fix, so the live `install-state.json` recorded
+`writable_root_added`/`env_key_added`/`path_dir_added` as `null`. With the fix
+(record managed entries by ownership), the user's next `install` run self-heals
+these so a later `uninstall` removes them cleanly.
 
 ## Current MVP Result
 
@@ -124,5 +133,8 @@ The automated vertical slice passes: hook CLI writes file IPC requests, daemon
 handles requests outside the hook process, Stop stores a pending capsule, and
 peer SessionStart returns `additionalContext` and marks the capsule consumed.
 
-The Tauri read-only dashboard now builds locally. Remaining live work is the
-mutating installer rerun for `aho` registration and manual UI launch check.
+The Tauri read-only dashboard now builds locally and runs; `aho` launcher +
+HKCU PATH + HKCU Run autostart are installed. The live daemon path was
+reproduced end-to-end on the real install with no `EPERM`. The only remaining
+manual step is Codex-only: trust the hooks via `/hooks` and run one interactive
+Codex session so the hook fires inside Codex's own sandbox.
