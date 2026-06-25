@@ -78,7 +78,7 @@ impl Default for BurnRateCfg {
 }
 
 impl BurnRateCfg {
-    fn to_burn(self) -> BurnRate {
+    pub fn to_burn(self) -> BurnRate {
         BurnRate {
             enabled: self.enabled,
             runway_minutes: self.runway_minutes,
