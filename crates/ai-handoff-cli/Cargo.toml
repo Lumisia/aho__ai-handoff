@@ -1,0 +1,17 @@
+[package]
+name = "ai-handoff-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ai-handoff"
+path = "src/main.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+ai-handoff-core = { path = "../ai-handoff-core" }
+ai-handoff-ipc = { path = "../ai-handoff-ipc" }

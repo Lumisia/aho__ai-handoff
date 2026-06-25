@@ -3,5 +3,9 @@ node_modules/
 .DS_Store
 /tmp/
 
+# Rust build artifacts (v2 cargo workspace)
+/target/
+**/target/
+
 # subagent-driven-development scratch (briefs, reports, diffs, ledger)
 .superpowers/
