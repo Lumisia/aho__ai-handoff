@@ -21,6 +21,15 @@ use crate::install::state::CodexState;
 /// The environment variable we manage under `[shell_environment_policy].set`.
 const ENV_KEY: &str = "AI_HANDOFF_HOME";
 
+/// Error type for config edit operations.
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigEditError {
+    #[error("config.toml parse error: {0}")]
+    Parse(#[from] toml_edit::TomlError),
+    #[error("config.toml has an unexpected shape: {0}")]
+    UnexpectedShape(&'static str),
+}
+
 /// Outcome of an [`apply`] call: the serialized document plus a record of what we
 /// changed, so [`remove`] can later undo exactly those changes and nothing more.
 #[derive(Clone, Debug, PartialEq)]
@@ -47,7 +56,7 @@ pub fn apply(
     existing: Option<&str>,
     ipc_dir: &str,
     ai_home: &str,
-) -> Result<ConfigEdit, toml_edit::TomlError> {
+) -> Result<ConfigEdit, ConfigEditError> {
     let mut doc: DocumentMut = match existing {
         Some(s) => s.parse::<DocumentMut>()?,
         None => DocumentMut::new(),
@@ -58,14 +67,19 @@ pub fn apply(
     if created_sandbox_table {
         doc["sandbox_workspace_write"] = Item::Table(Table::new());
     }
-    let sandbox = doc["sandbox_workspace_write"]
-        .as_table_mut()
-        .expect("sandbox_workspace_write is a table");
+    let sandbox =
+        doc["sandbox_workspace_write"]
+            .as_table_mut()
+            .ok_or(ConfigEditError::UnexpectedShape(
+                "sandbox_workspace_write is not a table",
+            ))?;
     let roots = sandbox
         .entry("writable_roots")
         .or_insert(value(Array::new()))
         .as_array_mut()
-        .expect("writable_roots is an array");
+        .ok_or(ConfigEditError::UnexpectedShape(
+            "writable_roots is not an array",
+        ))?;
 
     let already_present = roots.iter().any(|v| v.as_str() == Some(ipc_dir));
     let writable_root_added = if already_present {
@@ -80,14 +94,19 @@ pub fn apply(
     if created_env_table {
         doc["shell_environment_policy"] = Item::Table(Table::new());
     }
-    let env_table = doc["shell_environment_policy"]
-        .as_table_mut()
-        .expect("shell_environment_policy is a table");
+    let env_table =
+        doc["shell_environment_policy"]
+            .as_table_mut()
+            .ok_or(ConfigEditError::UnexpectedShape(
+                "shell_environment_policy is not a table",
+            ))?;
     let set = env_table
         .entry("set")
         .or_insert(Item::Table(Table::new()))
         .as_table_mut()
-        .expect("set is a table");
+        .ok_or(ConfigEditError::UnexpectedShape(
+            "shell_environment_policy.set is not a table",
+        ))?;
 
     let env_key_added = if set.contains_key(ENV_KEY) {
         None
@@ -107,7 +126,7 @@ pub fn apply(
 
 /// Surgically remove only our recorded changes from `existing`, leaving every
 /// other table/key untouched. Propagates parse errors rather than clobbering.
-pub fn remove(existing: &str, st: &CodexState) -> Result<String, toml_edit::TomlError> {
+pub fn remove(existing: &str, st: &CodexState) -> Result<String, ConfigEditError> {
     let mut doc: DocumentMut = existing.parse::<DocumentMut>()?;
 
     // --- writable_roots ---
@@ -195,6 +214,32 @@ mod tests {
         assert!(e
             .text
             .contains("ai-handoff@claude-codex-auto-handoff:hooks/hooks-codex.json:session_start"));
+
+        // Strengthened preservation: every line present in the original must
+        // still be present in the output (no original line dropped).
+        let before_lines: std::collections::HashMap<&str, usize> =
+            src.lines()
+                .fold(std::collections::HashMap::new(), |mut m, l| {
+                    *m.entry(l).or_insert(0) += 1;
+                    m
+                });
+        let after_lines: std::collections::HashMap<&str, usize> =
+            e.text
+                .lines()
+                .fold(std::collections::HashMap::new(), |mut m, l| {
+                    *m.entry(l).or_insert(0) += 1;
+                    m
+                });
+        for (line, &count) in &before_lines {
+            let after_count = after_lines.get(line).copied().unwrap_or(0);
+            assert!(
+                after_count >= count,
+                "original line dropped: {:?} (expected {} occurrences, found {})",
+                line,
+                count,
+                after_count
+            );
+        }
     }
 
     #[test]
@@ -250,5 +295,45 @@ mod tests {
     #[test]
     fn apply_returns_err_on_invalid_toml() {
         assert!(apply(Some("not = = valid toml"), "C:/ipc", "C:/home").is_err());
+    }
+
+    #[test]
+    fn apply_returns_err_when_writable_roots_is_wrong_type() {
+        let bad = "sandbox_workspace_write = { writable_roots = \"x\" }\n";
+        let result = apply(Some(bad), "C:/ipc", "C:/home");
+        assert!(
+            result.is_err(),
+            "expected Err when writable_roots is a string, got Ok"
+        );
+    }
+
+    #[test]
+    fn apply_returns_err_when_sandbox_workspace_write_is_wrong_type() {
+        let bad = "sandbox_workspace_write = \"x\"\n";
+        let result = apply(Some(bad), "C:/ipc", "C:/home");
+        assert!(
+            result.is_err(),
+            "expected Err when sandbox_workspace_write is a string, got Ok"
+        );
+    }
+
+    #[test]
+    fn apply_returns_err_when_shell_environment_policy_is_wrong_type() {
+        let bad = "shell_environment_policy = \"x\"\n";
+        let result = apply(Some(bad), "C:/ipc", "C:/home");
+        assert!(
+            result.is_err(),
+            "expected Err when shell_environment_policy is a string, got Ok"
+        );
+    }
+
+    #[test]
+    fn apply_returns_err_when_set_is_wrong_type() {
+        let bad = "[shell_environment_policy]\nset = \"x\"\n";
+        let result = apply(Some(bad), "C:/ipc", "C:/home");
+        assert!(
+            result.is_err(),
+            "expected Err when shell_environment_policy.set is a string, got Ok"
+        );
     }
 }
