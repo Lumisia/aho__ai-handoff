@@ -1,0 +1,25 @@
+model = "gpt-5.5"
+approval_policy = "on-request"
+sandbox_mode = "workspace-write"
+
+[windows]
+sandbox = "unelevated"
+
+[projects.'C:\Git\vue-test']
+trust_level = "trusted"
+
+[projects.'c:\users\pc\desktop\ai-handoff']
+trust_level = "trusted"
+
+[marketplaces.claude-codex-auto-handoff]
+source_type = "git"
+source = "https://github.com/Lumisia/claude-codex-auto-handoff.git"
+
+[hooks.state."ai-handoff@claude-codex-auto-handoff:hooks/hooks-codex.json:session_start:0:0"]
+trusted_hash = "sha256:da153a39b78c41074e98983106f871ff8380939cb9c77cf67425096bd1a48481"
+
+[mcp_servers.node_repl]
+command = 'C:\Users\PC\AppData\Local\OpenAI\Codex\runtimes\node_repl.exe'
+
+[mcp_servers.node_repl.env]
+CODEX_HOME = 'C:\Users\PC\.codex'
