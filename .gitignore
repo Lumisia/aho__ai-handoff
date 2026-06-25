@@ -17,3 +17,6 @@ ai-handoff-hooks-report.md
 
 # subagent-driven-development scratch (briefs, reports, diffs, ledger)
 .superpowers/
+
+# internal planning docs (specs/plans) — not shipped to users
+docs/superpowers/
