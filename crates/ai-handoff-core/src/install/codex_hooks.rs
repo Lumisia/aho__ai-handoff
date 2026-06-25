@@ -98,7 +98,7 @@ pub fn remove(existing: &str) -> serde_json::Result<String> {
 
     let mut root: Value = serde_json::from_str(existing)?;
 
-    if let Some(hooks_obj) = root["hooks"].as_object_mut() {
+    if let Some(hooks_obj) = root.get_mut("hooks").and_then(Value::as_object_mut) {
         let mut empty_events: Vec<String> = Vec::new();
 
         for (event, arr_val) in hooks_obj.iter_mut() {
@@ -166,5 +166,13 @@ mod tests {
         let exe = "C:\\p\\ai-handoff.exe";
         assert!(apply(Some("not valid json"), exe).is_err());
         assert!(remove("not valid json").is_err());
+    }
+
+    #[test]
+    fn remove_does_not_insert_null_hooks_when_hooks_key_is_absent() {
+        let cleaned = remove(r#"{"other":true}"#).unwrap();
+        let c: Value = serde_json::from_str(&cleaned).unwrap();
+        assert_eq!(c["other"], true);
+        assert!(c.get("hooks").is_none());
     }
 }

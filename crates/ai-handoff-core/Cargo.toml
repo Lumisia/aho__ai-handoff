@@ -12,6 +12,7 @@ sha2.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 thiserror.workspace = true
+anyhow.workspace = true
 directories.workspace = true
 toml_edit = "0.22"
 

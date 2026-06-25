@@ -101,7 +101,7 @@ pub fn remove(existing: &str) -> serde_json::Result<String> {
 
     let mut root: Value = serde_json::from_str(existing)?;
 
-    if let Some(hooks_obj) = root["hooks"].as_object_mut() {
+    if let Some(hooks_obj) = root.get_mut("hooks").and_then(Value::as_object_mut) {
         let mut empty_events: Vec<String> = Vec::new();
 
         for (event, arr_val) in hooks_obj.iter_mut() {
@@ -129,8 +129,9 @@ pub fn remove(existing: &str) -> serde_json::Result<String> {
     }
 
     // Prune an empty `hooks` object.
-    if root["hooks"]
-        .as_object()
+    if root
+        .get("hooks")
+        .and_then(Value::as_object)
         .map(|o| o.is_empty())
         .unwrap_or(false)
     {
@@ -217,6 +218,14 @@ mod tests {
         let cleaned = remove(&applied).unwrap();
         let c: Value = serde_json::from_str(&cleaned).unwrap();
         // hooks key should be absent or empty after removing all managed entries
+        assert!(c.get("hooks").is_none());
+    }
+
+    #[test]
+    fn remove_does_not_insert_null_hooks_when_hooks_key_is_absent() {
+        let cleaned = remove(r#"{"model":"opus"}"#).unwrap();
+        let c: Value = serde_json::from_str(&cleaned).unwrap();
+        assert_eq!(c["model"], "opus");
         assert!(c.get("hooks").is_none());
     }
 }
