@@ -5,6 +5,7 @@
 //! defaults so a hook is never broken by a bad config.
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use serde::Deserialize;
 
@@ -167,6 +168,20 @@ pub fn resolve(cfg: &Config, fingerprint: &str) -> ResolvedTrigger {
     }
 }
 
+/// Load config from the default path, falling back to defaults on any error.
+pub fn load() -> Config {
+    load_from(&crate::paths::config_path())
+}
+
+/// Load config from `path`. A missing file or any parse error yields
+/// `Config::default()` — the daemon must never break a hook over a bad config.
+pub fn load_from(path: &Path) -> Config {
+    match std::fs::read_to_string(path) {
+        Ok(text) => parse(&text).unwrap_or_default(),
+        Err(_) => Config::default(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,5 +288,29 @@ mod tests {
         assert_eq!(resolve(&hi, "x").threshold, 100.0);
         let lo = parse("[triggers.five_hour]\nthreshold_percent = -5\n").unwrap();
         assert_eq!(resolve(&lo, "x").threshold, 0.0);
+    }
+
+    #[test]
+    fn load_from_missing_file_is_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = load_from(&dir.path().join("config.toml"));
+        assert_eq!(c, Config::default());
+        assert_eq!(c.triggers.five_hour.threshold_percent, 80.0);
+    }
+
+    #[test]
+    fn load_from_malformed_file_is_default_not_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("config.toml");
+        std::fs::write(&p, "this = = not valid toml").unwrap();
+        assert_eq!(load_from(&p), Config::default());
+    }
+
+    #[test]
+    fn load_from_valid_file_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("config.toml");
+        std::fs::write(&p, "[triggers.five_hour]\nthreshold_percent = 42\n").unwrap();
+        assert_eq!(load_from(&p).triggers.five_hour.threshold_percent, 42.0);
     }
 }
