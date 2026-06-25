@@ -9,6 +9,9 @@
   },
   "scripts": {
     "test": "node --test",
-    "validate:package": "node scripts/validate-package.mjs"
+    "validate:package": "node scripts/validate-package.mjs",
+    "desktop:dev": "npm --prefix apps/desktop run tauri dev",
+    "desktop:build": "npm --prefix apps/desktop run build",
+    "desktop:tauri:build": "npm --prefix apps/desktop run tauri build"
   }
 }

@@ -5,6 +5,7 @@ members = [
     "crates/ai-handoff-ipc",
     "crates/ai-handoff-daemon",
     "crates/ai-handoff-cli",
+    "apps/desktop/src-tauri",
 ]
 
 [workspace.package]
