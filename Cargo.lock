@@ -92,6 +92,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ai-handoff-usage"
+version = "2.0.0-mvp"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "alloc-no-stdlib"
 version = "2.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
