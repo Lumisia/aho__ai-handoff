@@ -15,6 +15,7 @@ use crate::trigger::{BurnRate, TriggerMode};
 #[serde(default)]
 pub struct Config {
     pub triggers: Triggers,
+    pub autostart: Autostart,
     pub project_overrides: HashMap<String, ProjectOverride>,
 }
 
@@ -22,6 +23,15 @@ pub struct Config {
 #[serde(default)]
 pub struct Triggers {
     pub five_hour: FiveHour,
+}
+
+/// Run the daemon automatically at logon. Opt-in: defaults to disabled (the
+/// `bool` default), so a fresh install registers no autostart unless the user
+/// sets `[autostart] enabled = true`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct Autostart {
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
@@ -196,6 +206,20 @@ mod tests {
         assert!(!f.burn_rate.enabled);
         assert_eq!(f.burn_rate.runway_minutes, 30.0);
         assert!(c.project_overrides.is_empty());
+    }
+
+    #[test]
+    fn autostart_defaults_to_disabled() {
+        assert!(!parse("").unwrap().autostart.enabled);
+        assert!(!Config::default().autostart.enabled);
+    }
+
+    #[test]
+    fn autostart_can_be_enabled_in_config() {
+        let c = parse("[autostart]\nenabled = true\n").unwrap();
+        assert!(c.autostart.enabled);
+        // unrelated sections still default
+        assert_eq!(c.triggers.five_hour.threshold_percent, 80.0);
     }
 
     #[test]

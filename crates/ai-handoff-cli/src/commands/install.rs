@@ -9,7 +9,7 @@ use ai_handoff_core::{
 };
 use anyhow::{bail, Context};
 
-use super::autostart::{delete_autostart_state, register_autostart, TASK_NAME};
+use super::autostart::{delete_autostart, delete_autostart_state, register_autostart, TASK_NAME};
 
 pub use super::autostart::{hkcu_run_argv, scheduled_task_argv};
 
@@ -33,6 +33,9 @@ pub fn run(dry_run: bool, yes: bool, agents: Option<Vec<String>>) -> anyhow::Res
         &paths::ipc_dir(),
         &exe,
     );
+    // Autostart-on-logon is opt-in via `[autostart] enabled` in config.toml;
+    // it defaults to disabled, so a fresh install registers no logon task.
+    let autostart_enabled = ai_handoff_core::config::load().autostart.enabled;
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     run_with_targets(
@@ -42,7 +45,7 @@ pub fn run(dry_run: bool, yes: bool, agents: Option<Vec<String>>) -> anyhow::Res
         agents,
         &mut stdin.lock(),
         &mut stdout.lock(),
-        true,
+        autostart_enabled,
     )
 }
 
@@ -53,23 +56,31 @@ pub fn run_with_targets(
     agents: Option<Vec<String>>,
     input: &mut dyn Read,
     out: &mut dyn Write,
-    register_task: bool,
+    autostart_enabled: bool,
 ) -> anyhow::Result<i32> {
+    // Toggle off: when autostart is disabled (the default), remove any logon
+    // registration a previous install left behind, so flipping the config key
+    // back to false and re-installing actually turns autostart off.
+    if !dry_run && !autostart_enabled {
+        let prior = state::load(&targets.home);
+        if prior.autostart.is_some() || prior.scheduled_task.is_some() {
+            let _ = delete_autostart(&prior);
+        }
+    }
+
     let mut register = |exe: &str| register_autostart(exe);
-    let register = if register_task {
+    let register = if autostart_enabled {
         Some(&mut register as AutostartRegistrar<'_>)
     } else {
         None
     };
+    // The launcher (aho.cmd + PATH) is the CLI shim, independent of the logon
+    // autostart, so it always installs on a real (non-dry-run) install.
     let mut install_launcher =
         |home: &std::path::Path, gui: Option<&std::path::Path>| {
             super::launcher::install_aho_launcher(home, gui)
         };
-    let install_launcher = if register_task {
-        Some(&mut install_launcher as LauncherInstaller<'_>)
-    } else {
-        None
-    };
+    let install_launcher = Some(&mut install_launcher as LauncherInstaller<'_>);
     run_with_targets_impl(
         targets,
         dry_run,
@@ -170,6 +181,11 @@ fn run_with_targets_impl(
     }
     if let Some(autostart) = &st.autostart {
         writeln!(out, "Autostart: {:?}", autostart.kind)?;
+    } else {
+        writeln!(
+            out,
+            "Autostart: disabled (set [autostart] enabled = true in ~/.ai-handoff/config.toml to run the daemon at logon)"
+        )?;
     }
     if let Some(launcher) = &st.launcher {
         if let Some(path) = &launcher.path {
@@ -392,5 +408,58 @@ mod tests {
             .and_then(|launcher| launcher.path_dir_added.as_ref())
             .unwrap()
             .ends_with("bin"));
+    }
+
+    #[test]
+    fn autostart_disabled_keeps_launcher_and_records_no_autostart() {
+        let dir = tempfile::tempdir().unwrap();
+        let user_home = dir.path();
+        std::fs::create_dir_all(user_home.join(".codex")).unwrap();
+        std::fs::create_dir_all(user_home.join(".claude")).unwrap();
+        std::fs::write(
+            user_home.join(".codex/config.toml"),
+            "sandbox_mode = \"workspace-write\"\n",
+        )
+        .unwrap();
+        std::fs::write(user_home.join(".claude/settings.json"), r#"{"model":"opus"}"#).unwrap();
+
+        let ai_home = user_home.join("ai-home");
+        let targets = targets_for(
+            user_home,
+            &ai_home,
+            &ai_home.join("ipc"),
+            std::path::Path::new("C:/p/ai-handoff.exe"),
+        );
+        let mut input: &[u8] = b"";
+        let mut output = Vec::new();
+        let mut launcher = |home: &std::path::Path, _gui: Option<&std::path::Path>| {
+            Ok(state::LauncherState {
+                path: Some(home.join("bin").join("aho.cmd").to_string_lossy().into_owned()),
+                path_dir_added: Some(home.join("bin").to_string_lossy().into_owned()),
+            })
+        };
+
+        // register_autostart: None models a disabled-autostart install.
+        let code = run_with_targets_impl(
+            &targets,
+            false,
+            true,
+            None,
+            &mut input,
+            &mut output,
+            InstallSideEffects {
+                register_autostart: None,
+                install_launcher: Some(&mut launcher),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(code, 0);
+        let st = state::load(&ai_home);
+        assert!(st.autostart.is_none());
+        assert!(st.scheduled_task.is_none());
+        assert!(st.launcher.is_some());
+        let out = String::from_utf8(output).unwrap();
+        assert!(out.contains("Autostart: disabled"));
     }
 }
