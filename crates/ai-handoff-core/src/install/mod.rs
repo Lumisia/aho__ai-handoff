@@ -66,6 +66,11 @@ pub fn plan_install(
     } else {
         None
     };
+    let codex_hooks_existing = if agents.codex {
+        read_existing(&t.codex_hooks)?
+    } else {
+        None
+    };
     let claude_settings_existing = if agents.claude {
         read_existing(&t.claude_settings)?
     } else {
@@ -98,11 +103,10 @@ pub fn plan_install(
             });
         } else {
             // Legacy: direct Codex hooks.json patch.
-            let hooks_existing = read_existing(&t.codex_hooks)?;
-            let (hooks_after, _events) = codex_hooks::apply(hooks_existing.as_deref(), &exe)?;
+            let (hooks_after, _events) = codex_hooks::apply(codex_hooks_existing.as_deref(), &exe)?;
             file_plans.push(diff::FilePlan {
                 path: t.codex_hooks.to_string_lossy().into_owned(),
-                before: hooks_existing,
+                before: codex_hooks_existing.clone(),
                 after: hooks_after,
             });
         }
@@ -128,7 +132,9 @@ pub fn plan_install(
 
     let duplicates = duplicate::detect(
         codex_config_existing.as_deref(),
+        codex_hooks_existing.as_deref(),
         claude_settings_existing.as_deref(),
+        plugin,
     );
 
     Ok(InstallPlan {
@@ -309,11 +315,11 @@ pub fn apply_install(
         } => {
             let prior = state::load(&t.home);
             // Generate the bundle first; record its files for surgical uninstall.
-            let mut record = generate_bundle(crate::capsule::AgentKind::Codex, &exe, &t.codex_plugin_dir)?;
+            let mut record =
+                generate_bundle(crate::capsule::AgentKind::Codex, &exe, &t.codex_plugin_dir)?;
             // Marketplace registration (never-clobber merge computed above).
             write_with_backup(&t.agents_marketplace, &marketplace_after, now)?;
-            record.marketplace_file =
-                Some(t.agents_marketplace.to_string_lossy().into_owned());
+            record.marketplace_file = Some(t.agents_marketplace.to_string_lossy().into_owned());
             // Config: writable_roots/env + `[plugins."ai-handoff@..."] enabled`.
             let config_backup = write_with_backup(&t.codex_config, &config_text, now)?;
             st.codex.config_file = Some(FileMod {
@@ -332,8 +338,11 @@ pub fn apply_install(
 
         if plugin {
             // Drop the auto-loaded bundle; record its files for surgical uninstall.
-            let record =
-                generate_bundle(crate::capsule::AgentKind::ClaudeCode, &exe, &t.claude_plugin_dir)?;
+            let record = generate_bundle(
+                crate::capsule::AgentKind::ClaudeCode,
+                &exe,
+                &t.claude_plugin_dir,
+            )?;
             st.claude.plugin = Some(record);
         }
 
@@ -761,10 +770,16 @@ mod tests {
         let st = apply_install(&t, &agents, Utc::now(), true).unwrap();
 
         // Bundles exist at both plugin dirs.
-        assert!(t.claude_plugin_dir.join(".claude-plugin/plugin.json").exists());
+        assert!(t
+            .claude_plugin_dir
+            .join(".claude-plugin/plugin.json")
+            .exists());
         assert!(t.claude_plugin_dir.join("hooks/hooks.json").exists());
         assert!(t.claude_plugin_dir.join("skills/handoff/SKILL.md").exists());
-        assert!(t.codex_plugin_dir.join(".codex-plugin/plugin.json").exists());
+        assert!(t
+            .codex_plugin_dir
+            .join(".codex-plugin/plugin.json")
+            .exists());
         assert!(t.codex_plugin_dir.join("hooks/hooks.json").exists());
 
         // Plugin records persisted.
@@ -776,10 +791,8 @@ mod tests {
         );
 
         // marketplace.json registered with our entry.
-        let mp: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(&t.agents_marketplace).unwrap(),
-        )
-        .unwrap();
+        let mp: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&t.agents_marketplace).unwrap()).unwrap();
         assert!(mp["plugins"]
             .as_array()
             .unwrap()
@@ -787,8 +800,10 @@ mod tests {
             .any(|p| p["name"] == "ai-handoff"));
 
         // config.toml has the plugin enable AND the writable_roots/env edits.
-        let cfg: toml_edit::DocumentMut =
-            std::fs::read_to_string(&t.codex_config).unwrap().parse().unwrap();
+        let cfg: toml_edit::DocumentMut = std::fs::read_to_string(&t.codex_config)
+            .unwrap()
+            .parse()
+            .unwrap();
         assert_eq!(
             cfg["plugins"][codex_config::PLUGIN_ENABLE_KEY]["enabled"].as_bool(),
             Some(true)
@@ -810,10 +825,8 @@ mod tests {
         assert!(st.codex.hooks_file.is_none());
 
         // Claude settings has the statusLine but NO managed `hooks` entry.
-        let cs: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(&t.claude_settings).unwrap(),
-        )
-        .unwrap();
+        let cs: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&t.claude_settings).unwrap()).unwrap();
         assert_eq!(
             cs["statusLine"]["command"],
             "\"C:/p/ai-handoff.exe\" statusline"
@@ -865,14 +878,76 @@ mod tests {
         assert_eq!(mp["name"], "mine");
 
         // Our [plugins] enable removed, foreign [plugins."other@x"] preserved.
-        let cfg: toml_edit::DocumentMut =
-            std::fs::read_to_string(&t.codex_config).unwrap().parse().unwrap();
-        assert!(cfg["plugins"].get(codex_config::PLUGIN_ENABLE_KEY).is_none());
+        let cfg: toml_edit::DocumentMut = std::fs::read_to_string(&t.codex_config)
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(cfg["plugins"]
+            .get(codex_config::PLUGIN_ENABLE_KEY)
+            .is_none());
         assert_eq!(cfg["plugins"]["other@x"]["enabled"].as_bool(), Some(true));
         // writable_roots/env also cleaned up.
         assert!(!std::fs::read_to_string(&t.codex_config)
             .unwrap()
             .contains("ai-home"));
+    }
+
+    #[test]
+    fn plugin_reinstall_then_uninstall_removes_managed_plugin_state_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let uh = dir.path();
+        let (_ai_home, t) = plugin_targets(uh);
+        let agents = AgentPresence {
+            codex: true,
+            claude: true,
+        };
+
+        apply_install(&t, &agents, Utc::now(), true).unwrap();
+        let st = apply_install(&t, &agents, Utc::now(), true).unwrap();
+
+        // Reinstall is idempotent: one marketplace entry, one plugin enable,
+        // no direct hooks.json fallback, and ownership still recorded.
+        let mp: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&t.agents_marketplace).unwrap()).unwrap();
+        assert_eq!(
+            mp["plugins"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|p| p["name"] == "ai-handoff")
+                .count(),
+            1
+        );
+        let cfg_text = std::fs::read_to_string(&t.codex_config).unwrap();
+        let cfg: toml_edit::DocumentMut = cfg_text.parse().unwrap();
+        assert_eq!(
+            cfg["plugins"][codex_config::PLUGIN_ENABLE_KEY]["enabled"].as_bool(),
+            Some(true)
+        );
+        assert!(!t.codex_hooks.exists());
+        assert_eq!(
+            st.codex.writable_root_added.as_deref(),
+            Some(t.ipc_dir.to_string_lossy().as_ref())
+        );
+        assert_eq!(st.codex.env_key_added.as_deref(), Some("AI_HANDOFF_HOME"));
+        assert!(st.codex.plugin.is_some());
+        assert!(st.claude.plugin.is_some());
+
+        apply_uninstall(&t, &st).unwrap();
+
+        assert!(!t.claude_plugin_dir.exists());
+        assert!(!t.codex_plugin_dir.exists());
+        let cleaned_mp: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&t.agents_marketplace).unwrap()).unwrap();
+        assert!(cleaned_mp["plugins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|p| p["name"] != "ai-handoff"));
+        let cleaned_cfg = std::fs::read_to_string(&t.codex_config).unwrap();
+        assert!(!cleaned_cfg.contains(codex_config::PLUGIN_ENABLE_KEY));
+        assert!(!cleaned_cfg.contains("ai-home"));
+        assert!(!cleaned_cfg.contains("AI_HANDOFF_HOME"));
     }
 
     #[test]
@@ -934,7 +1009,10 @@ mod tests {
             std::fs::read_to_string(&t.agents_marketplace).unwrap(),
             malformed
         );
-        assert_eq!(std::fs::read_to_string(&t.codex_config).unwrap(), pristine_cfg);
+        assert_eq!(
+            std::fs::read_to_string(&t.codex_config).unwrap(),
+            pristine_cfg
+        );
         assert!(!t.codex_plugin_dir.exists());
         assert!(!t.claude_plugin_dir.exists());
         assert!(!state_path(&ai_home).exists());

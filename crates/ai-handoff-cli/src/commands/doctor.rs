@@ -4,8 +4,11 @@ use ai_handoff_ipc::{
 };
 use chrono::{SecondsFormat, Utc};
 use serde_json::json;
-use std::io::Write;
 use std::time::Duration;
+use std::{
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 pub fn run(json_output: bool) -> anyhow::Result<i32> {
     let stdout = std::io::stdout();
@@ -49,12 +52,8 @@ pub fn run_io(json_output: bool, out: &mut dyn Write) -> i32 {
 
     // Per-agent plugin install state, read from the recorded install-state.
     let st = ai_handoff_core::install::state::load(&ai_handoff_core::paths::home());
-    let plugin_state = |rec: &Option<ai_handoff_core::install::PluginRecord>| match rec {
-        Some(r) => json!({ "installed": true, "root": r.root }),
-        None => json!({ "installed": false }),
-    };
-    let claude_plugin = plugin_state(&st.claude.plugin);
-    let codex_plugin = plugin_state(&st.codex.plugin);
+    let claude_plugin = claude_plugin_state(&st.claude.plugin);
+    let codex_plugin = codex_plugin_state(&st.codex.plugin);
 
     let report = json!({
         "daemon": daemon,
@@ -74,13 +73,102 @@ pub fn run_io(json_output: bool, out: &mut dyn Write) -> i32 {
         );
     } else {
         let _ = writeln!(out, "daemon: {daemon}");
-        let mark = |installed: bool| if installed { "installed" } else { "not installed" };
         let _ = writeln!(
             out,
-            "claude plugin: {}",
-            mark(st.claude.plugin.is_some())
+            "claude plugin: {}/{}",
+            mark(
+                claude_plugin["installed"].as_bool().unwrap_or(false),
+                "installed",
+                "not installed"
+            ),
+            mark(
+                claude_plugin["enabled"].as_bool().unwrap_or(false),
+                "enabled",
+                "not enabled"
+            )
         );
-        let _ = writeln!(out, "codex plugin: {}", mark(st.codex.plugin.is_some()));
+        let _ = writeln!(
+            out,
+            "codex plugin: {}/{}/{}",
+            mark(
+                codex_plugin["installed"].as_bool().unwrap_or(false),
+                "installed",
+                "not installed"
+            ),
+            mark(
+                codex_plugin["enabled"].as_bool().unwrap_or(false),
+                "enabled",
+                "not enabled"
+            ),
+            mark(
+                codex_plugin["trusted"].as_bool().unwrap_or(false),
+                "trusted",
+                "trust needed"
+            )
+        );
     }
     0
+}
+
+fn mark(ok: bool, yes: &'static str, no: &'static str) -> &'static str {
+    if ok {
+        yes
+    } else {
+        no
+    }
+}
+
+fn claude_plugin_state(rec: &Option<ai_handoff_core::install::PluginRecord>) -> serde_json::Value {
+    match rec {
+        Some(r) => {
+            let installed = Path::new(&r.root)
+                .join(".claude-plugin")
+                .join("plugin.json")
+                .is_file();
+            json!({
+                "installed": installed,
+                "enabled": installed,
+                "root": r.root,
+            })
+        }
+        None => json!({
+            "installed": false,
+            "enabled": false,
+        }),
+    }
+}
+
+fn codex_plugin_state(rec: &Option<ai_handoff_core::install::PluginRecord>) -> serde_json::Value {
+    match rec {
+        Some(r) => {
+            let installed = Path::new(&r.root)
+                .join(".codex-plugin")
+                .join("plugin.json")
+                .is_file();
+            let config_text = codex_config_path(r)
+                .and_then(|path| std::fs::read_to_string(path).ok())
+                .unwrap_or_default();
+            let enabled =
+                ai_handoff_core::install::duplicate::codex_v2_plugin_enabled(&config_text);
+            let trusted =
+                ai_handoff_core::install::duplicate::codex_v2_plugin_trusted(&config_text);
+            json!({
+                "installed": installed,
+                "enabled": enabled,
+                "trusted": trusted,
+                "root": r.root,
+            })
+        }
+        None => json!({
+            "installed": false,
+            "enabled": false,
+            "trusted": false,
+        }),
+    }
+}
+
+fn codex_config_path(rec: &ai_handoff_core::install::PluginRecord) -> Option<PathBuf> {
+    let marketplace = rec.marketplace_file.as_ref()?;
+    let user_home = Path::new(marketplace).parent()?.parent()?.parent()?;
+    Some(user_home.join(".codex").join("config.toml"))
 }

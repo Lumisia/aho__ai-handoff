@@ -119,10 +119,15 @@ pub fn dashboard_snapshot_for(home: &Path, user_home: &Path) -> DashboardSnapsho
     let claude_settings_text = fs::read_to_string(&p.claude_settings).ok();
 
     let codex_hooks = check_codex_hooks(Path::new(&p.codex_hooks), codex_hooks_text.as_deref());
-    let codex_config =
-        check_codex_config(Path::new(&p.codex_config), codex_config_text.as_deref(), &p.ipc);
-    let claude_settings =
-        check_claude_settings(Path::new(&p.claude_settings), claude_settings_text.as_deref());
+    let codex_config = check_codex_config(
+        Path::new(&p.codex_config),
+        codex_config_text.as_deref(),
+        &p.ipc,
+    );
+    let claude_settings = check_claude_settings(
+        Path::new(&p.claude_settings),
+        claude_settings_text.as_deref(),
+    );
     let ipc = check_dir("ipc", "IPC", Path::new(&p.ipc));
     let store = check_dir("store", "Store", Path::new(&p.store));
     let autostart = check_autostart(&install_state);
@@ -133,18 +138,22 @@ pub fn dashboard_snapshot_for(home: &Path, user_home: &Path) -> DashboardSnapsho
         message: "Runtime status API not implemented in this MVP".into(),
         path: None,
     };
-    let duplicates =
-        duplicate::detect(codex_config_text.as_deref(), claude_settings_text.as_deref())
-            .into_iter()
-            .enumerate()
-            .map(|(idx, finding)| CheckRow {
-                id: format!("duplicate-{idx}"),
-                label: format!("Duplicate {}", finding.agent),
-                status: CheckStatus::Warning,
-                message: finding.detail,
-                path: None,
-            })
-            .collect::<Vec<_>>();
+    let duplicates = duplicate::detect(
+        codex_config_text.as_deref(),
+        codex_hooks_text.as_deref(),
+        claude_settings_text.as_deref(),
+        false,
+    )
+    .into_iter()
+    .enumerate()
+    .map(|(idx, finding)| CheckRow {
+        id: format!("duplicate-{idx}"),
+        label: format!("Duplicate {}", finding.agent),
+        status: CheckStatus::Warning,
+        message: finding.detail,
+        path: None,
+    })
+    .collect::<Vec<_>>();
     let capsules = list_capsules_for(home);
 
     let mut checks = vec![
@@ -281,7 +290,9 @@ fn read_install_summary(home: &Path) -> InstallSummary {
             autostart: st
                 .autostart
                 .map(|a| format!("{:?}: {}", a.kind, a.name))
-                .or(st.scheduled_task.map(|name| format!("ScheduledTask: {name}")))
+                .or(st
+                    .scheduled_task
+                    .map(|name| format!("ScheduledTask: {name}")))
                 .unwrap_or_else(|| "missing".into()),
             launcher: st.launcher.and_then(|launcher| launcher.path),
         },
@@ -600,7 +611,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let snapshot = dashboard_snapshot_for(temp.path(), temp.path());
 
-        assert_eq!(snapshot.paths.ai_home, temp.path().to_string_lossy().into_owned());
+        assert_eq!(
+            snapshot.paths.ai_home,
+            temp.path().to_string_lossy().into_owned()
+        );
         assert_eq!(snapshot.install_state.status, CheckStatus::Missing);
         assert_eq!(snapshot.codex_hooks.status, CheckStatus::Missing);
         assert_eq!(snapshot.codex_config.status, CheckStatus::Missing);
@@ -635,7 +649,10 @@ mod tests {
             .path()
             .join("store/capsules/proj-a/cap_20260625_010101_abcd.json");
         write(&good_path, &serde_json::to_string_pretty(&good).unwrap());
-        write(&temp.path().join("store/capsules/proj-a/bad.json"), "{bad json");
+        write(
+            &temp.path().join("store/capsules/proj-a/bad.json"),
+            "{bad json",
+        );
 
         let list = list_capsules_for(temp.path());
 
