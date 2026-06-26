@@ -8,4 +8,5 @@ pub mod install;
 pub mod paths;
 pub mod redaction;
 pub mod sensor;
+pub mod statusline;
 pub mod trigger;
