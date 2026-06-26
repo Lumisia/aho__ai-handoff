@@ -20,6 +20,7 @@ ai-handoff-core = { path = "../ai-handoff-core" }
 ai-handoff-ipc = { path = "../ai-handoff-ipc" }
 ai-handoff-daemon = { path = "../ai-handoff-daemon" }
 ai-handoff-usage = { path = "../ai-handoff-usage" }
+ai-handoff-tui = { path = "../ai-handoff-tui" }
 
 [dev-dependencies]
 tempfile.workspace = true

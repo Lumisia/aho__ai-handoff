@@ -1,8 +1,15 @@
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 
 use ai_handoff_core::dashboard::{CheckStatus, DashboardSnapshot};
 
 pub fn run() -> anyhow::Result<i32> {
+    // Interactive terminal: launch the ratatui dashboard. Otherwise (piped or
+    // redirected output) fall back to the static text snapshot below — this
+    // also keeps `ai-handoff | cat` and tests from trying to open a TUI.
+    if std::io::stdout().is_terminal() {
+        ai_handoff_tui::run()?;
+        return Ok(0);
+    }
     let snapshot = ai_handoff_core::dashboard::dashboard_snapshot();
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
