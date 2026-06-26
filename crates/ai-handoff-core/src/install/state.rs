@@ -8,6 +8,19 @@ pub struct FileMod {
     pub backup: Option<String>,
 }
 
+/// Record of a generated, installed plugin bundle for one agent.
+///
+/// `root` is the absolute bundle directory; `files` are the relative paths
+/// written under it (for surgical uninstall). `marketplace_file`, when set,
+/// is the marketplace registration file Task 4 records.
+#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
+pub struct PluginRecord {
+    pub root: String,
+    pub files: Vec<String>,
+    #[serde(default)]
+    pub marketplace_file: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
 pub struct CodexState {
     pub hooks_file: Option<FileMod>,
@@ -17,6 +30,8 @@ pub struct CodexState {
     pub created_sandbox_table: bool,
     pub env_key_added: Option<String>,
     pub created_env_table: bool,
+    #[serde(default)]
+    pub plugin: Option<PluginRecord>,
 }
 
 #[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
@@ -31,6 +46,8 @@ pub struct ClaudeState {
     pub managed_hook_events: Vec<String>,
     #[serde(default)]
     pub statusline: Option<ClaudeStatuslineState>,
+    #[serde(default)]
+    pub plugin: Option<PluginRecord>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -198,6 +215,31 @@ mod tests {
         st.claude.statusline = Some(ClaudeStatuslineState {
             previous: Some(serde_json::json!({"type":"command","command":"my-prompt"})),
             installed_command: "\"C:\\p\\ai-handoff.exe\" statusline".into(),
+        });
+        save(dir.path(), &st).unwrap();
+        assert_eq!(load(dir.path()), st);
+    }
+
+    #[test]
+    fn roundtrips_plugin_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut st = InstallState {
+            installed_at: "with-plugin".into(),
+            ..Default::default()
+        };
+        st.claude.plugin = Some(PluginRecord {
+            root: "C:\\Users\\PC\\.ai-handoff\\plugins\\claude\\ai-handoff".into(),
+            files: vec![
+                ".claude-plugin/plugin.json".into(),
+                "hooks/hooks.json".into(),
+                "skills/handoff/SKILL.md".into(),
+            ],
+            marketplace_file: None,
+        });
+        st.codex.plugin = Some(PluginRecord {
+            root: "C:\\Users\\PC\\.ai-handoff\\plugins\\codex\\ai-handoff".into(),
+            files: vec![".codex-plugin/plugin.json".into(), "hooks/hooks.json".into()],
+            marketplace_file: Some("C:\\Users\\PC\\.codex\\marketplace.json".into()),
         });
         save(dir.path(), &st).unwrap();
         assert_eq!(load(dir.path()), st);

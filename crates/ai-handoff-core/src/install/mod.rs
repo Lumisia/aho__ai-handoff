@@ -6,13 +6,15 @@ pub mod codex_hooks;
 pub mod detect;
 pub mod diff;
 pub mod duplicate;
+pub mod plugin;
 pub mod state;
 
 pub use backup::{backup_file, backup_path};
 pub use detect::{detect_agents, targets_for, AgentPresence, InstallTargets};
+pub use plugin::generate_bundle;
 pub use state::{
     load, save, state_path, AutostartKind, AutostartState, ClaudeState, ClaudeStatuslineState,
-    CodexState, FileMod, InstallState,
+    CodexState, FileMod, InstallState, PluginRecord,
 };
 
 use std::path::{Path, PathBuf};
