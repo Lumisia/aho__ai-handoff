@@ -8,16 +8,37 @@ pub struct InstallTargets {
     pub codex_hooks: PathBuf,
     pub codex_config: PathBuf,
     pub claude_settings: PathBuf,
+    /// Claude plugin bundle dir: `~/.claude/skills/ai-handoff` — dropping the
+    /// bundle here makes Claude auto-load it as `ai-handoff@skills-dir`.
+    pub claude_plugin_dir: PathBuf,
+    /// Codex plugin bundle dir: `~/.agents/plugins/ai-handoff`.
+    pub codex_plugin_dir: PathBuf,
+    /// Codex personal marketplace manifest: `~/.agents/plugins/marketplace.json`
+    /// (auto-discovered by Codex; an entry here registers the local bundle).
+    pub agents_marketplace: PathBuf,
 }
 
 pub fn targets_for(user_home: &Path, ai_home: &Path, ipc_dir: &Path, exe: &Path) -> InstallTargets {
+    let claude_settings = user_home.join(".claude").join("settings.json");
+    // Anchor the Claude plugin dir to the settings dir so a relocated `.claude`
+    // (e.g. an MSIX redirect) keeps the bundle next to its settings.
+    let claude_plugin_dir = claude_settings
+        .parent()
+        .map(|p| p.join("skills").join("ai-handoff"))
+        .unwrap_or_else(|| user_home.join(".claude").join("skills").join("ai-handoff"));
     InstallTargets {
         home: ai_home.to_path_buf(),
         ipc_dir: ipc_dir.to_path_buf(),
         exe: exe.to_path_buf(),
         codex_hooks: user_home.join(".codex").join("hooks.json"),
         codex_config: user_home.join(".codex").join("config.toml"),
-        claude_settings: user_home.join(".claude").join("settings.json"),
+        claude_settings,
+        claude_plugin_dir,
+        codex_plugin_dir: user_home.join(".agents").join("plugins").join("ai-handoff"),
+        agents_marketplace: user_home
+            .join(".agents")
+            .join("plugins")
+            .join("marketplace.json"),
     }
 }
 
@@ -58,6 +79,12 @@ mod tests {
         assert_eq!(t.codex_hooks, uh.join(".codex/hooks.json"));
         assert_eq!(t.codex_config, uh.join(".codex/config.toml"));
         assert_eq!(t.claude_settings, uh.join(".claude/settings.json"));
+        assert_eq!(t.claude_plugin_dir, uh.join(".claude/skills/ai-handoff"));
+        assert_eq!(t.codex_plugin_dir, uh.join(".agents/plugins/ai-handoff"));
+        assert_eq!(
+            t.agents_marketplace,
+            uh.join(".agents/plugins/marketplace.json")
+        );
         let p = detect_agents(&t);
         assert!(p.codex);
         assert!(!p.claude);

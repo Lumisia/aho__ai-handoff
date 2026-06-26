@@ -21,6 +21,11 @@ use crate::install::state::CodexState;
 /// The environment variable we manage under `[shell_environment_policy].set`.
 const ENV_KEY: &str = "AI_HANDOFF_HOME";
 
+/// The dotted `[plugins."<KEY>"]` table key Codex reads to enable our bundle.
+/// `name@marketplace` per the Codex plugin model (marketplace name is the
+/// `name` field of `~/.agents/plugins/marketplace.json`).
+pub const PLUGIN_ENABLE_KEY: &str = "ai-handoff@claude-codex-auto-handoff";
+
 /// Error type for config edit operations.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigEditError {
@@ -166,6 +171,52 @@ pub fn remove(existing: &str, st: &CodexState) -> Result<String, ConfigEditError
             if now_empty && st.created_env_table {
                 doc.remove("shell_environment_policy");
             }
+        }
+    }
+
+    Ok(doc.to_string())
+}
+
+/// Set `[plugins."ai-handoff@claude-codex-auto-handoff"] enabled = true` in
+/// `existing` (or an empty document when `None`), preserving every other
+/// `[plugins.*]` table and the rest of the config. Never-clobber: parses with
+/// [`toml_edit::DocumentMut`] and propagates parse errors so the caller aborts
+/// rather than overwriting a real config with a blank one.
+pub fn enable_plugin(existing: Option<&str>) -> Result<String, ConfigEditError> {
+    let mut doc: DocumentMut = match existing {
+        Some(s) => s.parse::<DocumentMut>()?,
+        None => DocumentMut::new(),
+    };
+
+    let plugins = doc
+        .entry("plugins")
+        .or_insert(Item::Table(Table::new()))
+        .as_table_mut()
+        .ok_or(ConfigEditError::UnexpectedShape("plugins is not a table"))?;
+    // Render `[plugins.<key>]` as its own table header rather than inline.
+    plugins.set_implicit(true);
+    let entry = plugins
+        .entry(PLUGIN_ENABLE_KEY)
+        .or_insert(Item::Table(Table::new()))
+        .as_table_mut()
+        .ok_or(ConfigEditError::UnexpectedShape(
+            "plugins.<ai-handoff> is not a table",
+        ))?;
+    entry.insert("enabled", value(true));
+
+    Ok(doc.to_string())
+}
+
+/// Remove our `[plugins."ai-handoff@..."]` table from `existing`, preserving
+/// every other `[plugins.*]` table. If `[plugins]` becomes empty afterwards it
+/// is dropped too. Propagates parse errors rather than clobbering.
+pub fn disable_plugin(existing: &str) -> Result<String, ConfigEditError> {
+    let mut doc: DocumentMut = existing.parse::<DocumentMut>()?;
+
+    if let Some(plugins) = doc.get_mut("plugins").and_then(|t| t.as_table_mut()) {
+        plugins.remove(PLUGIN_ENABLE_KEY);
+        if plugins.is_empty() {
+            doc.remove("plugins");
         }
     }
 
@@ -361,5 +412,70 @@ mod tests {
             result.is_err(),
             "expected Err when shell_environment_policy.set is a string, got Ok"
         );
+    }
+
+    #[test]
+    fn enable_plugin_sets_enabled_true_on_empty_config() {
+        let out = enable_plugin(None).unwrap();
+        let doc: DocumentMut = out.parse().unwrap();
+        assert_eq!(
+            doc["plugins"][PLUGIN_ENABLE_KEY]["enabled"].as_bool(),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn enable_plugin_preserves_foreign_plugin_and_other_config() {
+        let src = concat!(
+            "sandbox_mode = \"workspace-write\"\n",
+            "[plugins.\"other@x\"]\n",
+            "enabled = false\n",
+        );
+        let out = enable_plugin(Some(src)).unwrap();
+        let doc: DocumentMut = out.parse().unwrap();
+        // ours added
+        assert_eq!(
+            doc["plugins"][PLUGIN_ENABLE_KEY]["enabled"].as_bool(),
+            Some(true)
+        );
+        // foreign plugin untouched
+        assert_eq!(doc["plugins"]["other@x"]["enabled"].as_bool(), Some(false));
+        // unrelated config preserved
+        assert_eq!(doc["sandbox_mode"].as_str(), Some("workspace-write"));
+    }
+
+    #[test]
+    fn enable_plugin_is_idempotent() {
+        let first = enable_plugin(None).unwrap();
+        let second = enable_plugin(Some(&first)).unwrap();
+        let doc: DocumentMut = second.parse().unwrap();
+        assert_eq!(
+            doc["plugins"][PLUGIN_ENABLE_KEY]["enabled"].as_bool(),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn disable_plugin_removes_only_ours_and_keeps_foreign() {
+        let enabled = enable_plugin(Some("[plugins.\"other@x\"]\nenabled = true\n")).unwrap();
+        let disabled = disable_plugin(&enabled).unwrap();
+        let doc: DocumentMut = disabled.parse().unwrap();
+        // ours gone
+        assert!(doc["plugins"].get(PLUGIN_ENABLE_KEY).is_none());
+        // foreign preserved
+        assert_eq!(doc["plugins"]["other@x"]["enabled"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn disable_plugin_drops_empty_plugins_table() {
+        let enabled = enable_plugin(None).unwrap();
+        let disabled = disable_plugin(&enabled).unwrap();
+        let doc: DocumentMut = disabled.parse().unwrap();
+        assert!(doc.get("plugins").is_none());
+    }
+
+    #[test]
+    fn enable_plugin_returns_err_on_invalid_toml() {
+        assert!(enable_plugin(Some("not = = valid")).is_err());
     }
 }

@@ -36,6 +36,9 @@ pub enum Commands {
         yes: bool,
         #[arg(long, value_delimiter = ',')]
         agents: Vec<String>,
+        /// Use the legacy direct-hook patch instead of the plugin bundle.
+        #[arg(long)]
+        no_plugin: bool,
     },
     Uninstall {
         #[arg(long)]
@@ -83,6 +86,7 @@ pub fn run_cli(cli: Cli) -> anyhow::Result<i32> {
             dry_run,
             yes,
             agents,
+            no_plugin,
         } => commands::install::run(
             dry_run,
             yes,
@@ -91,6 +95,7 @@ pub fn run_cli(cli: Cli) -> anyhow::Result<i32> {
             } else {
                 Some(agents)
             },
+            no_plugin,
         ),
         Commands::Uninstall {
             keep_store,
@@ -131,5 +136,20 @@ mod tests {
         let cli = Cli::try_parse_from(["ai-handoff", "statusline"]).unwrap();
 
         assert!(matches!(cli.command, Commands::Statusline));
+    }
+
+    #[test]
+    fn install_defaults_to_plugin_mode_and_accepts_no_plugin_flag() {
+        let default = Cli::try_parse_from(["ai-handoff", "install"]).unwrap();
+        match default.command {
+            Commands::Install { no_plugin, .. } => assert!(!no_plugin),
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let legacy = Cli::try_parse_from(["ai-handoff", "install", "--no-plugin"]).unwrap();
+        match legacy.command {
+            Commands::Install { no_plugin, .. } => assert!(no_plugin),
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 }

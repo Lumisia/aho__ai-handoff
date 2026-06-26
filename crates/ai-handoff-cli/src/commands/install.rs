@@ -24,7 +24,12 @@ struct InstallSideEffects<'a> {
     install_launcher: Option<LauncherInstaller<'a>>,
 }
 
-pub fn run(dry_run: bool, yes: bool, agents: Option<Vec<String>>) -> anyhow::Result<i32> {
+pub fn run(
+    dry_run: bool,
+    yes: bool,
+    agents: Option<Vec<String>>,
+    no_plugin: bool,
+) -> anyhow::Result<i32> {
     let base_dirs = directories::BaseDirs::new().context("could not determine user home")?;
     let exe = std::env::current_exe().context("could not determine current executable")?;
     let targets = targets_for(
@@ -46,9 +51,11 @@ pub fn run(dry_run: bool, yes: bool, agents: Option<Vec<String>>) -> anyhow::Res
         &mut stdin.lock(),
         &mut stdout.lock(),
         autostart_enabled,
+        !no_plugin,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_with_targets(
     targets: &InstallTargets,
     dry_run: bool,
@@ -57,6 +64,7 @@ pub fn run_with_targets(
     input: &mut dyn Read,
     out: &mut dyn Write,
     autostart_enabled: bool,
+    plugin: bool,
 ) -> anyhow::Result<i32> {
     // Toggle off: when autostart is disabled (the default), remove any logon
     // registration a previous install left behind, so flipping the config key
@@ -92,9 +100,11 @@ pub fn run_with_targets(
             register_autostart: register,
             install_launcher,
         },
+        plugin,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_with_targets_impl(
     targets: &InstallTargets,
     dry_run: bool,
@@ -103,6 +113,7 @@ fn run_with_targets_impl(
     input: &mut dyn Read,
     out: &mut dyn Write,
     side_effects: InstallSideEffects<'_>,
+    plugin: bool,
 ) -> anyhow::Result<i32> {
     let detected = detect_agents(targets);
     let selected = filter_agents(detected, agents.as_deref())?;
@@ -112,7 +123,7 @@ fn run_with_targets_impl(
     }
 
     let now = chrono::Utc::now();
-    let plan = plan_install(targets, &selected, now)?;
+    let plan = plan_install(targets, &selected, now, plugin)?;
     writeln!(
         out,
         "{}",
@@ -143,7 +154,7 @@ fn run_with_targets_impl(
         None
     };
 
-    let mut st = match apply_install(targets, &selected, now) {
+    let mut st = match apply_install(targets, &selected, now, plugin) {
         Ok(st) => st,
         Err(error) => {
             if let Some(autostart) = &autostart {
@@ -170,14 +181,35 @@ fn run_with_targets_impl(
         state::save(&targets.home, &st)?;
     }
 
-    if selected.codex {
-        writeln!(
-            out,
-            "Codex hooks installed. Open Codex /hooks and trust the new hooks."
-        )?;
-    }
-    if selected.claude {
-        writeln!(out, "Claude hooks installed.")?;
+    if plugin {
+        if selected.codex {
+            writeln!(
+                out,
+                "Codex plugin bundle written to {} and registered in marketplace.json.",
+                targets.codex_plugin_dir.display()
+            )?;
+            writeln!(
+                out,
+                "Finish in Codex: enable the ai-handoff plugin and trust its hooks via /hooks (Codex requires user confirmation)."
+            )?;
+        }
+        if selected.claude {
+            writeln!(
+                out,
+                "Claude plugin bundle written to {}; Claude auto-loads it next session (no command needed).",
+                targets.claude_plugin_dir.display()
+            )?;
+        }
+    } else {
+        if selected.codex {
+            writeln!(
+                out,
+                "Codex hooks installed. Open Codex /hooks and trust the new hooks."
+            )?;
+        }
+        if selected.claude {
+            writeln!(out, "Claude hooks installed.")?;
+        }
     }
     if let Some(autostart) = &st.autostart {
         writeln!(out, "Autostart: {:?}", autostart.kind)?;
@@ -269,6 +301,7 @@ mod tests {
                 register_autostart: Some(&mut fail_register),
                 install_launcher: None,
             },
+            false,
         )
         .unwrap_err();
 
@@ -329,6 +362,7 @@ mod tests {
                 register_autostart: Some(&mut register),
                 install_launcher: None,
             },
+            false,
         )
         .unwrap();
 
@@ -391,6 +425,7 @@ mod tests {
                 register_autostart: Some(&mut register),
                 install_launcher: Some(&mut launcher),
             },
+            false,
         )
         .unwrap();
 
@@ -451,6 +486,7 @@ mod tests {
                 register_autostart: None,
                 install_launcher: Some(&mut launcher),
             },
+            false,
         )
         .unwrap();
 

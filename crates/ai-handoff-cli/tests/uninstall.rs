@@ -30,7 +30,7 @@ fn uninstall_removes_managed_entries_and_preserves_user_keys() {
         codex: true,
         claude: true,
     };
-    let st = apply_install(&targets, &agents, chrono::Utc::now()).unwrap();
+    let st = apply_install(&targets, &agents, chrono::Utc::now(), false).unwrap();
 
     let installed_config = std::fs::read_to_string(user_home.join(".codex/config.toml")).unwrap();
     let mut doc: toml_edit::DocumentMut = installed_config.parse().unwrap();

@@ -46,10 +46,24 @@ pub fn run_io(json_output: bool, out: &mut dyn Write) -> i32 {
     } else {
         "unreachable"
     };
+
+    // Per-agent plugin install state, read from the recorded install-state.
+    let st = ai_handoff_core::install::state::load(&ai_handoff_core::paths::home());
+    let plugin_state = |rec: &Option<ai_handoff_core::install::PluginRecord>| match rec {
+        Some(r) => json!({ "installed": true, "root": r.root }),
+        None => json!({ "installed": false }),
+    };
+    let claude_plugin = plugin_state(&st.claude.plugin);
+    let codex_plugin = plugin_state(&st.codex.plugin);
+
     let report = json!({
         "daemon": daemon,
         "home": ai_handoff_core::paths::home().to_string_lossy(),
         "ipc": ai_handoff_core::paths::ipc_dir().to_string_lossy(),
+        "plugin": {
+            "claude": claude_plugin,
+            "codex": codex_plugin,
+        },
     });
 
     if json_output {
@@ -60,6 +74,13 @@ pub fn run_io(json_output: bool, out: &mut dyn Write) -> i32 {
         );
     } else {
         let _ = writeln!(out, "daemon: {daemon}");
+        let mark = |installed: bool| if installed { "installed" } else { "not installed" };
+        let _ = writeln!(
+            out,
+            "claude plugin: {}",
+            mark(st.claude.plugin.is_some())
+        );
+        let _ = writeln!(out, "codex plugin: {}", mark(st.codex.plugin.is_some()));
     }
     0
 }
