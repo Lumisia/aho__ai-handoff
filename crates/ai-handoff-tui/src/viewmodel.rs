@@ -2,7 +2,7 @@
 //! Kept free of ratatui/crossterm so it is unit-testable without a terminal.
 
 use ai_handoff_core::config::{self, Config, KeyKind};
-use ai_handoff_core::dashboard::{CheckStatus, DashboardSnapshot};
+use ai_handoff_core::dashboard::{CapsuleList, CapsuleSummary, CheckStatus, DashboardSnapshot};
 use ai_handoff_usage::{
     aggregate::{self, Group},
     model::UsageEvent,
@@ -65,6 +65,50 @@ pub fn health_rows(snapshot: &DashboardSnapshot) -> Vec<HealthRow> {
         .collect()
 }
 
+/// Capsule tab tree: one connected agent (Codex / Claude) and its projects.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CapsuleAgent {
+    pub agent: String,
+    pub projects: Vec<CapsuleProject>,
+    pub count: usize,
+}
+
+/// One project under an agent, with the capsules captured for it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CapsuleProject {
+    pub project_id: String,
+    pub capsules: Vec<CapsuleSummary>,
+}
+
+/// Group a flat capsule list into agent → project → capsule, preserving the
+/// first-seen order of agents and projects (the list itself is created-desc).
+pub fn capsule_tree(list: &CapsuleList) -> Vec<CapsuleAgent> {
+    let mut agents: Vec<CapsuleAgent> = Vec::new();
+    for item in &list.items {
+        let ai = match agents.iter().position(|a| a.agent == item.source_agent) {
+            Some(i) => i,
+            None => {
+                agents.push(CapsuleAgent {
+                    agent: item.source_agent.clone(),
+                    projects: Vec::new(),
+                    count: 0,
+                });
+                agents.len() - 1
+            }
+        };
+        let agent = &mut agents[ai];
+        agent.count += 1;
+        match agent.projects.iter().position(|p| p.project_id == item.project_id) {
+            Some(pi) => agent.projects[pi].capsules.push(item.clone()),
+            None => agent.projects.push(CapsuleProject {
+                project_id: item.project_id.clone(),
+                capsules: vec![item.clone()],
+            }),
+        }
+    }
+    agents
+}
+
 /// One editable setting row for the Settings tab.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SettingRow {
@@ -118,6 +162,39 @@ mod tests {
         let v = UsageView::from_events(&events);
         assert_eq!(v.breakdown(Dimension::Model).len(), 1);
         assert_eq!(v.breakdown(Dimension::Source)[0].key, "claude");
+    }
+
+    #[test]
+    fn capsule_tree_groups_by_agent_then_project() {
+        let cap = |agent: &str, project: &str, id: &str| CapsuleSummary {
+            capsule_id: id.into(),
+            project_id: project.into(),
+            created_at: "2026-06-25T01:01:01Z".into(),
+            source_agent: agent.into(),
+            target_agent: "Codex".into(),
+            state: "pending".into(),
+            summary_preview: "goal".into(),
+            path: format!("/store/{project}/{id}.json"),
+        };
+        let list = CapsuleList {
+            items: vec![
+                cap("Codex", "proj-a", "c1"),
+                cap("Codex", "proj-a", "c2"),
+                cap("Codex", "proj-b", "c3"),
+                cap("ClaudeCode", "proj-a", "c4"),
+            ],
+            pending_count: 4,
+            skipped: 0,
+        };
+        let tree = capsule_tree(&list);
+        assert_eq!(tree.len(), 2);
+        assert_eq!(tree[0].agent, "Codex");
+        assert_eq!(tree[0].count, 3);
+        assert_eq!(tree[0].projects.len(), 2);
+        assert_eq!(tree[0].projects[0].project_id, "proj-a");
+        assert_eq!(tree[0].projects[0].capsules.len(), 2);
+        assert_eq!(tree[1].agent, "ClaudeCode");
+        assert_eq!(tree[1].projects.len(), 1);
     }
 
     #[test]
