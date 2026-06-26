@@ -1,10 +1,9 @@
 {
   "id": "ai-handoff",
   "name": "ai-handoff",
-  "version": "1.2.0",
+  "version": "2.0.0",
   "description": "Automatic, integrity-checked handoff and verified memory recall between Claude Code and Codex.",
   "skills": "skills",
-  "hooks": "./hooks/hooks-codex.json",
   "author": {
     "name": "ai-handoff contributors"
   },
@@ -30,3 +29,4 @@
     "defaultPrompt": "Show me my ai-handoff cross-agent handoff status."
   }
 }
+

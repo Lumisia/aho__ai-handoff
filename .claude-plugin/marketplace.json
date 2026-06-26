@@ -6,7 +6,8 @@
     {
       "name": "ai-handoff",
       "source": "./",
-      "description": "Automatic, integrity-checked task handoff and verified memory recall between Claude Code and Codex when either nears its 5-hour usage limit."
+      "description": "Automatic, integrity-checked task handoff and verified memory recall between Claude Code and Codex with native v2 CLI and skills."
     }
   ]
 }
+
