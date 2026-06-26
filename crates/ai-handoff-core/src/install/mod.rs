@@ -1,5 +1,6 @@
 pub mod backup;
 pub mod claude;
+pub mod claude_statusline;
 pub mod codex_config;
 pub mod codex_hooks;
 pub mod detect;
@@ -10,8 +11,8 @@ pub mod state;
 pub use backup::{backup_file, backup_path};
 pub use detect::{detect_agents, targets_for, AgentPresence, InstallTargets};
 pub use state::{
-    load, save, state_path, AutostartKind, AutostartState, ClaudeState, CodexState, FileMod,
-    InstallState,
+    load, save, state_path, AutostartKind, AutostartState, ClaudeState, ClaudeStatuslineState,
+    CodexState, FileMod, InstallState,
 };
 
 use std::path::{Path, PathBuf};
@@ -89,10 +90,14 @@ pub fn plan_install(
 
     if agents.claude {
         let (settings_after, _events) = claude::apply(claude_settings_existing.as_deref(), &exe)?;
+        // Preview the same final document apply_install writes: the hooks edit
+        // plus our managed root statusLine key.
+        let (settings_after_all, _sl_apply) =
+            claude_statusline::apply(Some(&settings_after), &exe)?;
         file_plans.push(diff::FilePlan {
             path: t.claude_settings.to_string_lossy().into_owned(),
             before: claude_settings_existing.clone(),
-            after: settings_after,
+            after: settings_after_all,
         });
     }
 
@@ -192,7 +197,12 @@ pub fn apply_install(
     let claude_pending = if agents.claude {
         let settings_existing = read_existing(&t.claude_settings)?;
         let (settings_after, settings_events) = claude::apply(settings_existing.as_deref(), &exe)?;
-        Some((settings_after, settings_events))
+        // statusLine is a separate ROOT key; feed the hooks-applied JSON through
+        // claude_statusline::apply so both edits land in a single write. Parse
+        // happens here, before any write, preserving abort-before-write.
+        let (settings_after_all, sl_apply) =
+            claude_statusline::apply(Some(&settings_after), &exe)?;
+        Some((settings_after_all, settings_events, sl_apply))
     } else {
         None
     };
@@ -232,14 +242,30 @@ pub fn apply_install(
             config_edit.created_env_table || prior.codex.created_env_table;
     }
 
-    if let Some((settings_after, settings_events)) = claude_pending {
-        let settings_backup = write_with_backup(&t.claude_settings, &settings_after, now)?;
+    if let Some((settings_after_all, settings_events, sl_apply)) = claude_pending {
+        // Prior install-state so an idempotent re-install keeps the originally
+        // recorded statusLine `previous` instead of losing it (see merge below).
+        let prior = state::load(&t.home);
+
+        let settings_backup = write_with_backup(&t.claude_settings, &settings_after_all, now)?;
 
         st.claude.settings_file = Some(FileMod {
             path: t.claude_settings.to_string_lossy().into_owned(),
             backup: settings_backup,
         });
         st.claude.managed_hook_events = settings_events;
+        // Idempotent previous-merge: when re-applying over our OWN statusLine
+        // (current_was_ours), `apply` reports no foreign previous, so keep the
+        // one we recorded on the first install; otherwise record the freshly
+        // captured foreign value.
+        st.claude.statusline = Some(ClaudeStatuslineState {
+            previous: if sl_apply.current_was_ours {
+                prior.claude.statusline.and_then(|s| s.previous)
+            } else {
+                sl_apply.previous
+            },
+            installed_command: sl_apply.installed_command,
+        });
     }
 
     state::save(&t.home, &st)?;
@@ -277,6 +303,11 @@ pub fn apply_uninstall(_t: &InstallTargets, st: &InstallState) -> anyhow::Result
         let path = Path::new(&fm.path);
         if let Some(text) = read_existing(path)? {
             let cleaned = claude::remove(&text)?;
+            // Restore the user's prior statusLine (or drop ours) before writing.
+            let cleaned = match &st.claude.statusline {
+                Some(sl) => claude_statusline::remove(&cleaned, sl)?,
+                None => cleaned,
+            };
             write_text_atomic(path, &cleaned)?;
         }
     }
@@ -395,6 +426,91 @@ mod tests {
         // empty tables we created are dropped
         assert!(!final_cfg.contains("sandbox_workspace_write"));
         assert!(!final_cfg.contains("shell_environment_policy"));
+    }
+
+    #[test]
+    fn install_reinstall_uninstall_preserves_foreign_statusline() {
+        // The highest-value statusLine test: a user with a pre-existing
+        // statusLine installs, re-installs (idempotent), then uninstalls. Their
+        // original statusLine must be restored exactly, and our managed hooks
+        // must be gone. Mirrors the codex survival/reinstall tests above.
+        let dir = tempfile::tempdir().unwrap();
+        let uh = dir.path();
+        std::fs::create_dir_all(uh.join(".claude")).unwrap();
+        let foreign = r#"{"model":"opus","statusLine":{"type":"command","command":"my-prompt --fancy","padding":1}}"#;
+        std::fs::write(uh.join(".claude/settings.json"), foreign).unwrap();
+        let ai_home = uh.join("ai-home");
+        let t = targets_for(
+            uh,
+            &ai_home,
+            &ai_home.join("ipc"),
+            std::path::Path::new("C:/p/ai-handoff.exe"),
+        );
+        let agents = AgentPresence {
+            codex: false,
+            claude: true,
+        };
+
+        // Install twice; the second run is idempotent over our own statusLine.
+        apply_install(&t, &agents, Utc::now()).unwrap();
+        let st = apply_install(&t, &agents, Utc::now()).unwrap();
+
+        // After install our statusLine is live; the foreign one is recorded.
+        let installed: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(uh.join(".claude/settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            installed["statusLine"]["command"],
+            "\"C:/p/ai-handoff.exe\" statusline"
+        );
+        assert_eq!(installed["statusLine"]["refreshInterval"], 15);
+        // Idempotent re-install must keep the ORIGINAL foreign previous.
+        let recorded = st.claude.statusline.as_ref().unwrap();
+        assert_eq!(
+            recorded.previous.as_ref().unwrap()["command"],
+            "my-prompt --fancy"
+        );
+
+        apply_uninstall(&t, &st).unwrap();
+        let restored: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(uh.join(".claude/settings.json")).unwrap(),
+        )
+        .unwrap();
+        // Foreign statusLine restored exactly (including extra keys), hooks gone.
+        assert_eq!(restored["statusLine"]["command"], "my-prompt --fancy");
+        assert_eq!(restored["statusLine"]["padding"], 1);
+        assert_eq!(restored["model"], "opus");
+        assert!(restored.get("hooks").is_none());
+    }
+
+    #[test]
+    fn install_uninstall_removes_statusline_when_user_had_none() {
+        // No prior statusLine → uninstall must DELETE our key, not leave it.
+        let dir = tempfile::tempdir().unwrap();
+        let uh = dir.path();
+        std::fs::create_dir_all(uh.join(".claude")).unwrap();
+        std::fs::write(uh.join(".claude/settings.json"), r#"{"model":"opus"}"#).unwrap();
+        let ai_home = uh.join("ai-home");
+        let t = targets_for(
+            uh,
+            &ai_home,
+            &ai_home.join("ipc"),
+            std::path::Path::new("C:/p/ai-handoff.exe"),
+        );
+        let agents = AgentPresence {
+            codex: false,
+            claude: true,
+        };
+
+        let st = apply_install(&t, &agents, Utc::now()).unwrap();
+        apply_uninstall(&t, &st).unwrap();
+        let restored: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(uh.join(".claude/settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(restored.get("statusLine").is_none());
+        assert_eq!(restored["model"], "opus");
     }
 
     #[test]

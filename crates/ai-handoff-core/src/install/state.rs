@@ -20,9 +20,17 @@ pub struct CodexState {
 }
 
 #[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
+pub struct ClaudeStatuslineState {
+    pub previous: Option<serde_json::Value>,
+    pub installed_command: String,
+}
+
+#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
 pub struct ClaudeState {
     pub settings_file: Option<FileMod>,
     pub managed_hook_events: Vec<String>,
+    #[serde(default)]
+    pub statusline: Option<ClaudeStatuslineState>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -176,6 +184,21 @@ mod tests {
             autostart: Some(AutostartState::new(AutostartKind::HkcuRun, "AI Handoff")),
             ..Default::default()
         };
+        save(dir.path(), &st).unwrap();
+        assert_eq!(load(dir.path()), st);
+    }
+
+    #[test]
+    fn roundtrips_claude_statusline_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut st = InstallState {
+            installed_at: "with-statusline".into(),
+            ..Default::default()
+        };
+        st.claude.statusline = Some(ClaudeStatuslineState {
+            previous: Some(serde_json::json!({"type":"command","command":"my-prompt"})),
+            installed_command: "\"C:\\p\\ai-handoff.exe\" statusline".into(),
+        });
         save(dir.path(), &st).unwrap();
         assert_eq!(load(dir.path()), st);
     }
