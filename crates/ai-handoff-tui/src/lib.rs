@@ -6,6 +6,7 @@
 //! `ai-handoff` / `ai-handoff tui` invocation opens this; hook commands never do.
 
 pub mod app;
+pub mod capsule_ops;
 pub mod edit;
 pub mod viewmodel;
 

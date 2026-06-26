@@ -7,6 +7,8 @@ license.workspace = true
 [dependencies]
 ratatui = { workspace = true }
 crossterm = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
 ai-handoff-core = { path = "../ai-handoff-core" }
 ai-handoff-usage = { path = "../ai-handoff-usage" }
 

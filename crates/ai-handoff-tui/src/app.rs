@@ -17,7 +17,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{
         canvas::{Canvas, Points},
-        BarChart, Block, Borders, Cell, Paragraph, Row, Table, Tabs, Wrap,
+        BarChart, Block, BorderType, Borders, Cell, Paragraph, Row, Table, Tabs, Wrap,
     },
     DefaultTerminal, Frame,
 };
@@ -25,6 +25,7 @@ use ratatui::{
 use ai_handoff_core::dashboard::{CheckStatus, DashboardSnapshot};
 use ai_handoff_usage::{aggregate::Group, Dimension};
 
+use crate::capsule_ops;
 use crate::edit::{self, EditAction};
 use crate::viewmodel::{
     capsule_tree, health_rows, settings_rows, CapsuleAgent, HealthRow, SettingRow, UsageView,
@@ -98,6 +99,25 @@ enum CapTarget {
     Capsule(usize, usize, usize),
 }
 
+/// Where the focus sits inside the Capsule tab.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CapFocus {
+    /// The left (3/10) agent → project → capsule tree.
+    Tree,
+    /// The right (7/10) detail pane: action bar on top, body below.
+    Detail,
+    /// Editing the selected capsule's goal in place.
+    Editing,
+}
+
+/// Cached detail for the selected capsule: the parsed capsule (when it is a
+/// valid v2 capsule) and the raw file text as a fallback.
+struct CapDetail {
+    path: String,
+    parsed: Option<ai_handoff_core::capsule::Capsule>,
+    raw: String,
+}
+
 pub struct App {
     pub tab: Tab,
     /// Whether the focus is inside the current tab's content (vs. the tab bar).
@@ -114,8 +134,16 @@ pub struct App {
     cap_expanded_agents: HashSet<usize>,
     cap_expanded_projects: HashSet<(usize, usize)>,
     cap_sel: usize,
-    /// Cached (path, text) of the currently-selected capsule's file.
-    cap_content: Option<(String, String)>,
+    /// Whether focus is on the tree, the detail pane, or the goal editor.
+    cap_focus: CapFocus,
+    /// Vertical scroll offset of the detail body.
+    cap_scroll: u16,
+    /// A delete needs a second confirm press; armed here.
+    cap_confirm_delete: bool,
+    /// The working buffer while editing a capsule's goal.
+    cap_edit_buf: String,
+    /// Cached parsed/raw detail of the currently-selected capsule.
+    cap_detail: Option<CapDetail>,
     status: String,
     should_quit: bool,
     /// Armed at the root (empty history) by a first q/Esc; a second one quits.
@@ -156,7 +184,11 @@ impl App {
             cap_expanded_agents,
             cap_expanded_projects: HashSet::new(),
             cap_sel: 0,
-            cap_content: None,
+            cap_focus: CapFocus::Tree,
+            cap_scroll: 0,
+            cap_confirm_delete: false,
+            cap_edit_buf: String::new(),
+            cap_detail: None,
             status: DEFAULT_HINT.to_string(),
             should_quit: false,
             confirm_quit: false,
@@ -185,6 +217,12 @@ impl App {
 
     /// Handle one keypress. Pure except for a config file write on Settings edit.
     pub fn on_key(&mut self, key: KeyEvent) {
+        // While editing a capsule goal, the editor owns every key (so typing
+        // 'q', a digit, or Tab inserts text instead of navigating).
+        if self.tab == Tab::Capsule && self.cap_focus == CapFocus::Editing {
+            self.cap_editing_key(key);
+            return;
+        }
         // q/Esc backs out one level: content -> tab bar, then tab history, then
         // a quit confirmation at the root.
         if matches!(key.code, KeyCode::Char('q') | KeyCode::Esc) {
@@ -244,8 +282,10 @@ impl App {
         self.status = match self.tab {
             Tab::Overview => DEFAULT_HINT.to_string(),
             Tab::Capsule => {
+                self.cap_focus = CapFocus::Tree;
+                self.cap_confirm_delete = false;
                 self.cap_load_content();
-                "↑/↓ move · Enter/→ expand/open · ← collapse · q/Esc back".to_string()
+                "↑/↓ move · Enter/→ expand or open capsule · ← collapse · q/Esc back".to_string()
             }
             Tab::Usage => "g cycle breakdown · q/Esc back".to_string(),
             Tab::Settings => {
@@ -322,6 +362,16 @@ impl App {
     }
 
     fn on_capsule_key(&mut self, key: KeyEvent) {
+        match self.cap_focus {
+            CapFocus::Tree => self.cap_tree_key(key),
+            CapFocus::Detail => self.cap_detail_key(key),
+            // Editing is intercepted in on_key before reaching here.
+            CapFocus::Editing => self.cap_editing_key(key),
+        }
+    }
+
+    /// Keys while the left tree (agent → project → capsule) has focus.
+    fn cap_tree_key(&mut self, key: KeyEvent) {
         let rows = self.cap_rows();
         if rows.is_empty() {
             return;
@@ -337,7 +387,17 @@ impl App {
                     self.cap_sel += 1;
                 }
             }
-            KeyCode::Enter | KeyCode::Right | KeyCode::Char(' ') => self.cap_toggle(&rows),
+            KeyCode::Enter | KeyCode::Right | KeyCode::Char(' ') => {
+                match rows.get(self.cap_sel).map(|r| r.target) {
+                    // A capsule: cross into the detail pane (the 7/10 side).
+                    Some(CapTarget::Capsule(..)) => self.cap_enter_detail(),
+                    Some(CapTarget::Agent(ai)) => toggle(&mut self.cap_expanded_agents, ai),
+                    Some(CapTarget::Project(ai, pi)) => {
+                        toggle(&mut self.cap_expanded_projects, (ai, pi))
+                    }
+                    None => {}
+                }
+            }
             KeyCode::Left => self.cap_collapse(&rows),
             _ => {}
         }
@@ -347,15 +407,6 @@ impl App {
             self.cap_sel = n.saturating_sub(1);
         }
         self.cap_load_content();
-    }
-
-    /// Enter/→/Space on an agent or project toggles its expansion.
-    fn cap_toggle(&mut self, rows: &[CapRow]) {
-        match rows.get(self.cap_sel).map(|r| r.target) {
-            Some(CapTarget::Agent(ai)) => toggle(&mut self.cap_expanded_agents, ai),
-            Some(CapTarget::Project(ai, pi)) => toggle(&mut self.cap_expanded_projects, (ai, pi)),
-            _ => {}
-        }
     }
 
     /// ← collapses the agent/project; on a capsule it does nothing.
@@ -368,6 +419,186 @@ impl App {
                 self.cap_expanded_projects.remove(&(ai, pi));
             }
             _ => {}
+        }
+    }
+
+    /// Cross from the tree into the detail pane for the selected capsule.
+    fn cap_enter_detail(&mut self) {
+        self.cap_focus = CapFocus::Detail;
+        self.cap_scroll = 0;
+        self.cap_confirm_delete = false;
+        self.cap_load_content();
+        self.status =
+            "s toggle state · d delete · e/Enter edit goal · ↑/↓ scroll · ← back to list"
+                .to_string();
+    }
+
+    /// Keys while the right detail pane has focus (action bar + body).
+    fn cap_detail_key(&mut self, key: KeyEvent) {
+        // Any key other than a second 'd'/'y' cancels an armed delete.
+        let confirming = self.cap_confirm_delete;
+        if confirming && !matches!(key.code, KeyCode::Char('d') | KeyCode::Char('y')) {
+            self.cap_confirm_delete = false;
+            self.status = "delete cancelled".to_string();
+        }
+        match key.code {
+            KeyCode::Left => self.cap_focus_tree(),
+            KeyCode::Up | KeyCode::Char('k') => self.cap_scroll = self.cap_scroll.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => self.cap_scroll = self.cap_scroll.saturating_add(1),
+            KeyCode::Char('s') => self.cap_toggle_state(),
+            KeyCode::Char('d') | KeyCode::Char('y') if confirming => self.cap_delete(),
+            KeyCode::Char('d') => {
+                self.cap_confirm_delete = true;
+                self.status = "delete this capsule? press d or y to confirm, any other key to cancel"
+                    .to_string();
+            }
+            KeyCode::Char('e') | KeyCode::Enter => self.cap_begin_edit(),
+            _ => {}
+        }
+    }
+
+    /// Return focus to the tree (the 3/10 side).
+    fn cap_focus_tree(&mut self) {
+        self.cap_focus = CapFocus::Tree;
+        self.cap_confirm_delete = false;
+        self.status =
+            "↑/↓ move · Enter/→ expand or open capsule · ← collapse · q/Esc back".to_string();
+    }
+
+    /// Keys while editing the selected capsule's goal.
+    fn cap_editing_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Enter => self.cap_commit_edit(),
+            KeyCode::Esc => {
+                self.cap_focus = CapFocus::Detail;
+                self.status = "edit cancelled".to_string();
+            }
+            KeyCode::Backspace => {
+                self.cap_edit_buf.pop();
+            }
+            KeyCode::Char(c) => self.cap_edit_buf.push(c),
+            _ => {}
+        }
+    }
+
+    /// The (agent, project, capsule) indices of the current selection, if it is
+    /// a capsule.
+    fn selected_capsule(&self) -> Option<(usize, usize, usize)> {
+        match self.cap_rows().get(self.cap_sel).map(|r| r.target) {
+            Some(CapTarget::Capsule(ai, pi, ci)) => Some((ai, pi, ci)),
+            _ => None,
+        }
+    }
+
+    /// Toggle the selected capsule's consumption state on disk and in the tree.
+    fn cap_toggle_state(&mut self) {
+        let Some((ai, pi, ci)) = self.selected_capsule() else {
+            return;
+        };
+        let path = self.cap_tree[ai].projects[pi].capsules[ci].path.clone();
+        match capsule_ops::toggle_state(Path::new(&path)) {
+            Ok(new_state) => {
+                self.cap_tree[ai].projects[pi].capsules[ci].state = new_state.clone();
+                self.cap_detail = None; // force a re-read
+                self.cap_load_content();
+                self.status = format!("state → {new_state}");
+            }
+            Err(e) => self.status = format!("state change failed: {e}"),
+        }
+    }
+
+    /// Begin editing the selected capsule's goal (loads the current goal).
+    fn cap_begin_edit(&mut self) {
+        let goal = self
+            .cap_detail
+            .as_ref()
+            .and_then(|d| d.parsed.as_ref())
+            .map(|c| c.summary.goal.clone());
+        match goal {
+            Some(goal) => {
+                self.cap_edit_buf = goal;
+                self.cap_focus = CapFocus::Editing;
+                self.status = "editing goal — Enter save · Esc cancel".to_string();
+            }
+            None => self.status = "this capsule cannot be edited (not a valid capsule)".to_string(),
+        }
+    }
+
+    /// Save the edited goal to disk and the in-memory tree.
+    fn cap_commit_edit(&mut self) {
+        let Some((ai, pi, ci)) = self.selected_capsule() else {
+            self.cap_focus = CapFocus::Detail;
+            return;
+        };
+        let path = self.cap_tree[ai].projects[pi].capsules[ci].path.clone();
+        let goal = self.cap_edit_buf.clone();
+        match capsule_ops::set_goal(Path::new(&path), &goal) {
+            Ok(()) => {
+                self.cap_tree[ai].projects[pi].capsules[ci].summary_preview = goal;
+                self.cap_detail = None;
+                self.cap_load_content();
+                self.status = "goal saved".to_string();
+            }
+            Err(e) => self.status = format!("save failed: {e}"),
+        }
+        self.cap_focus = CapFocus::Detail;
+    }
+
+    /// Delete the selected capsule from disk and prune it from the tree.
+    fn cap_delete(&mut self) {
+        self.cap_confirm_delete = false;
+        let Some((ai, pi, ci)) = self.selected_capsule() else {
+            return;
+        };
+        let path = self.cap_tree[ai].projects[pi].capsules[ci].path.clone();
+        if let Err(e) = capsule_ops::delete(Path::new(&path)) {
+            self.status = format!("delete failed: {e}");
+            return;
+        }
+        // Prune the capsule, then any now-empty project / agent.
+        let proj = &mut self.cap_tree[ai].projects[pi];
+        proj.capsules.remove(ci);
+        self.cap_tree[ai].count = self.cap_tree[ai].count.saturating_sub(1);
+        if self.cap_tree[ai].projects[pi].capsules.is_empty() {
+            self.cap_tree[ai].projects.remove(pi);
+        }
+        if self.cap_tree[ai].projects.is_empty() {
+            self.cap_tree.remove(ai);
+        }
+        // Selection/focus return to the (smaller) tree.
+        let n = self.cap_rows().len();
+        if self.cap_sel >= n {
+            self.cap_sel = n.saturating_sub(1);
+        }
+        self.cap_focus = CapFocus::Tree;
+        self.cap_detail = None;
+        self.cap_load_content();
+        self.status = "capsule deleted".to_string();
+    }
+
+    /// Read + parse the selected capsule into the detail cache (skipped when the
+    /// selection is an agent/project, or unchanged from the last read).
+    fn cap_load_content(&mut self) {
+        let target = self.cap_rows().get(self.cap_sel).map(|r| r.target);
+        if let Some(CapTarget::Capsule(ai, pi, ci)) = target {
+            let path = self.cap_tree[ai].projects[pi].capsules[ci].path.clone();
+            let already = self
+                .cap_detail
+                .as_ref()
+                .map(|d| d.path == path)
+                .unwrap_or(false);
+            if !already {
+                self.cap_scroll = 0;
+                let res = ai_handoff_core::dashboard::read_capsule(Path::new(&path), 64 * 1024);
+                let raw = match res.error {
+                    Some(e) => format!("(could not read {path}: {e})"),
+                    None => res.text,
+                };
+                let parsed = serde_json::from_str(&raw).ok();
+                self.cap_detail = Some(CapDetail { path, parsed, raw });
+            }
+        } else {
+            self.cap_detail = None;
         }
     }
 
@@ -414,31 +645,6 @@ impl App {
             }
         }
         rows
-    }
-
-    /// Read the selected capsule's file into the content cache (skipped when the
-    /// selection is an agent/project, or unchanged from the last read).
-    fn cap_load_content(&mut self) {
-        let rows = self.cap_rows();
-        let target = rows.get(self.cap_sel).map(|r| r.target);
-        if let Some(CapTarget::Capsule(ai, pi, ci)) = target {
-            let path = self.cap_tree[ai].projects[pi].capsules[ci].path.clone();
-            let already = self
-                .cap_content
-                .as_ref()
-                .map(|(p, _)| p == &path)
-                .unwrap_or(false);
-            if !already {
-                let res = ai_handoff_core::dashboard::read_capsule(Path::new(&path), 64 * 1024);
-                let text = match res.error {
-                    Some(e) => format!("(could not read {path}: {e})"),
-                    None => res.text,
-                };
-                self.cap_content = Some((path, text));
-            }
-        } else {
-            self.cap_content = None;
-        }
     }
 
     // --- drawing -------------------------------------------------------
@@ -512,19 +718,23 @@ impl App {
             return;
         }
 
-        // List on the left (3) — capsule body on the right (7).
+        // Tree list on the left (3) — capsule detail on the right (7).
         let cols = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
             .split(area);
 
+        let tree_focused = self.focus_content && self.cap_focus == CapFocus::Tree;
+        let detail_focused = self.focus_content && self.cap_focus != CapFocus::Tree;
+
+        // --- left: the tree ---
         let lines: Vec<Line> = rows
             .iter()
             .enumerate()
             .map(|(i, r)| {
                 let text = format!("{}{}", " ".repeat(r.indent), r.label);
                 if i == self.cap_sel {
-                    let style = if self.focus_content {
+                    let style = if tree_focused {
                         Style::default().fg(Color::Black).bg(Color::Cyan)
                     } else {
                         Style::default().add_modifier(Modifier::REVERSED)
@@ -535,26 +745,92 @@ impl App {
                 }
             })
             .collect();
-        let list = Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Capsules (↓/Space/Enter to open)"),
-        );
+        let list = Paragraph::new(lines)
+            .block(focus_block("Capsules (↓/Space/Enter to open)", tree_focused));
         f.render_widget(list, cols[0]);
 
-        let (title, body) = match self.cap_content.as_ref() {
-            Some((path, text)) => (format!("Capsule — {path}"), text.clone()),
+        // --- right: action bar (top) over the body (bottom) ---
+        let right = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(3), Constraint::Min(3)])
+            .split(cols[1]);
+        self.draw_capsule_actions(f, right[0], detail_focused);
+        self.draw_capsule_body(f, right[1], detail_focused);
+    }
+
+    /// The action bar: state-toggle / delete / edit, with their hotkeys shown.
+    fn draw_capsule_actions(&self, f: &mut Frame, area: Rect, focused: bool) {
+        let state = self
+            .cap_detail
+            .as_ref()
+            .and_then(|d| d.parsed.as_ref())
+            .map(|c| match c.consumption.state {
+                ai_handoff_core::capsule::ConsumptionState::Pending => "pending",
+                ai_handoff_core::capsule::ConsumptionState::Consumed => "consumed",
+            });
+        let mut spans = vec![
+            Span::raw(" "),
+            Span::styled(
+                format!(" state: {} ", state.unwrap_or("—")),
+                Style::default().fg(Color::Black).bg(Color::Gray),
+            ),
+            Span::raw("  "),
+            Span::styled(" [s] toggle state ", action_style(focused)),
+            Span::raw("  "),
+        ];
+        if self.cap_confirm_delete {
+            spans.push(Span::styled(
+                " [d] confirm delete ",
+                Style::default().fg(Color::White).bg(Color::Red),
+            ));
+        } else {
+            spans.push(Span::styled(" [d] delete ", action_style(focused)));
+        }
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(" [e/Enter] edit goal ", action_style(focused)));
+        let bar = Paragraph::new(Line::from(spans))
+            .block(focus_block("Actions", focused && self.cap_focus == CapFocus::Detail));
+        f.render_widget(bar, area);
+    }
+
+    /// The capsule body: a readable view (or the goal editor when editing).
+    fn draw_capsule_body(&self, f: &mut Frame, area: Rect, focused: bool) {
+        if self.cap_focus == CapFocus::Editing {
+            let lines = vec![
+                Line::from("Editing goal (Enter to save · Esc to cancel):").italic(),
+                Line::from(""),
+                Line::from(vec![
+                    Span::raw(self.cap_edit_buf.clone()),
+                    Span::styled("▏", Style::default().fg(Color::Cyan)),
+                ]),
+            ];
+            let editor = Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .block(focus_block("Edit goal", true));
+            f.render_widget(editor, area);
+            return;
+        }
+
+        let (title, lines) = match self.cap_detail.as_ref() {
+            Some(detail) => (
+                format!("Capsule — {}", detail.path),
+                capsule_body_lines(detail),
+            ),
             None => (
                 "Capsule detail".to_string(),
-                "Enter/→ expands the selected agent or project. Move with ↑/↓; the highlighted \
-                 capsule's contents show here."
-                    .to_string(),
+                vec![Line::from(
+                    "Move with ↑/↓; press Enter/→ on a capsule to open it here.",
+                )],
             ),
         };
-        let detail = Paragraph::new(body)
+        let body = Paragraph::new(lines)
             .wrap(Wrap { trim: false })
-            .block(Block::default().borders(Borders::ALL).title(title));
-        f.render_widget(detail, cols[1]);
+            .scroll((self.cap_scroll, 0))
+            .block(focus_block(
+                &title,
+                focused && self.cap_focus == CapFocus::Detail,
+            ));
+        f.render_widget(body, area);
     }
 
     /// Claude/Codex token totals from the per-source aggregation.
@@ -803,6 +1079,92 @@ fn toggle<T: Eq + std::hash::Hash>(set: &mut HashSet<T>, key: T) {
     if !set.remove(&key) {
         set.insert(key);
     }
+}
+
+/// A bordered block whose outline is highlighted (thick + yellow) when focused —
+/// this is the "외곽선" that shows which pane the user is in.
+fn focus_block(title: &str, focused: bool) -> Block<'static> {
+    let (border_type, style) = if focused {
+        (BorderType::Thick, Style::default().fg(Color::Yellow))
+    } else {
+        (BorderType::Plain, Style::default().fg(Color::DarkGray))
+    };
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(border_type)
+        .border_style(style)
+        .title(title.to_string())
+}
+
+/// Style for an action-bar button: emphasised when its pane has focus.
+fn action_style(focused: bool) -> Style {
+    if focused {
+        Style::default().fg(Color::Black).bg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::Gray)
+    }
+}
+
+/// Render the selected capsule as readable lines (or its raw text when it does
+/// not parse as a v2 capsule).
+fn capsule_body_lines(detail: &CapDetail) -> Vec<Line<'static>> {
+    let Some(c) = detail.parsed.as_ref() else {
+        return detail.raw.lines().map(|l| Line::from(l.to_string())).collect();
+    };
+    let head = |k: &str, v: String| {
+        Line::from(vec![
+            Span::styled(
+                format!("{k}: "),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(v),
+        ])
+    };
+    let state = match c.consumption.state {
+        ai_handoff_core::capsule::ConsumptionState::Pending => "pending",
+        ai_handoff_core::capsule::ConsumptionState::Consumed => "consumed",
+    };
+    let mut lines = vec![
+        head("Goal", c.summary.goal.clone()),
+        head("Flow", format!("{:?} → {:?}", c.source_agent, c.target_agent)),
+        head("State", state.to_string()),
+        head("Created", c.created_at.clone()),
+        head("Capsule", c.capsule_id.clone()),
+        Line::from(""),
+    ];
+    push_list(&mut lines, "Done", &c.summary.done);
+    push_list(&mut lines, "Remaining", &c.summary.remaining);
+    push_list(&mut lines, "Risks", &c.summary.risks);
+    if let Some(np) = &c.next_prompt {
+        lines.push(Line::from(""));
+        lines.push(Line::from(
+            Span::styled("Next prompt:", Style::default().add_modifier(Modifier::BOLD)),
+        ));
+        lines.extend(np.lines().map(|l| Line::from(l.to_string())));
+    }
+    if !c.files.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(
+            Span::styled("Files:", Style::default().add_modifier(Modifier::BOLD)),
+        ));
+        for fch in &c.files {
+            let status = fch.status.clone().unwrap_or_default();
+            lines.push(Line::from(format!("  {status} {}", fch.path)));
+        }
+    }
+    lines
+}
+
+/// Append a bold-labelled bullet list (skipped when empty).
+fn push_list(lines: &mut Vec<Line<'static>>, label: &str, items: &[String]) {
+    if items.is_empty() {
+        return;
+    }
+    lines.push(Line::from(Span::styled(
+        format!("{label}:"),
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+    lines.extend(items.iter().map(|it| Line::from(format!("  - {it}"))));
 }
 
 /// Basename of a project id/path, truncated to fit the tree column.
@@ -1143,10 +1505,103 @@ mod tests {
         // Move to the project, expand it -> capsule becomes visible.
         app.cap_sel = 1;
         app.on_key(key(KeyCode::Enter));
-        // Move to the capsule; its file is read into the content cache.
+        // Move to the capsule; its file is read into the detail cache.
         app.cap_sel = 2;
         app.on_key(key(KeyCode::Down)); // clamps, stays on capsule, loads content
-        let (_, body) = app.cap_content.as_ref().expect("capsule content loaded");
-        assert!(body.contains("capsule body"));
+        let detail = app.cap_detail.as_ref().expect("capsule detail loaded");
+        assert!(detail.raw.contains("capsule body"));
+    }
+
+    #[test]
+    fn capsule_detail_actions_toggle_edit_and_delete() {
+        use ai_handoff_core::capsule::{
+            AgentKind, Capsule, Consumption, ConsumptionState, RedactionMeta, Session, Summary,
+        };
+        use ai_handoff_core::dashboard::{CapsuleList, CapsuleSummary};
+
+        let dir = tempfile::tempdir().unwrap();
+        let cap_path = dir.path().join("cap_1.json");
+        let capsule = Capsule {
+            schema_version: 2,
+            capsule_id: "cap_1".into(),
+            project_id: "projX".into(),
+            created_at: "2026-06-25T12:00:00Z".into(),
+            source_agent: AgentKind::Codex,
+            target_agent: AgentKind::ClaudeCode,
+            session: Session::default(),
+            summary: Summary {
+                goal: "old goal".into(),
+                done: vec![],
+                remaining: vec![],
+                risks: vec![],
+            },
+            files: vec![],
+            next_prompt: None,
+            redaction: RedactionMeta { applied: true, ruleset: "default-v2".into() },
+            consumption: Consumption {
+                state: ConsumptionState::Pending,
+                consumed_by: None,
+                consumed_at: None,
+            },
+        };
+        std::fs::write(&cap_path, serde_json::to_vec_pretty(&capsule).unwrap()).unwrap();
+
+        let snapshot = ai_handoff_core::dashboard::dashboard_snapshot_for(dir.path(), dir.path());
+        let mut app = App::new(
+            snapshot,
+            UsageView::from_events(&[]),
+            vec![],
+            dir.path().join("config.toml"),
+        );
+        app.cap_tree = crate::viewmodel::capsule_tree(&CapsuleList {
+            items: vec![CapsuleSummary {
+                capsule_id: "cap_1".into(),
+                project_id: "projX".into(),
+                created_at: "2026-06-25T12:00:00Z".into(),
+                source_agent: "Codex".into(),
+                target_agent: "ClaudeCode".into(),
+                state: "pending".into(),
+                summary_preview: "old goal".into(),
+                path: cap_path.to_string_lossy().into_owned(),
+            }],
+            pending_count: 1,
+            skipped: 0,
+        });
+        app.cap_expanded_agents.clear();
+        app.tab = Tab::Capsule;
+        app.focus_content = true;
+
+        // Expand agent (sel 0), then project (sel 1), then open the capsule.
+        app.on_key(key(KeyCode::Enter));
+        app.cap_sel = 1;
+        app.on_key(key(KeyCode::Enter));
+        app.cap_sel = 2;
+        app.on_key(key(KeyCode::Right)); // capsule -> detail pane
+        assert_eq!(app.cap_focus, CapFocus::Detail);
+
+        // Toggle state: disk + in-memory both become consumed.
+        app.on_key(key(KeyCode::Char('s')));
+        assert_eq!(app.cap_tree[0].projects[0].capsules[0].state, "consumed");
+        let on_disk: Capsule =
+            serde_json::from_slice(&std::fs::read(&cap_path).unwrap()).unwrap();
+        assert_eq!(on_disk.consumption.state, ConsumptionState::Consumed);
+
+        // Edit the goal: 'e' loads it, type, Enter saves.
+        app.on_key(key(KeyCode::Char('e')));
+        assert_eq!(app.cap_focus, CapFocus::Editing);
+        assert_eq!(app.cap_edit_buf, "old goal");
+        app.on_key(key(KeyCode::Char('!')));
+        app.on_key(key(KeyCode::Enter));
+        let on_disk: Capsule =
+            serde_json::from_slice(&std::fs::read(&cap_path).unwrap()).unwrap();
+        assert_eq!(on_disk.summary.goal, "old goal!");
+        assert_eq!(app.cap_focus, CapFocus::Detail);
+
+        // Delete needs a confirm; then the file and the tree entry are gone.
+        app.on_key(key(KeyCode::Char('d')));
+        assert!(app.cap_confirm_delete);
+        app.on_key(key(KeyCode::Char('d')));
+        assert!(!cap_path.exists());
+        assert!(app.cap_tree.is_empty());
     }
 }

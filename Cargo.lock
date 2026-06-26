@@ -99,8 +99,10 @@ version = "2.0.0-mvp"
 dependencies = [
  "ai-handoff-core",
  "ai-handoff-usage",
+ "chrono",
  "crossterm",
  "ratatui",
+ "serde_json",
  "tempfile",
 ]
 
