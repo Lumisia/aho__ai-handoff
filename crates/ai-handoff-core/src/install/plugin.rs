@@ -73,9 +73,10 @@ const SKILLS: &[(&str, &str)] = &[
 /// carries `"matcher":"Write|Edit|Bash"`.
 ///
 /// Codex uses the command-string form (mirroring [`super::codex_hooks`]):
-/// `command = managed_command(exe, event_arg)`, `timeout:10`, every event
-/// outer entry carries `"matcher":"*"`, and PostToolUse additionally carries a
-/// `"statusMessage"`.
+/// `command = managed_command(exe, event_arg)`, `_aiHandoff:true`, `timeout:10`,
+/// every event outer entry carries `"matcher":"*"`, and PostToolUse additionally
+/// carries a `"statusMessage"`. The `_aiHandoff` flag keeps parity with the
+/// direct `codex_hooks` path so `codex_hooks::remove` can key off it.
 fn build_hooks_json(agent: AgentKind, exe: &str) -> String {
     use serde_json::{json, Map, Value};
 
@@ -107,6 +108,7 @@ fn build_hooks_json(agent: AgentKind, exe: &str) -> String {
                     json!({
                         "type": "command",
                         "command": command,
+                        "_aiHandoff": true,
                         "timeout": 10,
                         "statusMessage": "Checking handoff threshold"
                     })
@@ -114,6 +116,7 @@ fn build_hooks_json(agent: AgentKind, exe: &str) -> String {
                     json!({
                         "type": "command",
                         "command": command,
+                        "_aiHandoff": true,
                         "timeout": 10
                     })
                 };
@@ -220,6 +223,98 @@ pub fn generate_bundle(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Codex personal marketplace registration (~/.agents/plugins/marketplace.json)
+// ---------------------------------------------------------------------------
+
+/// The plugin name we register in the personal marketplace.
+const MARKETPLACE_PLUGIN_NAME: &str = "ai-handoff";
+
+/// The marketplace `name` Codex pairs with the plugin name to form the enable
+/// key (`<plugin>@<marketplace>`). Kept in sync with
+/// [`super::codex_config::PLUGIN_ENABLE_KEY`].
+const MARKETPLACE_NAME: &str = "claude-codex-auto-handoff";
+
+/// Error from the personal-marketplace merge/remove helpers.
+#[derive(Debug, thiserror::Error)]
+pub enum MarketplaceError {
+    #[error("marketplace.json parse error: {0}")]
+    Parse(#[from] serde_json::Error),
+    #[error("marketplace.json has an unexpected shape: {0}")]
+    UnexpectedShape(&'static str),
+}
+
+/// Merge our `ai-handoff` entry into the personal `marketplace.json` text.
+///
+/// Parses `existing` (or seeds a fresh `{name, plugins:[]}` document when
+/// `None`), then appends our local-source plugin entry **only if absent** —
+/// never duplicating it and never touching any foreign entry. Propagates a
+/// parse error so the caller aborts rather than clobbering a malformed file.
+///
+/// Returns the pretty-printed JSON text to write.
+pub fn merge_marketplace_entry(existing: Option<&str>) -> Result<String, MarketplaceError> {
+    use serde_json::{json, Value};
+
+    let mut root: Value = match existing {
+        Some(s) => serde_json::from_str::<Value>(s)?,
+        None => json!({
+            "name": MARKETPLACE_NAME,
+            "description": "Automatic, integrity-checked handoff and verified memory recall between Claude Code and Codex.",
+            "plugins": []
+        }),
+    };
+
+    if !root.is_object() {
+        return Err(MarketplaceError::UnexpectedShape(
+            "marketplace.json root is not an object",
+        ));
+    }
+    // A name is required for Codex to derive the `<plugin>@<marketplace>` key.
+    if root.get("name").and_then(Value::as_str).is_none() {
+        root["name"] = json!(MARKETPLACE_NAME);
+    }
+
+    // `plugins` must be an array; create it when missing, error on wrong type.
+    let plugins_val = root
+        .as_object_mut()
+        .unwrap()
+        .entry("plugins")
+        .or_insert_with(|| json!([]));
+    let plugins = plugins_val
+        .as_array_mut()
+        .ok_or(MarketplaceError::UnexpectedShape("plugins is not an array"))?;
+
+    let already = plugins.iter().any(|p| {
+        p.get("name").and_then(Value::as_str) == Some(MARKETPLACE_PLUGIN_NAME)
+    });
+    if !already {
+        plugins.push(json!({
+            "name": MARKETPLACE_PLUGIN_NAME,
+            "source": { "source": "local", "path": "./ai-handoff" },
+            "category": "Developer Tools"
+        }));
+    }
+
+    Ok(serde_json::to_string_pretty(&root).expect("serialization cannot fail"))
+}
+
+/// Remove our `ai-handoff` entry from the personal `marketplace.json` text,
+/// preserving every foreign entry. An empty `plugins` array afterwards is left
+/// in place (harmless). Propagates parse errors rather than clobbering.
+pub fn remove_marketplace_entry(existing: &str) -> Result<String, MarketplaceError> {
+    use serde_json::Value;
+
+    let mut root: Value = serde_json::from_str(existing)?;
+
+    if let Some(plugins) = root.get_mut("plugins").and_then(Value::as_array_mut) {
+        plugins.retain(|p| {
+            p.get("name").and_then(Value::as_str) != Some(MARKETPLACE_PLUGIN_NAME)
+        });
+    }
+
+    Ok(serde_json::to_string_pretty(&root).expect("serialization cannot fail"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -310,6 +405,16 @@ mod tests {
         );
         assert_eq!(hooks["hooks"]["Stop"][0]["hooks"][0]["timeout"], 10);
 
+        // Every Codex inner hook carries `_aiHandoff: true` for parity with the
+        // direct `codex_hooks` path — `codex_hooks::remove` keys off this flag.
+        for ev in super::super::codex_hooks::EVENTS {
+            assert_eq!(
+                hooks["hooks"][ev][0]["hooks"][0]["_aiHandoff"].as_bool(),
+                Some(true),
+                "codex bundle event {ev} missing _aiHandoff:true"
+            );
+        }
+
         // PostToolUse matcher is "*" and carries a statusMessage.
         assert_eq!(hooks["hooks"]["PostToolUse"][0]["matcher"], "*");
         assert_eq!(
@@ -347,5 +452,69 @@ mod tests {
         assert_eq!(hooks["hooks"]["Stop"][0]["hooks"][0]["command"], exe);
         // No leftover temp files.
         assert!(!root.join("hooks/hooks.json.ai-handoff.tmp").exists());
+    }
+
+    #[test]
+    fn merge_marketplace_seeds_fresh_document() {
+        let out = merge_marketplace_entry(None).unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["name"], MARKETPLACE_NAME);
+        let plugins = v["plugins"].as_array().unwrap();
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0]["name"], MARKETPLACE_PLUGIN_NAME);
+        assert_eq!(plugins[0]["source"]["source"], "local");
+        assert_eq!(plugins[0]["source"]["path"], "./ai-handoff");
+        assert_eq!(plugins[0]["category"], "Developer Tools");
+    }
+
+    #[test]
+    fn merge_marketplace_preserves_foreign_and_is_idempotent() {
+        let src = r#"{"name":"mine","plugins":[{"name":"other","source":{"source":"url","url":"https://x"}}]}"#;
+        let once = merge_marketplace_entry(Some(src)).unwrap();
+        let twice = merge_marketplace_entry(Some(&once)).unwrap();
+        let v: Value = serde_json::from_str(&twice).unwrap();
+        // foreign marketplace name preserved
+        assert_eq!(v["name"], "mine");
+        let plugins = v["plugins"].as_array().unwrap();
+        // foreign + ours, no duplicate after the second merge
+        assert_eq!(plugins.len(), 2);
+        assert!(plugins
+            .iter()
+            .any(|p| p["name"] == "other"));
+        assert_eq!(
+            plugins
+                .iter()
+                .filter(|p| p["name"] == MARKETPLACE_PLUGIN_NAME)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn merge_marketplace_errors_on_malformed_json() {
+        assert!(merge_marketplace_entry(Some("{ not json")).is_err());
+    }
+
+    #[test]
+    fn merge_marketplace_errors_when_plugins_wrong_type() {
+        assert!(merge_marketplace_entry(Some(r#"{"plugins":"x"}"#)).is_err());
+    }
+
+    #[test]
+    fn remove_marketplace_strips_only_ours() {
+        let merged = merge_marketplace_entry(Some(
+            r#"{"name":"mine","plugins":[{"name":"other","source":{"source":"url","url":"https://x"}}]}"#,
+        ))
+        .unwrap();
+        let cleaned = remove_marketplace_entry(&merged).unwrap();
+        let v: Value = serde_json::from_str(&cleaned).unwrap();
+        let plugins = v["plugins"].as_array().unwrap();
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0]["name"], "other");
+    }
+
+    #[test]
+    fn remove_marketplace_errors_on_malformed_json() {
+        assert!(remove_marketplace_entry("{ not json").is_err());
     }
 }
