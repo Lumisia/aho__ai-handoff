@@ -96,6 +96,7 @@ name = "ai-handoff-usage"
 version = "2.0.0-mvp"
 dependencies = [
  "chrono",
+ "directories",
  "serde",
  "serde_json",
  "sha2",
