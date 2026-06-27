@@ -351,6 +351,23 @@ impl App {
             self.status = format!("{}: cannot edit current value", row.key);
             return;
         };
+        // Autostart is not just a config flag — it must register/remove the OS
+        // logon entry. Delegate to `ai-handoff autostart on|off`, which writes
+        // the config *and* applies the registry/scheduled-task change.
+        if row.key == "autostart.enabled" {
+            let on = raw == "true";
+            match apply_autostart(on) {
+                Ok(()) => {
+                    self.settings[self.settings_idx].value = raw.clone();
+                    self.status = format!(
+                        "autostart {}",
+                        if on { "enabled (runs at logon)" } else { "disabled" }
+                    );
+                }
+                Err(e) => self.status = format!("autostart change failed: {e}"),
+            }
+            return;
+        }
         match edit::commit(&self.config_path, row.key, &raw) {
             Ok(_) => {
                 self.settings[self.settings_idx].value = raw.clone();
@@ -1146,6 +1163,30 @@ fn bar_width_for(width: u16, n: usize) -> u16 {
     let inner = width.saturating_sub(2); // borders
     let per = inner / n as u16;
     per.saturating_sub(1).clamp(3, 12)
+}
+
+/// Run `ai-handoff autostart on|off` as a detached child (no console window),
+/// so the OS logon entry is actually registered/removed — not just the config.
+fn apply_autostart(on: bool) -> std::io::Result<()> {
+    let exe = std::env::current_exe()?;
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("autostart")
+        .arg(if on { "on" } else { "off" })
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let status = cmd.status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!("autostart command exited with {status}")))
+    }
 }
 
 /// Flip membership of `key` in `set` (insert if absent, remove if present).

@@ -53,6 +53,11 @@ pub enum Commands {
         #[command(subcommand)]
         action: ConfigAction,
     },
+    /// Enable, disable, or show the run-the-daemon-at-logon autostart entry.
+    Autostart {
+        #[arg(value_enum)]
+        action: AutostartAction,
+    },
     /// Show estimated token usage from local Claude + Codex logs.
     Usage {
         /// Break down by this dimension instead of the default summary.
@@ -92,6 +97,16 @@ pub enum ConfigAction {
     Set { key: String, value: String },
     /// List every editable key with its effective value.
     List,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum AutostartAction {
+    /// Register the daemon to run at logon and set autostart.enabled = true.
+    On,
+    /// Remove any logon entry (scheduled task + Run key) and set it false.
+    Off,
+    /// Print the config flag and whether a real entry is registered.
+    Status,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -148,6 +163,7 @@ pub fn run_cli(cli: Cli) -> anyhow::Result<i32> {
             purge_store,
         }) => commands::uninstall::run(keep_store, purge_store),
         Some(Commands::Statusline) => commands::statusline::run(),
+        Some(Commands::Autostart { action }) => commands::autostart::run_cli(action),
         Some(Commands::Config { action }) => commands::config::run(action),
         Some(Commands::Usage {
             group_by,
@@ -296,6 +312,20 @@ mod tests {
         match legacy.command {
             Some(Commands::Install { no_plugin, .. }) => assert!(no_plugin),
             other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_autostart_actions() {
+        for (arg, want) in [
+            ("on", AutostartAction::On),
+            ("off", AutostartAction::Off),
+            ("status", AutostartAction::Status),
+        ] {
+            match Cli::parse_from(["ai-handoff", "autostart", arg]).command {
+                Some(Commands::Autostart { action }) => assert_eq!(action, want),
+                other => panic!("unexpected command: {other:?}"),
+            }
         }
     }
 }

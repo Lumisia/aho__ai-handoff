@@ -83,15 +83,14 @@ pub fn register_autostart_with(
     }
 }
 
-pub fn delete_autostart(st: &InstallState) -> anyhow::Result<()> {
-    if let Some(autostart) = &st.autostart {
-        return delete_autostart_state(autostart);
-    }
-    if let Some(name) = &st.scheduled_task {
-        if name == TASK_NAME {
-            delete_scheduled_task()?;
-        }
-    }
+pub fn delete_autostart(_st: &InstallState) -> anyhow::Result<()> {
+    // Best-effort: clear BOTH mechanisms by our fixed name regardless of what
+    // install-state recorded. An entry written by an out-of-band path (e.g. a
+    // dev build, or one whose state was lost) is an orphan that the old,
+    // state-gated delete would skip — and it would still launch at logon. The
+    // delete helpers treat "already absent" as success, so this is idempotent.
+    delete_scheduled_task()?;
+    delete_hkcu_run()?;
     Ok(())
 }
 
@@ -172,6 +171,71 @@ fn hkcu_run_value_exists() -> anyhow::Result<bool> {
         .status()
         .context("failed to start reg query HKCU Run")?;
     Ok(status.success())
+}
+
+/// `ai-handoff autostart on|off|status`: apply the OS logon entry and keep the
+/// config flag + install-state in sync. The real entry lives in the *user*
+/// registry hive, so this must run as the actual installed exe (a sandboxed or
+/// MSIX-virtualized process sees a different hive and silently no-ops).
+pub fn run_cli(action: crate::AutostartAction) -> anyhow::Result<i32> {
+    match action {
+        crate::AutostartAction::On => set_autostart(true),
+        crate::AutostartAction::Off => set_autostart(false),
+        crate::AutostartAction::Status => print_status(),
+    }
+}
+
+fn set_autostart(enable: bool) -> anyhow::Result<i32> {
+    let home = ai_handoff_core::paths::home();
+    let config_path = ai_handoff_core::paths::config_path();
+    let mut st = ai_handoff_core::install::state::load(&home);
+
+    if enable {
+        let exe = std::env::current_exe()
+            .context("could not resolve the current executable for autostart")?
+            .to_string_lossy()
+            .into_owned();
+        let astate = register_autostart(&exe)?;
+        st.scheduled_task = if astate.kind == AutostartKind::ScheduledTask {
+            Some(TASK_NAME.to_string())
+        } else {
+            None
+        };
+        st.autostart = Some(astate);
+    } else {
+        delete_autostart(&st)?;
+        st.autostart = None;
+        st.scheduled_task = None;
+    }
+    let _ = ai_handoff_core::install::state::save(&home, &st);
+
+    // Keep the config flag in sync so the dashboard and daemon agree.
+    let mut sink = Vec::new();
+    crate::commands::config::run_io(
+        crate::ConfigAction::Set {
+            key: "autostart.enabled".to_string(),
+            value: enable.to_string(),
+        },
+        &config_path,
+        &mut sink,
+    )?;
+
+    if enable {
+        println!("autostart enabled — the daemon will start at logon");
+    } else {
+        println!("autostart disabled — removed any logon entry");
+    }
+    Ok(0)
+}
+
+fn print_status() -> anyhow::Result<i32> {
+    let cfg = ai_handoff_core::config::load();
+    let task = scheduled_task_exists().unwrap_or(false);
+    let run = hkcu_run_value_exists().unwrap_or(false);
+    println!("config autostart.enabled = {}", cfg.autostart.enabled);
+    println!("scheduled task '{TASK_NAME}' present: {task}");
+    println!("HKCU Run value '{TASK_NAME}' present: {run}");
+    Ok(0)
 }
 
 #[cfg(test)]
