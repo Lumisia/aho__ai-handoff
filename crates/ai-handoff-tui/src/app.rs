@@ -70,15 +70,6 @@ const DIMS: [Dimension; 4] = [
     Dimension::Source,
 ];
 
-fn dim_name(dim: Dimension) -> &'static str {
-    match dim {
-        Dimension::Day => "day",
-        Dimension::Model => "model",
-        Dimension::Project => "project",
-        Dimension::Source => "source",
-    }
-}
-
 /// The default status-bar hint, in the active language.
 fn default_hint() -> String {
     t!("hint.default").into_owned()
@@ -354,7 +345,7 @@ impl App {
             return;
         };
         let Some(raw) = edit::next_raw(row.kind, &row.value, action) else {
-            self.status = format!("{}: cannot edit current value", row.key);
+            self.status = t!("status.cannot_edit", key = row.key).into_owned();
             return;
         };
         // Autostart is not just a config flag — it must register/remove the OS
@@ -365,12 +356,16 @@ impl App {
             match apply_autostart(on) {
                 Ok(()) => {
                     self.settings[self.settings_idx].value = raw.clone();
-                    self.status = format!(
-                        "autostart {}",
-                        if on { "enabled (runs at logon)" } else { "disabled" }
-                    );
+                    self.status = if on {
+                        t!("status.autostart_on")
+                    } else {
+                        t!("status.autostart_off")
+                    }
+                    .into_owned();
                 }
-                Err(e) => self.status = format!("autostart change failed: {e}"),
+                Err(e) => {
+                    self.status = t!("status.autostart_failed", err = e).into_owned()
+                }
             }
             return;
         }
@@ -384,7 +379,7 @@ impl App {
                 self.settings[self.settings_idx].value = raw.clone();
                 self.status = t!("status.saved", key = row.key, value = raw).into_owned();
             }
-            Err(e) => self.status = format!("{}: {e}", row.key),
+            Err(e) => self.status = t!("status.field_error", key = row.key, err = e).into_owned(),
         }
     }
 
@@ -464,7 +459,7 @@ impl App {
         let confirming = self.cap_confirm_delete;
         if confirming && !matches!(key.code, KeyCode::Char('d') | KeyCode::Char('y')) {
             self.cap_confirm_delete = false;
-            self.status = "delete cancelled".to_string();
+            self.status = t!("status.delete_cancelled").into_owned();
         }
         match key.code {
             KeyCode::Left => self.cap_focus_tree(),
@@ -482,8 +477,7 @@ impl App {
             KeyCode::Char('d') | KeyCode::Char('y') if confirming => self.cap_delete(),
             KeyCode::Char('d') => {
                 self.cap_confirm_delete = true;
-                self.status = "delete this capsule? press d or y to confirm, any other key to cancel"
-                    .to_string();
+                self.status = t!("status.delete_confirm").into_owned();
             }
             KeyCode::Char('e') | KeyCode::Enter => self.cap_begin_edit(),
             _ => {}
@@ -503,7 +497,7 @@ impl App {
             KeyCode::Enter => self.cap_commit_edit(),
             KeyCode::Esc => {
                 self.cap_focus = CapFocus::Detail;
-                self.status = "edit cancelled".to_string();
+                self.status = t!("status.edit_cancelled").into_owned();
             }
             KeyCode::Backspace => {
                 self.cap_edit_buf.pop();
@@ -533,9 +527,10 @@ impl App {
                 self.cap_tree[ai].projects[pi].capsules[ci].state = new_state.clone();
                 self.cap_detail = None; // force a re-read
                 self.cap_load_content();
-                self.status = format!("state → {new_state}");
+                let shown = state_label(&new_state);
+                self.status = t!("status.state_changed", state = shown).into_owned();
             }
-            Err(e) => self.status = format!("state change failed: {e}"),
+            Err(e) => self.status = t!("status.state_failed", err = e).into_owned(),
         }
     }
 
@@ -551,14 +546,15 @@ impl App {
             Some(text) => {
                 self.cap_edit_buf = text;
                 self.cap_focus = CapFocus::Editing;
-                let how = if field.is_list() {
-                    " (여러 항목은 | 로 구분)"
+                let name = field_label(field);
+                self.status = if field.is_list() {
+                    t!("status.editing_list", field = name)
                 } else {
-                    ""
-                };
-                self.status = format!("editing {}{how} — Enter save · Esc cancel", field.label());
+                    t!("status.editing", field = name)
+                }
+                .into_owned();
             }
-            None => self.status = "this capsule cannot be edited (not a valid capsule)".to_string(),
+            None => self.status = t!("status.cannot_edit_capsule").into_owned(),
         }
     }
 
@@ -579,9 +575,9 @@ impl App {
                 }
                 self.cap_detail = None;
                 self.cap_load_content();
-                self.status = format!("{} saved", field.label());
+                self.status = t!("status.field_saved", field = field_label(field)).into_owned();
             }
-            Err(e) => self.status = format!("save failed: {e}"),
+            Err(e) => self.status = t!("status.save_failed", err = e).into_owned(),
         }
         self.cap_focus = CapFocus::Detail;
     }
@@ -594,7 +590,7 @@ impl App {
         };
         let path = self.cap_tree[ai].projects[pi].capsules[ci].path.clone();
         if let Err(e) = capsule_ops::delete(Path::new(&path)) {
-            self.status = format!("delete failed: {e}");
+            self.status = t!("status.delete_failed", err = e).into_owned();
             return;
         }
         // Prune the capsule, then any now-empty project / agent.
@@ -615,7 +611,7 @@ impl App {
         self.cap_focus = CapFocus::Tree;
         self.cap_detail = None;
         self.cap_load_content();
-        self.status = "capsule deleted".to_string();
+        self.status = t!("status.capsule_deleted").into_owned();
     }
 
     /// Read + parse the selected capsule into the detail cache (skipped when the
@@ -744,20 +740,32 @@ impl App {
 
         let rows = health_rows(&self.snapshot).into_iter().map(health_table_row);
         let table = Table::new(rows, [Constraint::Length(18), Constraint::Length(8), Constraint::Min(10)])
-            .header(Row::new(["Check", "Status", "Detail"]).style(Style::default().add_modifier(Modifier::BOLD)))
-            .block(Block::default().borders(Borders::ALL).title("Health"));
+            .header(
+                Row::new([
+                    t!("table.check").into_owned(),
+                    t!("table.status").into_owned(),
+                    t!("table.detail").into_owned(),
+                ])
+                .style(Style::default().add_modifier(Modifier::BOLD)),
+            )
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(t!("overview.health").into_owned()),
+            );
         f.render_widget(table, cols[1]);
     }
 
     fn draw_capsule(&self, f: &mut Frame, area: Rect) {
         let rows = self.cap_rows();
         if rows.is_empty() {
-            let para = Paragraph::new(
-                "No capsules captured yet.\n\nCapsules appear here once /handoff hands off context \
-                 between Codex and Claude. Each is grouped under its agent and project.",
-            )
-            .wrap(Wrap { trim: true })
-            .block(Block::default().borders(Borders::ALL).title("Capsule"));
+            let para = Paragraph::new(t!("capsule.empty").into_owned())
+                .wrap(Wrap { trim: true })
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(t!("tab.capsule").into_owned()),
+                );
             f.render_widget(para, area);
             return;
         }
@@ -789,8 +797,7 @@ impl App {
                 }
             })
             .collect();
-        let list = Paragraph::new(lines)
-            .block(focus_block("Capsules (↓/Space/Enter to open)", tree_focused));
+        let list = Paragraph::new(lines).block(focus_block(t!("capsule.list_title"), tree_focused));
         f.render_widget(list, cols[0]);
 
         // --- right: action bar (top) over the body (bottom) ---
@@ -809,31 +816,43 @@ impl App {
             .as_ref()
             .and_then(|d| d.parsed.as_ref())
             .map(|c| match c.consumption.state {
-                ai_handoff_core::capsule::ConsumptionState::Pending => "pending",
-                ai_handoff_core::capsule::ConsumptionState::Consumed => "consumed",
-            });
+                ai_handoff_core::capsule::ConsumptionState::Pending => state_label("pending"),
+                ai_handoff_core::capsule::ConsumptionState::Consumed => state_label("consumed"),
+            })
+            .unwrap_or_else(|| "—".to_string());
         let mut spans = vec![
             Span::raw(" "),
             Span::styled(
-                format!(" state: {} ", state.unwrap_or("—")),
+                format!(" {} ", t!("capsule.state_label", state = state)),
                 Style::default().fg(Color::Black).bg(Color::Gray),
             ),
             Span::raw("  "),
-            Span::styled(" [s] toggle state ", action_style(focused)),
+            Span::styled(
+                format!(" {} ", t!("capsule.btn_toggle")),
+                action_style(focused),
+            ),
             Span::raw("  "),
         ];
         if self.cap_confirm_delete {
             spans.push(Span::styled(
-                " [d] confirm delete ",
+                format!(" {} ", t!("capsule.btn_confirm_delete")),
                 Style::default().fg(Color::White).bg(Color::Red),
             ));
         } else {
-            spans.push(Span::styled(" [d] delete ", action_style(focused)));
+            spans.push(Span::styled(
+                format!(" {} ", t!("capsule.btn_delete")),
+                action_style(focused),
+            ));
         }
         spans.push(Span::raw("  "));
-        spans.push(Span::styled(" [e/Enter] edit field ", action_style(focused)));
-        let bar = Paragraph::new(Line::from(spans))
-            .block(focus_block("Actions", focused && self.cap_focus == CapFocus::Detail));
+        spans.push(Span::styled(
+            format!(" {} ", t!("capsule.btn_edit")),
+            action_style(focused),
+        ));
+        let bar = Paragraph::new(Line::from(spans)).block(focus_block(
+            t!("capsule.actions"),
+            focused && self.cap_focus == CapFocus::Detail,
+        ));
         f.render_widget(bar, area);
     }
 
@@ -845,12 +864,13 @@ impl App {
         if self.cap_focus == CapFocus::Editing {
             let field = CAP_FIELDS[self.cap_field];
             let hint = if field.is_list() {
-                "여러 항목은 | 로 구분 · Enter 저장 · Esc 취소"
+                t!("capsule.edit_hint_list")
             } else {
-                "Enter 저장 · Esc 취소"
+                t!("capsule.edit_hint")
             };
+            let banner = t!("capsule.edit_banner", field = field_label(field), hint = hint);
             let lines = vec![
-                Line::from(format!("Editing {} — {hint}", field.label())).italic(),
+                Line::from(banner.into_owned()).italic(),
                 Line::from(""),
                 Line::from(vec![
                     Span::raw(self.cap_edit_buf.clone()),
@@ -859,26 +879,24 @@ impl App {
             ];
             let editor = Paragraph::new(lines)
                 .wrap(Wrap { trim: false })
-                .block(focus_block("Edit field", true));
+                .block(focus_block(t!("capsule.edit_title"), true));
             f.render_widget(editor, area);
             return;
         }
 
         let (title, lines) = match self.cap_detail.as_ref() {
             Some(detail) => (
-                format!("Capsule — {}", detail.path),
+                t!("capsule.detail_title", path = detail.path).into_owned(),
                 self.capsule_body_lines(detail),
             ),
             None => (
-                "Capsule detail".to_string(),
-                vec![Line::from(
-                    "Move with ↑/↓; press Enter/→ on a capsule to open it here.",
-                )],
+                t!("capsule.detail_label").into_owned(),
+                vec![Line::from(t!("capsule.detail_placeholder").into_owned())],
             ),
         };
         let body = Paragraph::new(lines)
             .wrap(Wrap { trim: false })
-            .block(focus_block(&title, detail_active));
+            .block(focus_block(title, detail_active));
         f.render_widget(body, area);
     }
 
@@ -889,13 +907,18 @@ impl App {
             return detail.raw.lines().map(|l| Line::from(l.to_string())).collect();
         };
         let detail_active = self.focus_content && self.cap_focus == CapFocus::Detail;
-        let mut lines = vec![Line::from(
-            Span::styled("Editable (Enter/e):", Style::default().add_modifier(Modifier::BOLD)),
-        )];
+        let mut lines = vec![Line::from(Span::styled(
+            t!("capsule.editable_header").into_owned(),
+            Style::default().add_modifier(Modifier::BOLD),
+        ))];
         for (i, field) in CAP_FIELDS.iter().enumerate() {
             let val = capsule_ops::field_text(c, *field);
-            let shown = if val.is_empty() { "(empty)".to_string() } else { val };
-            let text = format!("  {:<12} {shown}", format!("{}:", field.label()));
+            let shown = if val.is_empty() {
+                t!("capsule.empty_value").into_owned()
+            } else {
+                val
+            };
+            let text = format!("  {:<14} {shown}", format!("{}:", field_label(*field)));
             let style = if i == self.cap_field && detail_active {
                 Style::default().fg(Color::Black).bg(Color::Cyan)
             } else if i == self.cap_field {
@@ -907,25 +930,37 @@ impl App {
         }
 
         let state = match c.consumption.state {
-            ai_handoff_core::capsule::ConsumptionState::Pending => "pending",
-            ai_handoff_core::capsule::ConsumptionState::Consumed => "consumed",
+            ai_handoff_core::capsule::ConsumptionState::Pending => state_label("pending"),
+            ai_handoff_core::capsule::ConsumptionState::Consumed => state_label("consumed"),
         };
         lines.push(Line::from(""));
-        lines.push(Line::from(
-            Span::styled("Read-only:", Style::default().fg(Color::DarkGray)),
-        ));
-        lines.push(Line::from(format!(
-            "  Flow:    {:?} → {:?}",
-            c.source_agent, c.target_agent
+        lines.push(Line::from(Span::styled(
+            t!("capsule.readonly_header").into_owned(),
+            Style::default().fg(Color::DarkGray),
         )));
-        lines.push(Line::from(format!("  State:   {state}")));
-        lines.push(Line::from(format!("  Created: {}", c.created_at)));
-        lines.push(Line::from(format!("  Capsule: {}", c.capsule_id)));
+        lines.push(Line::from(format!(
+            "  {}: {:?} → {:?}",
+            t!("capsule.field_flow"),
+            c.source_agent,
+            c.target_agent
+        )));
+        lines.push(Line::from(format!("  {}: {state}", t!("capsule.field_state"))));
+        lines.push(Line::from(format!(
+            "  {}: {}",
+            t!("capsule.field_created"),
+            c.created_at
+        )));
+        lines.push(Line::from(format!(
+            "  {}: {}",
+            t!("capsule.field_id"),
+            c.capsule_id
+        )));
         if !c.files.is_empty() {
             lines.push(Line::from(""));
-            lines.push(Line::from(
-                Span::styled("  Files:", Style::default().add_modifier(Modifier::BOLD)),
-            ));
+            lines.push(Line::from(Span::styled(
+                format!("  {}", t!("capsule.field_files")),
+                Style::default().add_modifier(Modifier::BOLD),
+            )));
             for fch in &c.files {
                 let status = fch.status.clone().unwrap_or_default();
                 lines.push(Line::from(format!("    {status} {}", fch.path)));
@@ -951,10 +986,12 @@ impl App {
     fn draw_token_donut(&self, f: &mut Frame, area: Rect) {
         let (claude, codex) = self.source_split();
         let total = claude + codex;
-        let block = Block::default().borders(Borders::ALL).title("Token split");
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(t!("overview.token_split").into_owned());
         if total == 0 {
             f.render_widget(
-                Paragraph::new("No usage logs found.").block(block),
+                Paragraph::new(t!("overview.no_usage").into_owned()).block(block),
                 area,
             );
             return;
@@ -996,12 +1033,13 @@ impl App {
         let (claude, codex) = self.source_split();
         let total = claude + codex;
         let pct = |n: u64| if total > 0 { n as f64 / total as f64 * 100.0 } else { 0.0 };
+        let total_line = t!(
+            "overview.total",
+            tokens = human_tokens(total),
+            cost = format!("{:.2}", self.usage.total.cost_usd)
+        );
         let lines = vec![
-            Line::from(format!(
-                "Total {}  ~${:.2}",
-                human_tokens(total),
-                self.usage.total.cost_usd
-            )),
+            Line::from(total_line.into_owned()),
             Line::from(vec![
                 Span::styled("● claude  ", Style::default().fg(CLAUDE_COLOR)),
                 Span::raw(format!("{:>7}  {:>4.0}%", human_tokens(claude), pct(claude))),
@@ -1010,7 +1048,7 @@ impl App {
                 Span::styled("● codex   ", Style::default().fg(CODEX_COLOR)),
                 Span::raw(format!("{:>7}  {:>4.0}%", human_tokens(codex), pct(codex))),
             ]),
-            Line::from("estimate — not an official bill").italic(),
+            Line::from(t!("overview.estimate").into_owned()).italic(),
         ];
         f.render_widget(
             Paragraph::new(lines).block(Block::default().borders(Borders::ALL)),
@@ -1021,14 +1059,15 @@ impl App {
     fn draw_usage(&self, f: &mut Frame, area: Rect) {
         let dim = self.usage_dim;
         let groups = self.usage.breakdown(dim);
-        let title = format!(
-            "By {} — total {} tok ~${:.2} (g: change)",
-            dim_name(dim),
-            thousands(self.usage.total.tokens.total()),
-            self.usage.total.cost_usd
-        );
+        let title = t!(
+            "usage.title",
+            dim = dim_label(dim),
+            tokens = thousands(self.usage.total.tokens.total()),
+            cost = format!("{:.2}", self.usage.total.cost_usd)
+        )
+        .into_owned();
         if groups.is_empty() {
-            let para = Paragraph::new("No usage logs found under ~/.claude/projects or ~/.codex.")
+            let para = Paragraph::new(t!("usage.no_logs").into_owned())
                 .block(Block::default().borders(Borders::ALL).title(title));
             f.render_widget(para, area);
             return;
@@ -1051,7 +1090,7 @@ impl App {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(format!("{title}  [tokens]")),
+                    .title(format!("{title}  {}", t!("usage.tokens_suffix"))),
             )
             .data(data.as_slice())
             .bar_width(bar_width)
@@ -1066,7 +1105,15 @@ impl App {
             table_rows,
             [Constraint::Min(16), Constraint::Length(16), Constraint::Length(12), Constraint::Length(14)],
         )
-        .header(Row::new(["Key", "Tokens", "Est $", "Unpriced"]).style(Style::default().add_modifier(Modifier::BOLD)))
+        .header(
+            Row::new([
+                t!("table.key").into_owned(),
+                t!("table.tokens").into_owned(),
+                t!("table.est_cost").into_owned(),
+                t!("table.unpriced").into_owned(),
+            ])
+            .style(Style::default().add_modifier(Modifier::BOLD)),
+        )
         .block(Block::default().borders(Borders::ALL));
         f.render_widget(table, rows[1]);
     }
@@ -1081,11 +1128,14 @@ impl App {
             Row::new([Cell::from(r.key), Cell::from(r.value.clone())]).style(style)
         });
         let table = Table::new(rows, [Constraint::Min(36), Constraint::Length(14)])
-            .header(Row::new(["Setting", "Value"]).style(Style::default().add_modifier(Modifier::BOLD)))
+            .header(
+                Row::new([t!("table.setting").into_owned(), t!("table.value").into_owned()])
+                    .style(Style::default().add_modifier(Modifier::BOLD)),
+            )
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title("Settings (↑/↓ select · space toggle · ←/→ change · applies to both agents)"),
+                    .title(t!("settings.title").into_owned()),
             );
         f.render_widget(table, area);
     }
@@ -1199,6 +1249,38 @@ fn apply_autostart(on: bool) -> std::io::Result<()> {
     }
 }
 
+/// Translated name of an editable capsule field.
+fn field_label(field: capsule_ops::CapField) -> String {
+    let key = match field {
+        capsule_ops::CapField::Goal => "field.goal",
+        capsule_ops::CapField::NextPrompt => "field.next_prompt",
+        capsule_ops::CapField::Remaining => "field.remaining",
+        capsule_ops::CapField::Done => "field.done",
+        capsule_ops::CapField::Risks => "field.risks",
+    };
+    t!(key).into_owned()
+}
+
+/// Translated consumption-state word ("pending" / "consumed").
+fn state_label(state: &str) -> String {
+    match state {
+        "pending" => t!("state.pending").into_owned(),
+        "consumed" => t!("state.consumed").into_owned(),
+        other => other.to_string(),
+    }
+}
+
+/// Translated dimension name for the Usage tab.
+fn dim_label(dim: Dimension) -> String {
+    let key = match dim {
+        Dimension::Day => "dim.day",
+        Dimension::Model => "dim.model",
+        Dimension::Project => "dim.project",
+        Dimension::Source => "dim.source",
+    };
+    t!(key).into_owned()
+}
+
 /// Flip membership of `key` in `set` (insert if absent, remove if present).
 fn toggle<T: Eq + std::hash::Hash>(set: &mut HashSet<T>, key: T) {
     if !set.remove(&key) {
@@ -1208,7 +1290,7 @@ fn toggle<T: Eq + std::hash::Hash>(set: &mut HashSet<T>, key: T) {
 
 /// A bordered block whose outline is highlighted (thick + yellow) when focused —
 /// this is the "외곽선" that shows which pane the user is in.
-fn focus_block(title: &str, focused: bool) -> Block<'static> {
+fn focus_block(title: impl Into<String>, focused: bool) -> Block<'static> {
     let (border_type, style) = if focused {
         (BorderType::Thick, Style::default().fg(Color::Yellow))
     } else {
@@ -1218,7 +1300,7 @@ fn focus_block(title: &str, focused: bool) -> Block<'static> {
         .borders(Borders::ALL)
         .border_type(border_type)
         .border_style(style)
-        .title(title.to_string())
+        .title(title.into())
 }
 
 /// Style for an action-bar button: emphasised when its pane has focus.
