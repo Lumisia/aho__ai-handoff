@@ -409,6 +409,78 @@ field.risks:
   ja: リスク
   zh: 风险
 
+# ── Health table (labels by check id, messages by fixed text) ───────────
+health.label.daemon:
+  en: Daemon
+  ko: 데몬
+  ja: デーモン
+  zh: 守护进程
+health.label.autostart:
+  en: Autostart
+  ko: 자동 시작
+  ja: 自動起動
+  zh: 开机自启
+health.label.codex-hooks:
+  en: Codex hooks
+  ko: Codex 후크
+  ja: Codex フック
+  zh: Codex 钩子
+health.label.codex-config:
+  en: Codex config
+  ko: Codex 설정
+  ja: Codex 設定
+  zh: Codex 配置
+health.label.claude-settings:
+  en: Claude settings
+  ko: Claude 설정
+  ja: Claude 設定
+  zh: Claude 设置
+health.label.ipc:
+  en: IPC
+  ko: IPC
+  ja: IPC
+  zh: IPC
+health.label.store:
+  en: Store
+  ko: 저장소
+  ja: ストア
+  zh: 存储
+health.msg.present:
+  en: present
+  ko: 있음
+  ja: あり
+  zh: 存在
+health.msg.missing:
+  en: missing
+  ko: 없음
+  ja: なし
+  zh: 缺失
+health.msg.not_a_dir:
+  en: "path exists but is not a directory"
+  ko: "경로는 있지만 디렉터리가 아님"
+  ja: "パスは存在しますがディレクトリではありません"
+  zh: "路径存在但不是目录"
+health.msg.hooks_installed:
+  en: "v2 hooks installed"
+  ko: "v2 후크 설치됨"
+  ja: "v2 フック導入済み"
+  zh: "已安装 v2 钩子"
+health.msg.hooks_incomplete:
+  en: "v2 hooks missing or incomplete"
+  ko: "v2 후크 없음 또는 불완전"
+  ja: "v2 フックが無いか不完全"
+  zh: "v2 钩子缺失或不完整"
+health.msg.config_ok:
+  en: "writable_roots and AI_HANDOFF_HOME present"
+  ko: "writable_roots 및 AI_HANDOFF_HOME 있음"
+  ja: "writable_roots と AI_HANDOFF_HOME あり"
+  zh: "writable_roots 与 AI_HANDOFF_HOME 均存在"
+health.msg.daemon_unknown:
+  en: "Runtime status API not implemented in this MVP"
+  ko: "런타임 상태 API는 이 MVP에 미구현"
+  ja: "ランタイム状態 API はこの MVP では未実装"
+  zh: "此 MVP 未实现运行时状态 API"
+
 # ── Consumption state ───────────────────────────────────────────────────
 state.pending:
   en: pending

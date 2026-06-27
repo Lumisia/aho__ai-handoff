@@ -52,17 +52,47 @@ pub struct HealthRow {
     pub detail: String,
 }
 
-/// Flatten a dashboard snapshot into compact health rows.
+/// Flatten a dashboard snapshot into compact health rows, translating the
+/// well-known check labels (by id) and fixed messages (by text). Dynamic
+/// messages (paths, parse errors, value dumps) pass through untranslated.
 pub fn health_rows(snapshot: &DashboardSnapshot) -> Vec<HealthRow> {
     snapshot
         .checks
         .iter()
         .map(|c| HealthRow {
-            label: c.label.clone(),
+            label: health_label(&c.id, &c.label),
             status: c.status.clone(),
-            detail: c.message.clone(),
+            detail: health_detail(&c.message),
         })
         .collect()
+}
+
+fn health_label(id: &str, fallback: &str) -> String {
+    let key = match id {
+        "daemon" => "health.label.daemon",
+        "autostart" => "health.label.autostart",
+        "codex-hooks" => "health.label.codex-hooks",
+        "codex-config" => "health.label.codex-config",
+        "claude-settings" => "health.label.claude-settings",
+        "ipc" => "health.label.ipc",
+        "store" => "health.label.store",
+        _ => return fallback.to_string(),
+    };
+    rust_i18n::t!(key).into_owned()
+}
+
+fn health_detail(message: &str) -> String {
+    let key = match message {
+        "present" => "health.msg.present",
+        "missing" => "health.msg.missing",
+        "path exists but is not a directory" => "health.msg.not_a_dir",
+        "v2 hooks installed" => "health.msg.hooks_installed",
+        "v2 hooks missing or incomplete" => "health.msg.hooks_incomplete",
+        "writable_roots and AI_HANDOFF_HOME present" => "health.msg.config_ok",
+        "Runtime status API not implemented in this MVP" => "health.msg.daemon_unknown",
+        _ => return message.to_string(),
+    };
+    rust_i18n::t!(key).into_owned()
 }
 
 /// Capsule tab tree: one connected agent (Codex / Claude) and its projects.
