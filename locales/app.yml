@@ -530,30 +530,30 @@ health.msg.daemon_unknown:
 
 # ── Account tab ─────────────────────────────────────────────────────────
 hint.account_tree:
-  en: "↑/↓ move · Enter/→ open account · + capture current · q/Esc back"
-  ko: "↑/↓ 이동 · Enter/→ 계정 열기 · + 현재 계정 담기 · q/Esc 뒤로"
-  ja: "↑/↓ 移動 · Enter/→ アカウントを開く · + 現在のアカウントを取込 · q/Esc 戻る"
-  zh: "↑/↓ 移动 · Enter/→ 打开账户 · + 捕获当前账户 · q/Esc 返回"
+  en: "↑/↓ move · Enter/→ open account · + add account · q/Esc back"
+  ko: "↑/↓ 이동 · Enter/→ 계정 열기 · + 계정 추가하기 · q/Esc 뒤로"
+  ja: "↑/↓ 移動 · Enter/→ アカウントを開く · + アカウントを追加 · q/Esc 戻る"
+  zh: "↑/↓ 移动 · Enter/→ 打开账户 · + 添加账户 · q/Esc 返回"
 hint.account_detail:
   en: "s switch · d delete · r refresh credits · ← back to list"
   ko: "s 전환 · d 삭제 · r 초기화권 새로고침 · ← 목록으로"
   ja: "s 切替 · d 削除 · r 初期化券を更新 · ← 一覧へ"
   zh: "s 切换 · d 删除 · r 刷新重置券 · ← 返回列表"
 account.empty:
-  en: "No accounts captured yet.\n\nSign in to Codex or Claude, then press + to capture the current account here. You can then switch between saved accounts."
-  ko: "아직 담은 계정이 없습니다.\n\nCodex 또는 Claude에 로그인한 뒤 + 를 눌러 현재 계정을 담으세요. 이후 담은 계정 사이를 전환할 수 있습니다."
-  ja: "まだアカウントがありません。\n\nCodex または Claude にサインインし、+ を押して現在のアカウントを取り込みます。以後、保存したアカウントを切り替えられます。"
-  zh: "尚未捕获账户。\n\n登录 Codex 或 Claude 后，按 + 捕获当前账户。之后可在已保存的账户间切换。"
+  en: "No accounts yet.\n\nPress + to add an account (sign in to Codex or Claude). Add several to manage and switch between them."
+  ko: "아직 계정이 없습니다.\n\n+ 를 눌러 계정을 추가하세요 (Codex 또는 Claude 로그인). 여러 개를 추가해 관리·전환할 수 있습니다."
+  ja: "まだアカウントがありません。\n\n+ を押してアカウントを追加します（Codex または Claude にサインイン）。複数追加して管理・切替できます。"
+  zh: "尚无账户。\n\n按 + 添加账户（登录 Codex 或 Claude）。可添加多个以管理并切换。"
 account.list_title:
   en: "Accounts (↓/Space/Enter to open)"
   ko: "계정 (↓/Space/Enter 로 열기)"
   ja: "アカウント (↓/Space/Enter で開く)"
   zh: "账户 (↓/Space/Enter 打开)"
 account.add:
-  en: "+ capture current"
-  ko: "+ 현재 계정 담기"
-  ja: "+ 現在のアカウントを取込"
-  zh: "+ 捕获当前账户"
+  en: "+ add account"
+  ko: "+ 계정 추가하기"
+  ja: "+ アカウントを追加"
+  zh: "+ 添加账户"
 account.active:
   en: active
   ko: 사용 중
@@ -690,15 +690,15 @@ status.account_delete_failed:
   ja: "削除に失敗: %{err}"
   zh: "删除失败: %{err}"
 status.account_captured:
-  en: "captured current account: %{label}"
-  ko: "현재 계정 담음: %{label}"
-  ja: "現在のアカウントを取込: %{label}"
-  zh: "已捕获当前账户: %{label}"
+  en: "added account: %{label}"
+  ko: "계정 추가됨: %{label}"
+  ja: "アカウントを追加しました: %{label}"
+  zh: "已添加账户: %{label}"
 status.account_capture_failed:
-  en: "capture failed: %{err}"
-  ko: "담기 실패: %{err}"
-  ja: "取込に失敗: %{err}"
-  zh: "捕获失败: %{err}"
+  en: "add failed: %{err}"
+  ko: "추가 실패: %{err}"
+  ja: "追加に失敗: %{err}"
+  zh: "添加失败: %{err}"
 status.account_credits_ok:
   en: "reset credits: %{count}"
   ko: "초기화권: %{count}개"

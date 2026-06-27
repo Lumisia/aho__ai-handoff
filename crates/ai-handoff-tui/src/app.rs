@@ -885,11 +885,11 @@ impl App {
             }
             KeyCode::Char('+') => {
                 let agent = self.acc_selected_agent();
-                self.acc_capture(agent);
+                self.acc_add(agent);
             }
             KeyCode::Enter | KeyCode::Right | KeyCode::Char(' ') => {
                 match rows.get(self.acc_sel).map(|r| r.target) {
-                    Some(AccTarget::Add(agent)) => self.acc_capture(agent),
+                    Some(AccTarget::Add(agent)) => self.acc_add(agent),
                     Some(AccTarget::Slot(..)) | Some(AccTarget::Header(_)) => {
                         self.acc_focus = AccFocus::Detail;
                         self.acc_confirm_delete = false;
@@ -942,8 +942,10 @@ impl App {
         }
     }
 
-    /// Capture the agent's current live auth into a new pool slot.
-    fn acc_capture(&mut self, agent: Agent) {
+    /// Add an account to the pool. Interim behavior: snapshot the agent's
+    /// current live auth into a new slot (labelled by the detected email). The
+    /// planned OAuth login flow is documented in docs/account-add-oauth-design.md.
+    fn acc_add(&mut self, agent: Agent) {
         match account::snapshot_current(agent) {
             Ok(label) => {
                 self.reload_account();
