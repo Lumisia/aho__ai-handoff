@@ -1,0 +1,562 @@
+//! Account status for the connected agents (Codex / Claude) and a small
+//! "credential pool" that swaps which saved auth file is active.
+//!
+//! Read-only and local — **no network** lives here (the Codex reset-credit
+//! count, which needs an authenticated backend call, is in the TUI's
+//! `account_api` module). Everything here reads files the agents already wrote:
+//!
+//! - Codex 5-hour / weekly limits + plan: the latest `~/.codex/sessions/**`
+//!   rollout line carries `payload.rate_limits` (`primary` = 5h, `secondary` =
+//!   weekly), verified against real rollout files and `codex-rs`.
+//! - Codex account email / plan / id: the `id_token` JWT inside
+//!   `~/.codex/auth.json` (`tokens.id_token`), decoded locally. The raw token
+//!   is never returned except by [`codex_request_auth`], used only by the
+//!   network module; it is never logged.
+//! - Claude account email: `~/.claude.json` `oauthAccount.emailAddress`
+//!   (config, not a credential file).
+//!
+//! The pool stores copies of the agents' auth files under
+//! `<AI_HANDOFF_HOME>/accounts/<agent>/<label>.authsnap`; switching copies a
+//! snapshot over the live auth file (the user-approved file-swap mechanism).
+
+use std::path::{Path, PathBuf};
+
+use base64::Engine;
+use serde_json::Value;
+
+/// Which connected agent an account belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Agent {
+    Codex,
+    Claude,
+}
+
+impl Agent {
+    fn dir(self) -> &'static str {
+        match self {
+            Agent::Codex => "codex",
+            Agent::Claude => "claude",
+        }
+    }
+}
+
+/// One rate-limit window: how much is used and when it resets.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RateWindow {
+    pub used_percent: f64,
+    /// Window length in minutes (300 = 5h, 10080 = weekly).
+    pub window_minutes: u64,
+    /// Unix seconds when the window resets, if known.
+    pub resets_at: Option<i64>,
+}
+
+impl RateWindow {
+    /// Remaining percent (clamped to 0..=100).
+    pub fn remaining_percent(&self) -> f64 {
+        (100.0 - self.used_percent).clamp(0.0, 100.0)
+    }
+}
+
+/// A live usage snapshot for one agent (plan + the two windows).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AccountStatus {
+    pub plan_type: Option<String>,
+    pub five_hour: Option<RateWindow>,
+    pub weekly: Option<RateWindow>,
+    /// Unix milliseconds the sample was captured, if known.
+    pub captured_at: Option<i64>,
+}
+
+/// Who is logged in for an agent (no secrets — display fields only).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Identity {
+    pub email: Option<String>,
+    pub account_id: Option<String>,
+    pub plan_type: Option<String>,
+}
+
+/// One saved credential snapshot in the pool.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PoolSlot {
+    /// Display label (usually the account email), also the file stem.
+    pub label: String,
+    pub path: PathBuf,
+    /// True when this snapshot's bytes match the live auth file.
+    pub active: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Home directories
+// ---------------------------------------------------------------------------
+
+fn user_home() -> Option<PathBuf> {
+    directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf())
+}
+
+/// `$CODEX_HOME` if set, otherwise `~/.codex`.
+pub fn codex_home() -> Option<PathBuf> {
+    if let Some(c) = std::env::var_os("CODEX_HOME") {
+        if !c.is_empty() {
+            return Some(PathBuf::from(c));
+        }
+    }
+    user_home().map(|h| h.join(".codex"))
+}
+
+/// `~/.claude`.
+pub fn claude_home() -> Option<PathBuf> {
+    user_home().map(|h| h.join(".claude"))
+}
+
+/// The live auth file an agent reads on startup.
+fn live_auth_path(agent: Agent) -> Option<PathBuf> {
+    match agent {
+        Agent::Codex => codex_home().map(|h| h.join("auth.json")),
+        Agent::Claude => claude_home().map(|h| h.join(".credentials.json")),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Codex usage (local rollout files)
+// ---------------------------------------------------------------------------
+
+/// Read the most recent Codex `rate_limits` snapshot from the rollout logs.
+pub fn codex_status() -> Option<AccountStatus> {
+    let dirs: Vec<PathBuf> = codex_home()
+        .map(|c| vec![c.join("sessions"), c.join("archived_sessions")])
+        .unwrap_or_default();
+    let mut files = Vec::new();
+    for dir in &dirs {
+        collect_jsonl(dir, &mut files);
+    }
+    // Newest first, so the first rollout carrying rate_limits wins.
+    files.sort_by_key(|f| std::cmp::Reverse(f.1));
+    for (path, _) in files {
+        if let Some(status) = last_rate_limits(&path) {
+            return Some(status);
+        }
+    }
+    None
+}
+
+/// Parse the last `payload.rate_limits` line in a rollout file into a status.
+fn last_rate_limits(path: &Path) -> Option<AccountStatus> {
+    let text = std::fs::read_to_string(path).ok()?;
+    text.lines()
+        .rev()
+        .filter(|l| l.contains("\"rate_limits\""))
+        .find_map(|line| {
+            let value: Value = serde_json::from_str(line).ok()?;
+            parse_rate_limits(&value)
+        })
+}
+
+/// Extract an [`AccountStatus`] from a rollout record's `payload.rate_limits`.
+fn parse_rate_limits(record: &Value) -> Option<AccountStatus> {
+    let rl = record.get("payload")?.get("rate_limits")?;
+    let window = |o: &Value| -> Option<RateWindow> {
+        let used_percent = o.get("used_percent")?.as_f64()?;
+        let window_minutes = o.get("window_minutes").and_then(Value::as_u64).unwrap_or(0);
+        let resets_at = o.get("resets_at").and_then(Value::as_i64);
+        Some(RateWindow {
+            used_percent,
+            window_minutes,
+            resets_at,
+        })
+    };
+    let captured_at = record
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+        .map(|dt| dt.timestamp_millis());
+    Some(AccountStatus {
+        plan_type: rl.get("plan_type").and_then(Value::as_str).map(String::from),
+        five_hour: rl.get("primary").and_then(&window),
+        weekly: rl.get("secondary").and_then(&window),
+        captured_at,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Codex identity (auth.json JWT — decoded locally, secret never returned)
+// ---------------------------------------------------------------------------
+
+/// Decode the (unverified) claims of a JWT's payload segment.
+fn decode_jwt_claims(jwt: &str) -> Option<Value> {
+    let payload = jwt.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload.trim())
+        .ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// Pull display-only identity (email / plan / account id) from `auth.json`.
+pub fn codex_identity() -> Option<Identity> {
+    let path = codex_home()?.join("auth.json");
+    let value: Value = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
+    identity_from_auth(&value)
+}
+
+/// Pure half of [`codex_identity`] (split out so it is unit-testable).
+fn identity_from_auth(value: &Value) -> Option<Identity> {
+    let tokens = value.get("tokens")?;
+    let claims = tokens
+        .get("id_token")
+        .and_then(Value::as_str)
+        .and_then(decode_jwt_claims)
+        .unwrap_or(Value::Null);
+    let auth_ns = claims.get("https://api.openai.com/auth");
+    let email = claims
+        .get("email")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            claims
+                .get("https://api.openai.com/profile")
+                .and_then(|p| p.get("email"))
+                .and_then(Value::as_str)
+        })
+        .map(String::from);
+    let account_id = tokens
+        .get("account_id")
+        .and_then(Value::as_str)
+        .map(String::from)
+        .or_else(|| {
+            auth_ns
+                .and_then(|a| a.get("chatgpt_account_id"))
+                .and_then(Value::as_str)
+                .map(String::from)
+        });
+    let plan_type = auth_ns
+        .and_then(|a| a.get("chatgpt_plan_type"))
+        .and_then(Value::as_str)
+        .map(String::from);
+    Some(Identity {
+        email,
+        account_id,
+        plan_type,
+    })
+}
+
+/// The `(access_token, account_id)` needed for an authenticated backend call.
+///
+/// **Secret material.** The only caller is the network module that fetches the
+/// reset-credit count; the token must never be logged, displayed, or passed to
+/// any agent. Returns `None` when not signed in.
+pub fn codex_request_auth() -> Option<(String, Option<String>)> {
+    let path = codex_home()?.join("auth.json");
+    let value: Value = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
+    let tokens = value.get("tokens")?;
+    let access_token = tokens.get("access_token")?.as_str()?.to_string();
+    let account_id = identity_from_auth(&value).and_then(|i| i.account_id);
+    Some((access_token, account_id))
+}
+
+// ---------------------------------------------------------------------------
+// Claude identity (config, not a credential file)
+// ---------------------------------------------------------------------------
+
+/// Pull the Claude account email/plan from `~/.claude.json` (the config — the
+/// OAuth tokens live in a separate `.credentials.json` we never read here).
+pub fn claude_identity() -> Option<Identity> {
+    let path = user_home()?.join(".claude.json");
+    let value: Value = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
+    let acc = value.get("oauthAccount");
+    let email = acc
+        .and_then(|a| a.get("emailAddress"))
+        .and_then(Value::as_str)
+        .map(String::from);
+    let plan_type = value
+        .get("subscriptionType")
+        .and_then(Value::as_str)
+        .map(String::from);
+    if email.is_none() && plan_type.is_none() {
+        return None;
+    }
+    Some(Identity {
+        email,
+        account_id: None,
+        plan_type,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Claude usage (statusline samples captured by the hook)
+// ---------------------------------------------------------------------------
+
+/// The latest Claude 5-hour usage sample (recorded by the statusline hook).
+/// Claude does not expose a weekly window locally, so `weekly` is `None`.
+pub fn claude_status() -> Option<AccountStatus> {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    // Accept samples up to a day old so the tab still shows the last reading.
+    let usage = crate::sensor::read_claude_rate_limit(24 * 60 * 60 * 1000, now_ms)?;
+    Some(AccountStatus {
+        plan_type: None,
+        five_hour: Some(RateWindow {
+            used_percent: usage.used_percent,
+            window_minutes: usage.window_minutes as u64,
+            resets_at: usage.resets_at.map(|r| r as i64),
+        }),
+        weekly: None,
+        captured_at: Some(usage.captured_at),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Credential pool (file-swap switch / delete / capture)
+// ---------------------------------------------------------------------------
+
+const SNAP_EXT: &str = "authsnap";
+
+fn pool_dir(agent: Agent) -> PathBuf {
+    crate::paths::home().join("accounts").join(agent.dir())
+}
+
+/// List the saved snapshots for an agent, marking which matches the live auth.
+pub fn list_slots(agent: Agent) -> Vec<PoolSlot> {
+    let dir = pool_dir(agent);
+    let live = live_auth_path(agent).and_then(|p| std::fs::read(p).ok());
+    let mut slots = Vec::new();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return slots;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some(SNAP_EXT) {
+            continue;
+        }
+        let label = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("?")
+            .to_string();
+        let active = match (&live, std::fs::read(&path)) {
+            (Some(l), Ok(snap)) => *l == snap,
+            _ => false,
+        };
+        slots.push(PoolSlot {
+            label,
+            path,
+            active,
+        });
+    }
+    slots.sort_by(|a, b| a.label.cmp(&b.label));
+    slots
+}
+
+/// Sanitize a label into a safe file stem (keeps `@ . _ -` and alnum).
+fn sanitize(label: &str) -> String {
+    let s: String = label
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '@' | '.' | '_' | '-') { c } else { '_' })
+        .collect();
+    let s = s.trim_matches('_').to_string();
+    if s.is_empty() {
+        "account".to_string()
+    } else {
+        s
+    }
+}
+
+/// Capture the agent's current live auth into a new pool slot, labelled by the
+/// detected account email (or id). Returns the slot label.
+pub fn snapshot_current(agent: Agent) -> std::io::Result<String> {
+    let live = live_auth_path(agent).ok_or_else(|| std::io::Error::other("no home dir"))?;
+    let bytes = std::fs::read(&live)?;
+    let label = sanitize(&detect_label(agent));
+    let dir = pool_dir(agent);
+    std::fs::create_dir_all(&dir)?;
+    let target = dir.join(format!("{label}.{SNAP_EXT}"));
+    atomic_write(&target, &bytes)?;
+    Ok(label)
+}
+
+/// Best-effort display label for the currently signed-in account.
+fn detect_label(agent: Agent) -> String {
+    let identity = match agent {
+        Agent::Codex => codex_identity(),
+        Agent::Claude => claude_identity(),
+    };
+    identity
+        .and_then(|i| i.email.or(i.account_id))
+        .unwrap_or_else(|| "account".to_string())
+}
+
+/// Make the given snapshot the live auth (copies it over the agent's auth file).
+pub fn switch_slot(agent: Agent, label: &str) -> std::io::Result<()> {
+    let snap = pool_dir(agent).join(format!("{label}.{SNAP_EXT}"));
+    let bytes = std::fs::read(&snap)?;
+    let live = live_auth_path(agent).ok_or_else(|| std::io::Error::other("no home dir"))?;
+    if let Some(parent) = live.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    atomic_write(&live, &bytes)
+}
+
+/// Remove a saved snapshot from the pool.
+pub fn delete_slot(agent: Agent, label: &str) -> std::io::Result<()> {
+    let snap = pool_dir(agent).join(format!("{label}.{SNAP_EXT}"));
+    match std::fs::remove_file(&snap) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Write `bytes` to `target` atomically (tmp in the same dir, then rename).
+fn atomic_write(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = target.with_extension("tmp");
+    std::fs::write(&tmp, bytes)?;
+    match std::fs::rename(&tmp, target) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared file walking
+// ---------------------------------------------------------------------------
+
+/// Collect `(path, modified)` for every `*.jsonl` under `root` (iterative).
+fn collect_jsonl(root: &Path, out: &mut Vec<(PathBuf, std::time::SystemTime)>) {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_dir() {
+                stack.push(path);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+                let mtime = entry
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::UNIX_EPOCH);
+                out.push((path, mtime));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn b64url(s: &str) -> String {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(s.as_bytes())
+    }
+
+    /// A JWT with the given claims JSON in the payload (header/sig are dummies).
+    fn fake_jwt(claims: &str) -> String {
+        format!("{}.{}.{}", b64url("{}"), b64url(claims), "sig")
+    }
+
+    #[test]
+    fn parse_rate_limits_reads_primary_and_secondary() {
+        let line = serde_json::json!({
+            "timestamp": "2026-06-26T16:58:48Z",
+            "payload": { "rate_limits": {
+                "primary": { "used_percent": 100.0, "window_minutes": 300, "resets_at": 1782478701i64 },
+                "secondary": { "used_percent": 87.0, "window_minutes": 10080, "resets_at": 1782808275i64 },
+                "credits": { "has_credits": false, "unlimited": false, "balance": null },
+                "plan_type": "team"
+            }}
+        });
+        let status = parse_rate_limits(&line).expect("status");
+        assert_eq!(status.plan_type.as_deref(), Some("team"));
+        let five = status.five_hour.expect("5h");
+        assert_eq!(five.used_percent, 100.0);
+        assert_eq!(five.window_minutes, 300);
+        assert_eq!(five.remaining_percent(), 0.0);
+        let weekly = status.weekly.expect("weekly");
+        assert_eq!(weekly.window_minutes, 10080);
+        assert_eq!(weekly.resets_at, Some(1782808275));
+        assert!(status.captured_at.is_some());
+    }
+
+    #[test]
+    fn parse_rate_limits_rejects_unrelated_records() {
+        let line = serde_json::json!({ "payload": { "type": "message" } });
+        assert!(parse_rate_limits(&line).is_none());
+    }
+
+    #[test]
+    fn identity_decodes_email_plan_and_account_from_jwt() {
+        let claims = r#"{
+            "email": "dev@example.com",
+            "https://api.openai.com/auth": {
+                "chatgpt_plan_type": "pro",
+                "chatgpt_account_id": "acc-123"
+            }
+        }"#;
+        let auth = serde_json::json!({
+            "tokens": { "id_token": fake_jwt(claims), "access_token": "secret-xyz" }
+        });
+        let id = identity_from_auth(&auth).expect("identity");
+        assert_eq!(id.email.as_deref(), Some("dev@example.com"));
+        assert_eq!(id.plan_type.as_deref(), Some("pro"));
+        assert_eq!(id.account_id.as_deref(), Some("acc-123"));
+    }
+
+    #[test]
+    fn identity_prefers_explicit_account_id_field() {
+        let auth = serde_json::json!({
+            "tokens": { "id_token": fake_jwt("{\"email\":\"a@b.c\"}"), "account_id": "explicit" }
+        });
+        let id = identity_from_auth(&auth).expect("identity");
+        assert_eq!(id.account_id.as_deref(), Some("explicit"));
+    }
+
+    #[test]
+    fn sanitize_keeps_emails_and_drops_separators() {
+        assert_eq!(sanitize("test@test.com"), "test@test.com");
+        assert_eq!(sanitize("a b/c\\d"), "a_b_c_d");
+        assert_eq!(sanitize("///"), "account");
+    }
+
+    #[test]
+    fn pool_snapshot_list_switch_delete_roundtrip() {
+        let _guard = crate::test_support::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let codex = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        std::env::set_var("CODEX_HOME", codex.path());
+
+        // Two distinct live auth files captured as two slots.
+        let live = codex.path().join("auth.json");
+        std::fs::write(&live, br#"{"tokens":{"id_token":"x","account_id":"alice"}}"#).unwrap();
+        let a = snapshot_current(Agent::Codex).unwrap();
+        assert_eq!(a, "alice");
+
+        std::fs::write(&live, br#"{"tokens":{"id_token":"y","account_id":"bob"}}"#).unwrap();
+        let b = snapshot_current(Agent::Codex).unwrap();
+        assert_eq!(b, "bob");
+
+        // Live currently equals "bob"; the list marks it active.
+        let slots = list_slots(Agent::Codex);
+        assert_eq!(slots.len(), 2);
+        let bob = slots.iter().find(|s| s.label == "bob").unwrap();
+        assert!(bob.active, "bob snapshot matches live bytes");
+        assert!(!slots.iter().find(|s| s.label == "alice").unwrap().active);
+
+        // Switch back to alice: the live file now matches the alice snapshot.
+        switch_slot(Agent::Codex, "alice").unwrap();
+        let live_bytes = std::fs::read(&live).unwrap();
+        assert!(live_bytes.windows(5).any(|w| w == b"alice"));
+        assert!(list_slots(Agent::Codex).iter().find(|s| s.label == "alice").unwrap().active);
+
+        // Delete bob; only alice remains (idempotent on a second delete).
+        delete_slot(Agent::Codex, "bob").unwrap();
+        delete_slot(Agent::Codex, "bob").unwrap();
+        let slots = list_slots(Agent::Codex);
+        assert_eq!(slots.len(), 1);
+        assert_eq!(slots[0].label, "alice");
+
+        std::env::remove_var("AI_HANDOFF_HOME");
+        std::env::remove_var("CODEX_HOME");
+    }
+}

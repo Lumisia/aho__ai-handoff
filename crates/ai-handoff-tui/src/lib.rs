@@ -1,10 +1,12 @@
 //! ai-handoff-tui — the ratatui terminal dashboard.
 //!
-//! Overview (health + token summary), Usage (day/model/project/source
-//! breakdown), and Settings (edit the shared config, applied to both agents).
+//! Overview (health + token summary), Capsule (handoff capsules), Account
+//! (Codex/Claude plan + 5h/weekly limits + reset credits, with a saved-account
+//! switch pool), and Settings (edit the shared config, applied to both agents).
 //! Reads the usage engine and config in-process at launch. The bare
 //! `ai-handoff` / `ai-handoff tui` invocation opens this; hook commands never do.
 
+pub mod account_api;
 pub mod app;
 pub mod capsule_ops;
 pub mod edit;

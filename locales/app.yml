@@ -16,6 +16,11 @@ tab.usage:
   ko: 사용량
   ja: 使用量
   zh: 用量
+tab.account:
+  en: Account
+  ko: 계정
+  ja: アカウント
+  zh: 账户
 tab.settings:
   en: Settings
   ko: 설정
@@ -522,6 +527,188 @@ health.msg.daemon_unknown:
   ko: "런타임 상태 API는 이 MVP에 미구현"
   ja: "ランタイム状態 API はこの MVP では未実装"
   zh: "此 MVP 未实现运行时状态 API"
+
+# ── Account tab ─────────────────────────────────────────────────────────
+hint.account_tree:
+  en: "↑/↓ move · Enter/→ open account · + capture current · q/Esc back"
+  ko: "↑/↓ 이동 · Enter/→ 계정 열기 · + 현재 계정 담기 · q/Esc 뒤로"
+  ja: "↑/↓ 移動 · Enter/→ アカウントを開く · + 現在のアカウントを取込 · q/Esc 戻る"
+  zh: "↑/↓ 移动 · Enter/→ 打开账户 · + 捕获当前账户 · q/Esc 返回"
+hint.account_detail:
+  en: "s switch · d delete · r refresh credits · ← back to list"
+  ko: "s 전환 · d 삭제 · r 초기화권 새로고침 · ← 목록으로"
+  ja: "s 切替 · d 削除 · r 初期化券を更新 · ← 一覧へ"
+  zh: "s 切换 · d 删除 · r 刷新重置券 · ← 返回列表"
+account.empty:
+  en: "No accounts captured yet.\n\nSign in to Codex or Claude, then press + to capture the current account here. You can then switch between saved accounts."
+  ko: "아직 담은 계정이 없습니다.\n\nCodex 또는 Claude에 로그인한 뒤 + 를 눌러 현재 계정을 담으세요. 이후 담은 계정 사이를 전환할 수 있습니다."
+  ja: "まだアカウントがありません。\n\nCodex または Claude にサインインし、+ を押して現在のアカウントを取り込みます。以後、保存したアカウントを切り替えられます。"
+  zh: "尚未捕获账户。\n\n登录 Codex 或 Claude 后，按 + 捕获当前账户。之后可在已保存的账户间切换。"
+account.list_title:
+  en: "Accounts (↓/Space/Enter to open)"
+  ko: "계정 (↓/Space/Enter 로 열기)"
+  ja: "アカウント (↓/Space/Enter で開く)"
+  zh: "账户 (↓/Space/Enter 打开)"
+account.add:
+  en: "+ capture current"
+  ko: "+ 현재 계정 담기"
+  ja: "+ 現在のアカウントを取込"
+  zh: "+ 捕获当前账户"
+account.active:
+  en: active
+  ko: 사용 중
+  ja: 使用中
+  zh: 使用中
+account.actions:
+  en: Actions
+  ko: 동작
+  ja: 操作
+  zh: 操作
+account.btn_switch:
+  en: "[s] switch"
+  ko: "[s] 전환"
+  ja: "[s] 切替"
+  zh: "[s] 切换"
+account.btn_delete:
+  en: "[d] delete"
+  ko: "[d] 삭제"
+  ja: "[d] 削除"
+  zh: "[d] 删除"
+account.btn_confirm_delete:
+  en: "[d] confirm delete"
+  ko: "[d] 삭제 확인"
+  ja: "[d] 削除を確定"
+  zh: "[d] 确认删除"
+account.detail_placeholder:
+  en: "Pick an account on the left to see its plan and limits."
+  ko: "왼쪽에서 계정을 선택하면 플랜과 한도가 표시됩니다."
+  ja: "左でアカウントを選ぶとプランと制限が表示されます。"
+  zh: "在左侧选择账户以查看其套餐与限额。"
+account.signed_in:
+  en: "Signed in: %{email}"
+  ko: "로그인: %{email}"
+  ja: "サインイン: %{email}"
+  zh: "已登录: %{email}"
+account.not_signed_in:
+  en: "Not signed in"
+  ko: "로그인 안 됨"
+  ja: "サインインしていません"
+  zh: "未登录"
+account.plan:
+  en: "Plan: %{plan}"
+  ko: "플랜: %{plan}"
+  ja: "プラン: %{plan}"
+  zh: "套餐: %{plan}"
+account.plan_unknown:
+  en: unknown
+  ko: 알 수 없음
+  ja: 不明
+  zh: 未知
+account.five_hour:
+  en: "5-hour"
+  ko: "5시간"
+  ja: "5時間"
+  zh: "5小时"
+account.weekly:
+  en: Weekly
+  ko: 주간
+  ja: 週間
+  zh: 每周
+account.window_line:
+  en: "%{label}: %{used}% used · %{left}% left%{reset}"
+  ko: "%{label}: %{used}% 사용 · %{left}% 남음%{reset}"
+  ja: "%{label}: %{used}% 使用 · %{left}% 残り%{reset}"
+  zh: "%{label}: 已用 %{used}% · 剩 %{left}%%{reset}"
+account.reset_suffix:
+  en: " · resets %{when}"
+  ko: " · %{when} 리셋"
+  ja: " · %{when} リセット"
+  zh: " · %{when} 重置"
+account.no_data:
+  en: "No usage data yet — run the agent once to populate limits."
+  ko: "사용 데이터 없음 — 에이전트를 한 번 실행하면 한도가 채워집니다."
+  ja: "使用データなし — エージェントを一度実行すると制限が反映されます。"
+  zh: "暂无用量数据 — 运行一次代理即可填充限额。"
+account.reset_credits:
+  en: "Reset credits (초기화권)"
+  ko: "초기화권"
+  ja: "初期化券 (reset credits)"
+  zh: "重置券 (reset credits)"
+account.reset_credits_value:
+  en: "%{count} available"
+  ko: "%{count}개 보유"
+  ja: "%{count}枚 保有"
+  zh: "可用 %{count} 个"
+account.reset_credits_hint:
+  en: "expire ~30 days after grant · press r to refresh"
+  ko: "지급 후 약 30일 만료 · r 새로고침"
+  ja: "付与から約30日で失効 · r で更新"
+  zh: "发放后约 30 天到期 · 按 r 刷新"
+account.reset_credits_press:
+  en: "press r to fetch (uses your Codex token over the network)"
+  ko: "r 누르면 조회 (Codex 토큰으로 네트워크 호출)"
+  ja: "r で取得（Codex トークンでネットワーク呼び出し）"
+  zh: "按 r 获取（通过网络使用你的 Codex 令牌）"
+account.reset_credits_loading:
+  en: "fetching…"
+  ko: "조회 중…"
+  ja: "取得中…"
+  zh: "获取中…"
+account.reset_credits_error:
+  en: "unavailable (%{err})"
+  ko: "조회 실패 (%{err})"
+  ja: "取得不可 (%{err})"
+  zh: "不可用 (%{err})"
+status.account_switched:
+  en: "switched to %{label}"
+  ko: "%{label} 로 전환됨"
+  ja: "%{label} に切替えました"
+  zh: "已切换到 %{label}"
+status.account_switch_failed:
+  en: "switch failed: %{err}"
+  ko: "전환 실패: %{err}"
+  ja: "切替に失敗: %{err}"
+  zh: "切换失败: %{err}"
+status.account_delete_confirm:
+  en: "remove this saved account? press d or y to confirm, any other key to cancel"
+  ko: "담아둔 이 계정을 삭제할까요? d 또는 y로 확인, 다른 키로 취소"
+  ja: "保存したこのアカウントを削除しますか？d または y で確定、他のキーで取消"
+  zh: "删除此已保存账户？按 d 或 y 确认，其他键取消"
+status.account_delete_cancelled:
+  en: "delete cancelled"
+  ko: "삭제 취소됨"
+  ja: "削除を取消しました"
+  zh: "已取消删除"
+status.account_deleted:
+  en: "saved account removed"
+  ko: "담아둔 계정 삭제됨"
+  ja: "保存したアカウントを削除しました"
+  zh: "已删除保存的账户"
+status.account_delete_failed:
+  en: "delete failed: %{err}"
+  ko: "삭제 실패: %{err}"
+  ja: "削除に失敗: %{err}"
+  zh: "删除失败: %{err}"
+status.account_captured:
+  en: "captured current account: %{label}"
+  ko: "현재 계정 담음: %{label}"
+  ja: "現在のアカウントを取込: %{label}"
+  zh: "已捕获当前账户: %{label}"
+status.account_capture_failed:
+  en: "capture failed: %{err}"
+  ko: "담기 실패: %{err}"
+  ja: "取込に失敗: %{err}"
+  zh: "捕获失败: %{err}"
+status.account_credits_ok:
+  en: "reset credits: %{count}"
+  ko: "초기화권: %{count}개"
+  ja: "初期化券: %{count}枚"
+  zh: "重置券: %{count} 个"
+status.account_credits_failed:
+  en: "reset credits unavailable: %{err}"
+  ko: "초기화권 조회 실패: %{err}"
+  ja: "初期化券の取得に失敗: %{err}"
+  zh: "重置券获取失败: %{err}"
 
 # ── Consumption state ───────────────────────────────────────────────────
 state.pending:

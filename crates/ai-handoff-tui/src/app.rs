@@ -1,5 +1,5 @@
 //! The ratatui application: state, key handling, and drawing for the
-//! Overview / Usage / Settings tabs.
+//! Overview / Capsule / Account / Settings tabs.
 //!
 //! `on_key` is kept independent of the terminal (it only mutates state and, on
 //! a Settings save, writes config) so the interaction logic is unit-testable
@@ -17,15 +17,15 @@ use ratatui::{
     text::{Line, Span},
     widgets::{
         canvas::{Canvas, Points},
-        BarChart, Block, BorderType, Borders, Cell, Paragraph, Row, Table, Tabs, Wrap,
+        Block, BorderType, Borders, Cell, Gauge, Paragraph, Row, Table, Tabs, Wrap,
     },
     DefaultTerminal, Frame,
 };
 
 use rust_i18n::t;
 
+use ai_handoff_core::account::{self, Agent, RateWindow};
 use ai_handoff_core::dashboard::{CheckStatus, DashboardSnapshot};
-use ai_handoff_usage::{aggregate::Group, Dimension};
 
 use crate::capsule_ops;
 use crate::edit::{self, EditAction};
@@ -37,18 +37,18 @@ use crate::viewmodel::{
 pub enum Tab {
     Overview,
     Capsule,
-    Usage,
+    Account,
     Settings,
 }
 
 impl Tab {
-    const ALL: [Tab; 4] = [Tab::Overview, Tab::Capsule, Tab::Usage, Tab::Settings];
+    const ALL: [Tab; 4] = [Tab::Overview, Tab::Capsule, Tab::Account, Tab::Settings];
     /// Translation key for the tab's title (resolved at render time via `t!`).
     fn title_key(self) -> &'static str {
         match self {
             Tab::Overview => "tab.overview",
             Tab::Capsule => "tab.capsule",
-            Tab::Usage => "tab.usage",
+            Tab::Account => "tab.account",
             Tab::Settings => "tab.settings",
         }
     }
@@ -62,13 +62,6 @@ impl Tab {
         Tab::ALL[(self.index() + Tab::ALL.len() - 1) % Tab::ALL.len()]
     }
 }
-
-const DIMS: [Dimension; 4] = [
-    Dimension::Day,
-    Dimension::Model,
-    Dimension::Project,
-    Dimension::Source,
-];
 
 /// The default status-bar hint, in the active language.
 fn default_hint() -> String {
@@ -110,6 +103,8 @@ fn quit_hint() -> String {
 /// Claude = orange, Codex = purple (the token-split donut + legend).
 const CLAUDE_COLOR: Color = Color::Rgb(230, 140, 30);
 const CODEX_COLOR: Color = Color::Rgb(150, 90, 220);
+/// A lighter purple for the "Codex" label text in the Capsule / Account trees.
+const CODEX_LABEL_COLOR: Color = Color::Rgb(185, 150, 235);
 
 /// One visible line in the Capsule tab's tree (agent → project → capsule).
 struct CapRow {
@@ -145,6 +140,83 @@ struct CapDetail {
     raw: String,
 }
 
+/// Where the focus sits inside the Account tab.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum AccFocus {
+    /// The left (3/10) Codex / Claude account tree.
+    Tree,
+    /// The right (7/10) detail pane: switch / delete + plan & limits.
+    Detail,
+}
+
+/// What an account row points at.
+#[derive(Clone, Copy)]
+enum AccTarget {
+    /// The agent header line (selecting it shows that agent's live status).
+    Header(Agent),
+    /// A saved account snapshot (index into that agent's slots).
+    Slot(Agent, usize),
+    /// The "+ capture current" action line.
+    Add(Agent),
+}
+
+/// One visible line in the Account tab's tree.
+struct AccRow {
+    indent: usize,
+    label: String,
+    target: AccTarget,
+}
+
+/// The reset-credit ("초기화권") fetch is an explicit, network-gated action.
+#[derive(Clone, PartialEq, Eq)]
+enum CreditsState {
+    /// Not fetched yet (the count needs an authenticated backend call).
+    Idle,
+    Loaded(i64),
+    Error(String),
+}
+
+/// One agent's account picture: who is signed in, their live limits, and the
+/// saved snapshots in the pool.
+#[derive(Default)]
+struct AgentAccount {
+    identity: Option<account::Identity>,
+    status: Option<account::AccountStatus>,
+    slots: Vec<account::PoolSlot>,
+}
+
+/// Both agents' account data for the Account tab.
+#[derive(Default)]
+struct AccountData {
+    codex: AgentAccount,
+    claude: AgentAccount,
+}
+
+impl AccountData {
+    /// Scan the live system (rollout limits, auth identity, pool snapshots).
+    fn load_live() -> Self {
+        AccountData {
+            codex: AgentAccount {
+                identity: account::codex_identity(),
+                status: account::codex_status(),
+                slots: account::list_slots(Agent::Codex),
+            },
+            claude: AgentAccount {
+                identity: account::claude_identity(),
+                status: account::claude_status(),
+                slots: account::list_slots(Agent::Claude),
+            },
+        }
+    }
+
+    fn agent(&self, agent: Agent) -> &AgentAccount {
+        match agent {
+            Agent::Codex => &self.codex,
+            Agent::Claude => &self.claude,
+        }
+    }
+}
+
 pub struct App {
     pub tab: Tab,
     /// Whether the focus is inside the current tab's content (vs. the tab bar).
@@ -152,10 +224,19 @@ pub struct App {
     focus_content: bool,
     snapshot: DashboardSnapshot,
     usage: UsageView,
-    usage_dim: Dimension,
     settings: Vec<SettingRow>,
     settings_idx: usize,
     config_path: PathBuf,
+    // --- Account tab state ---
+    account: AccountData,
+    /// Whether focus is on the account tree or the detail pane.
+    acc_focus: AccFocus,
+    /// Selected row in the flattened account tree.
+    acc_sel: usize,
+    /// A delete needs a second confirm press; armed here.
+    acc_confirm_delete: bool,
+    /// The (Codex) reset-credit count: fetched on demand over the network.
+    acc_credits: CreditsState,
     // --- Capsule tab state ---
     cap_tree: Vec<CapsuleAgent>,
     cap_expanded_agents: HashSet<usize>,
@@ -193,7 +274,9 @@ impl App {
         let usage = UsageView::from_events(&ai_handoff_usage::scan_default());
         let cfg = ai_handoff_core::config::load();
         let config_path = ai_handoff_core::paths::config_path();
-        App::new(snapshot, usage, settings_rows(&cfg), config_path)
+        let mut app = App::new(snapshot, usage, settings_rows(&cfg), config_path);
+        app.account = AccountData::load_live();
+        app
     }
 
     pub fn new(
@@ -210,10 +293,14 @@ impl App {
             focus_content: false,
             snapshot,
             usage,
-            usage_dim: Dimension::Day,
             settings,
             settings_idx: 0,
             config_path,
+            account: AccountData::default(),
+            acc_focus: AccFocus::Tree,
+            acc_sel: 0,
+            acc_confirm_delete: false,
+            acc_credits: CreditsState::Idle,
             cap_tree,
             cap_expanded_agents,
             cap_expanded_projects: HashSet::new(),
@@ -274,7 +361,7 @@ impl App {
             KeyCode::BackTab => return self.goto(self.tab.prev()),
             KeyCode::Char('1') => return self.goto(Tab::Overview),
             KeyCode::Char('2') => return self.goto(Tab::Capsule),
-            KeyCode::Char('3') => return self.goto(Tab::Usage),
+            KeyCode::Char('3') => return self.goto(Tab::Account),
             KeyCode::Char('4') => return self.goto(Tab::Settings),
             _ => {}
         }
@@ -292,7 +379,7 @@ impl App {
         match self.tab {
             Tab::Overview => {}
             Tab::Capsule => self.on_capsule_key(key),
-            Tab::Usage => self.on_usage_key(key),
+            Tab::Account => self.on_account_key(key),
             Tab::Settings => self.on_settings_key(key),
         }
     }
@@ -316,7 +403,11 @@ impl App {
                 self.cap_load_content();
                 t!("hint.capsule_tree").into_owned()
             }
-            Tab::Usage => t!("hint.usage").into_owned(),
+            Tab::Account => {
+                self.acc_focus = AccFocus::Tree;
+                self.acc_confirm_delete = false;
+                t!("hint.account_tree").into_owned()
+            }
             Tab::Settings => setting_desc_or_hint(self.settings.first().map(|r| r.key)),
         };
     }
@@ -335,13 +426,6 @@ impl App {
         } else {
             self.confirm_quit = true;
             self.status = quit_hint();
-        }
-    }
-
-    fn on_usage_key(&mut self, key: KeyEvent) {
-        if let KeyCode::Char('g') = key.code {
-            let idx = DIMS.iter().position(|d| *d == self.usage_dim).unwrap_or(0);
-            self.usage_dim = DIMS[(idx + 1) % DIMS.len()];
         }
     }
 
@@ -721,6 +805,220 @@ impl App {
         rows
     }
 
+    // --- Account tab ---------------------------------------------------
+
+    fn on_account_key(&mut self, key: KeyEvent) {
+        match self.acc_focus {
+            AccFocus::Tree => self.acc_tree_key(key),
+            AccFocus::Detail => self.acc_detail_key(key),
+        }
+    }
+
+    /// The flattened, visible rows of the account tree (both agents, always
+    /// expanded: header → saved accounts → "+ capture current").
+    fn acc_rows(&self) -> Vec<AccRow> {
+        let mut rows = Vec::new();
+        for agent in [Agent::Codex, Agent::Claude] {
+            let data = self.account.agent(agent);
+            rows.push(AccRow {
+                indent: 0,
+                label: agent_name(agent).to_string(),
+                target: AccTarget::Header(agent),
+            });
+            for (i, slot) in data.slots.iter().enumerate() {
+                let label = if slot.active {
+                    format!("• {}  [{}]", slot.label, t!("account.active"))
+                } else {
+                    format!("• {}", slot.label)
+                };
+                rows.push(AccRow {
+                    indent: 2,
+                    label,
+                    target: AccTarget::Slot(agent, i),
+                });
+            }
+            rows.push(AccRow {
+                indent: 2,
+                label: t!("account.add").into_owned(),
+                target: AccTarget::Add(agent),
+            });
+        }
+        rows
+    }
+
+    fn acc_target(&self) -> Option<AccTarget> {
+        self.acc_rows().get(self.acc_sel).map(|r| r.target)
+    }
+
+    /// The agent owning the selected row (Codex when nothing is selected).
+    fn acc_selected_agent(&self) -> Agent {
+        match self.acc_target() {
+            Some(AccTarget::Header(a) | AccTarget::Slot(a, _) | AccTarget::Add(a)) => a,
+            None => Agent::Codex,
+        }
+    }
+
+    /// The (agent, slot index) of the selection, if it is a saved account.
+    fn acc_selected_slot(&self) -> Option<(Agent, usize)> {
+        match self.acc_target() {
+            Some(AccTarget::Slot(a, i)) => Some((a, i)),
+            _ => None,
+        }
+    }
+
+    /// Keys while the left account tree has focus.
+    fn acc_tree_key(&mut self, key: KeyEvent) {
+        let rows = self.acc_rows();
+        if rows.is_empty() {
+            return;
+        }
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                if self.acc_sel > 0 {
+                    self.acc_sel -= 1;
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if self.acc_sel + 1 < rows.len() {
+                    self.acc_sel += 1;
+                }
+            }
+            KeyCode::Char('+') => {
+                let agent = self.acc_selected_agent();
+                self.acc_capture(agent);
+            }
+            KeyCode::Enter | KeyCode::Right | KeyCode::Char(' ') => {
+                match rows.get(self.acc_sel).map(|r| r.target) {
+                    Some(AccTarget::Add(agent)) => self.acc_capture(agent),
+                    Some(AccTarget::Slot(..)) | Some(AccTarget::Header(_)) => {
+                        self.acc_focus = AccFocus::Detail;
+                        self.acc_confirm_delete = false;
+                        self.status = t!("hint.account_detail").into_owned();
+                    }
+                    None => {}
+                }
+            }
+            _ => {}
+        }
+        let n = self.acc_rows().len();
+        if self.acc_sel >= n {
+            self.acc_sel = n.saturating_sub(1);
+        }
+    }
+
+    /// Keys while the right detail pane has focus (switch / delete / refresh).
+    fn acc_detail_key(&mut self, key: KeyEvent) {
+        let confirming = self.acc_confirm_delete;
+        if confirming && !matches!(key.code, KeyCode::Char('d') | KeyCode::Char('y')) {
+            self.acc_confirm_delete = false;
+            self.status = t!("status.account_delete_cancelled").into_owned();
+        }
+        match key.code {
+            KeyCode::Left => {
+                self.acc_focus = AccFocus::Tree;
+                self.acc_confirm_delete = false;
+                self.status = t!("hint.account_tree").into_owned();
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if self.acc_sel > 0 {
+                    self.acc_sel -= 1;
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if self.acc_sel + 1 < self.acc_rows().len() {
+                    self.acc_sel += 1;
+                }
+            }
+            KeyCode::Char('s') => self.acc_switch(),
+            KeyCode::Char('d') | KeyCode::Char('y') if confirming => self.acc_delete(),
+            KeyCode::Char('d') => {
+                if self.acc_selected_slot().is_some() {
+                    self.acc_confirm_delete = true;
+                    self.status = t!("status.account_delete_confirm").into_owned();
+                }
+            }
+            KeyCode::Char('r') => self.acc_refresh_credits(),
+            _ => {}
+        }
+    }
+
+    /// Capture the agent's current live auth into a new pool slot.
+    fn acc_capture(&mut self, agent: Agent) {
+        match account::snapshot_current(agent) {
+            Ok(label) => {
+                self.reload_account();
+                self.status = t!("status.account_captured", label = label).into_owned();
+            }
+            Err(e) => {
+                self.status = t!("status.account_capture_failed", err = e.to_string()).into_owned()
+            }
+        }
+    }
+
+    /// Make the selected saved account the live one (file swap).
+    fn acc_switch(&mut self) {
+        let Some((agent, i)) = self.acc_selected_slot() else {
+            return;
+        };
+        let label = self.account.agent(agent).slots[i].label.clone();
+        match account::switch_slot(agent, &label) {
+            Ok(()) => {
+                // The live account changed — the cached credit count is stale.
+                self.acc_credits = CreditsState::Idle;
+                self.reload_account();
+                self.status = t!("status.account_switched", label = label).into_owned();
+            }
+            Err(e) => {
+                self.status = t!("status.account_switch_failed", err = e.to_string()).into_owned()
+            }
+        }
+    }
+
+    /// Remove the selected saved account from the pool.
+    fn acc_delete(&mut self) {
+        self.acc_confirm_delete = false;
+        let Some((agent, i)) = self.acc_selected_slot() else {
+            return;
+        };
+        let label = self.account.agent(agent).slots[i].label.clone();
+        match account::delete_slot(agent, &label) {
+            Ok(()) => {
+                self.reload_account();
+                self.status = t!("status.account_deleted").into_owned();
+            }
+            Err(e) => {
+                self.status = t!("status.account_delete_failed", err = e.to_string()).into_owned()
+            }
+        }
+    }
+
+    /// Fetch the Codex reset-credit count (the one network call; uses the token
+    /// only to set the auth header — never logged or displayed).
+    fn acc_refresh_credits(&mut self) {
+        if self.acc_selected_agent() != Agent::Codex {
+            return;
+        }
+        match crate::account_api::fetch_reset_credits() {
+            Ok(n) => {
+                self.acc_credits = CreditsState::Loaded(n);
+                self.status = t!("status.account_credits_ok", count = n).into_owned();
+            }
+            Err(e) => {
+                self.status = t!("status.account_credits_failed", err = e.clone()).into_owned();
+                self.acc_credits = CreditsState::Error(e);
+            }
+        }
+    }
+
+    /// Re-scan the live system after a pool change and clamp the selection.
+    fn reload_account(&mut self) {
+        self.account = AccountData::load_live();
+        let n = self.acc_rows().len();
+        if self.acc_sel >= n {
+            self.acc_sel = n.saturating_sub(1);
+        }
+    }
+
     // --- drawing -------------------------------------------------------
 
     fn draw(&self, f: &mut Frame) {
@@ -737,7 +1035,7 @@ impl App {
         match self.tab {
             Tab::Overview => self.draw_overview(f, chunks[1]),
             Tab::Capsule => self.draw_capsule(f, chunks[1]),
-            Tab::Usage => self.draw_usage(f, chunks[1]),
+            Tab::Account => self.draw_account(f, chunks[1]),
             Tab::Settings => self.draw_settings(f, chunks[1]),
         }
         self.draw_status(f, chunks[2]);
@@ -828,6 +1126,15 @@ impl App {
                         Style::default().add_modifier(Modifier::REVERSED)
                     };
                     Line::from(Span::styled(text, style))
+                } else if let CapTarget::Agent(ai) = r.target {
+                    // Brand-color the agent rows (Codex = purple, ClaudeCode = orange).
+                    match agent_label_color(&self.cap_tree[ai].agent) {
+                        Some(c) => Line::from(Span::styled(
+                            text,
+                            Style::default().fg(c).add_modifier(Modifier::BOLD),
+                        )),
+                        None => Line::from(text),
+                    }
                 } else {
                     Line::from(text)
                 }
@@ -1092,66 +1399,197 @@ impl App {
         );
     }
 
-    fn draw_usage(&self, f: &mut Frame, area: Rect) {
-        let dim = self.usage_dim;
-        let groups = self.usage.breakdown(dim);
-        let title = t!(
-            "usage.title",
-            dim = dim_label(dim),
-            tokens = thousands(self.usage.total.tokens.total()),
-            cost = format!("{:.2}", self.usage.total.cost_usd)
-        )
-        .into_owned();
-        if groups.is_empty() {
-            let para = Paragraph::new(t!("usage.no_logs").into_owned())
-                .block(Block::default().borders(Borders::ALL).title(title));
-            f.render_widget(para, area);
-            return;
-        }
-
-        // Top: a token bar chart for the current dimension. Bottom: the table.
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
+    /// The Account tab: a Codex/Claude account tree (3/10) over a detail pane
+    /// (7/10) with the selected agent's plan, limits, and reset credits.
+    fn draw_account(&self, f: &mut Frame, area: Rect) {
+        let rows = self.acc_rows();
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
             .split(area);
 
-        // Bar labels/values must outlive the BarChart, so own them here.
-        let owned: Vec<(String, u64)> = chart_subset(dim, groups)
-            .iter()
-            .map(|g| (short_label(dim, &g.key), g.tokens.total()))
-            .collect();
-        let data: Vec<(&str, u64)> = owned.iter().map(|(k, v)| (k.as_str(), *v)).collect();
-        let bar_width = bar_width_for(rows[0].width, data.len());
-        let chart = BarChart::default()
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(format!("{title}  {}", t!("usage.tokens_suffix"))),
-            )
-            .data(data.as_slice())
-            .bar_width(bar_width)
-            .bar_gap(1)
-            .bar_style(Style::default().fg(Color::Cyan))
-            .value_style(Style::default().fg(Color::Black).bg(Color::Cyan))
-            .label_style(Style::default().fg(Color::Gray));
-        f.render_widget(chart, rows[0]);
+        let tree_focused = self.focus_content && self.acc_focus == AccFocus::Tree;
+        let detail_focused = self.focus_content && self.acc_focus == AccFocus::Detail;
 
-        let table_rows = groups.iter().map(group_table_row);
-        let table = Table::new(
-            table_rows,
-            [Constraint::Min(16), Constraint::Length(16), Constraint::Length(12), Constraint::Length(14)],
-        )
-        .header(
-            Row::new([
-                t!("table.key").into_owned(),
-                t!("table.tokens").into_owned(),
-                t!("table.est_cost").into_owned(),
-                t!("table.unpriced").into_owned(),
+        // --- left: the account tree (agent headers carry the brand color) ---
+        let lines: Vec<Line> = rows
+            .iter()
+            .enumerate()
+            .map(|(i, r)| {
+                let text = format!("{}{}", " ".repeat(r.indent), r.label);
+                if i == self.acc_sel {
+                    let style = if tree_focused {
+                        Style::default().fg(Color::Black).bg(Color::Cyan)
+                    } else {
+                        Style::default().add_modifier(Modifier::REVERSED)
+                    };
+                    Line::from(Span::styled(text, style))
+                } else if let AccTarget::Header(agent) = r.target {
+                    Line::from(Span::styled(
+                        text,
+                        Style::default().fg(agent_color(agent)).add_modifier(Modifier::BOLD),
+                    ))
+                } else {
+                    Line::from(text)
+                }
+            })
+            .collect();
+        let list = Paragraph::new(lines).block(focus_block(t!("account.list_title"), tree_focused));
+        f.render_widget(list, cols[0]);
+
+        // --- right: action bar (top) over the status pane (bottom) ---
+        let right = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(3), Constraint::Min(3)])
+            .split(cols[1]);
+        self.draw_account_actions(f, right[0], detail_focused);
+        self.draw_account_status(f, right[1], detail_focused);
+    }
+
+    /// The action bar: switch / delete for the selected saved account.
+    fn draw_account_actions(&self, f: &mut Frame, area: Rect, focused: bool) {
+        let has_slot = self.acc_selected_slot().is_some();
+        let mut spans = vec![
+            Span::raw(" "),
+            Span::styled(
+                format!(" {} ", t!("account.btn_switch")),
+                action_style(focused && has_slot),
+            ),
+            Span::raw("  "),
+        ];
+        if self.acc_confirm_delete {
+            spans.push(Span::styled(
+                format!(" {} ", t!("account.btn_confirm_delete")),
+                Style::default().fg(Color::White).bg(Color::Red),
+            ));
+        } else {
+            spans.push(Span::styled(
+                format!(" {} ", t!("account.btn_delete")),
+                action_style(focused && has_slot),
+            ));
+        }
+        let bar = Paragraph::new(Line::from(spans))
+            .block(focus_block(t!("account.actions"), focused));
+        f.render_widget(bar, area);
+    }
+
+    /// The status pane: signed-in identity, plan, the two rate-limit gauges,
+    /// and (Codex only) the reset-credit count.
+    fn draw_account_status(&self, f: &mut Frame, area: Rect, focused: bool) {
+        let agent = self.acc_selected_agent();
+        let data = self.account.agent(agent);
+
+        let block = focus_block(agent_name(agent).to_string(), focused);
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+
+        let sections = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(2),
+                Constraint::Length(3),
+                Constraint::Length(3),
+                Constraint::Min(2),
             ])
-            .style(Style::default().add_modifier(Modifier::BOLD)),
-        )
-        .block(Block::default().borders(Borders::ALL));
-        f.render_widget(table, rows[1]);
+            .split(inner);
+
+        // Header: signed-in email + plan.
+        let signed = match data.identity.as_ref().and_then(|i| i.email.as_deref()) {
+            Some(email) => t!("account.signed_in", email = email).into_owned(),
+            None => t!("account.not_signed_in").into_owned(),
+        };
+        let header = Paragraph::new(vec![
+            Line::from(signed),
+            Line::from(t!("account.plan", plan = self.account_plan(agent)).into_owned()),
+        ]);
+        f.render_widget(header, sections[0]);
+
+        // The two windows (5-hour, weekly) as gauges.
+        let status = data.status.as_ref();
+        self.draw_window(
+            f,
+            sections[1],
+            t!("account.five_hour").into_owned(),
+            status.and_then(|s| s.five_hour.as_ref()),
+        );
+        self.draw_window(
+            f,
+            sections[2],
+            t!("account.weekly").into_owned(),
+            status.and_then(|s| s.weekly.as_ref()),
+        );
+
+        // Notes: reset credits (Codex) + capture time / no-data.
+        let mut lines: Vec<Line> = Vec::new();
+        if status.is_none() {
+            lines.push(Line::from(t!("account.no_data").into_owned()).fg(Color::DarkGray));
+        }
+        if agent == Agent::Codex {
+            lines.push(Line::from(Span::styled(
+                t!("account.reset_credits").into_owned(),
+                Style::default().add_modifier(Modifier::BOLD),
+            )));
+            lines.push(self.credits_line());
+            lines.push(Line::from(t!("account.reset_credits_hint").into_owned()).fg(Color::DarkGray));
+        }
+        if let Some(ms) = status.and_then(|s| s.captured_at) {
+            lines.push(Line::from(fmt_captured(ms)).fg(Color::DarkGray));
+        }
+        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), sections[3]);
+    }
+
+    /// Draw one rate-limit window as a labelled gauge (or a dash when absent).
+    fn draw_window(&self, f: &mut Frame, area: Rect, label: String, window: Option<&RateWindow>) {
+        match window {
+            Some(w) => {
+                let used = w.used_percent.clamp(0.0, 100.0);
+                let text = t!(
+                    "account.window_line",
+                    label = &label,
+                    used = format!("{used:.0}"),
+                    left = format!("{:.0}", w.remaining_percent()),
+                    reset = fmt_reset(w.resets_at)
+                )
+                .into_owned();
+                let gauge = Gauge::default()
+                    .block(Block::default().borders(Borders::ALL).title(label))
+                    .gauge_style(Style::default().fg(severity_color(used)))
+                    .ratio(used / 100.0)
+                    .label(text);
+                f.render_widget(gauge, area);
+            }
+            None => {
+                let para = Paragraph::new(format!("{label}: —"))
+                    .block(Block::default().borders(Borders::ALL));
+                f.render_widget(para, area);
+            }
+        }
+    }
+
+    /// The reset-credit line, reflecting the (network-gated) fetch state.
+    fn credits_line(&self) -> Line<'static> {
+        match &self.acc_credits {
+            CreditsState::Loaded(n) => {
+                Line::from(t!("account.reset_credits_value", count = *n).into_owned())
+            }
+            CreditsState::Error(e) => {
+                Line::from(t!("account.reset_credits_error", err = e.clone()).into_owned())
+                    .fg(Color::Red)
+            }
+            CreditsState::Idle => {
+                Line::from(t!("account.reset_credits_press").into_owned()).fg(Color::DarkGray)
+            }
+        }
+    }
+
+    /// Resolve the plan label (rollout plan_type, then JWT plan, then "unknown").
+    fn account_plan(&self, agent: Agent) -> String {
+        let data = self.account.agent(agent);
+        data.status
+            .as_ref()
+            .and_then(|s| s.plan_type.clone())
+            .or_else(|| data.identity.as_ref().and_then(|i| i.plan_type.clone()))
+            .unwrap_or_else(|| t!("account.plan_unknown").into_owned())
     }
 
     fn draw_settings(&self, f: &mut Frame, area: Rect) {
@@ -1192,73 +1630,69 @@ fn health_table_row(r: HealthRow) -> Row<'static> {
     ])
 }
 
-fn group_table_row(g: &Group) -> Row<'static> {
-    let unpriced = if g.unpriced_tokens > 0 {
-        thousands(g.unpriced_tokens)
+/// Display name for an agent in the Account tab.
+fn agent_name(agent: Agent) -> &'static str {
+    match agent {
+        Agent::Codex => "Codex",
+        Agent::Claude => "Claude",
+    }
+}
+
+/// Brand color for an agent (Codex = light purple, Claude = orange).
+fn agent_color(agent: Agent) -> Color {
+    match agent {
+        Agent::Codex => CODEX_LABEL_COLOR,
+        Agent::Claude => CLAUDE_COLOR,
+    }
+}
+
+/// Brand color for a capsule-tree agent string ("Codex" / "ClaudeCode"), or
+/// `None` for an unrecognised agent.
+fn agent_label_color(name: &str) -> Option<Color> {
+    let lower = name.to_ascii_lowercase();
+    if lower.contains("codex") {
+        Some(CODEX_LABEL_COLOR)
+    } else if lower.contains("claude") {
+        Some(CLAUDE_COLOR)
     } else {
-        "-".to_string()
+        None
+    }
+}
+
+/// Gauge color by how used a window is: green < 70% < yellow < 90% < red.
+fn severity_color(used_percent: f64) -> Color {
+    if used_percent < 70.0 {
+        Color::Green
+    } else if used_percent < 90.0 {
+        Color::Yellow
+    } else {
+        Color::Red
+    }
+}
+
+/// A " · resets in 2h08m" suffix from a unix-seconds reset time (empty when
+/// unknown), used to annotate a window gauge.
+fn fmt_reset(resets_at: Option<i64>) -> String {
+    let Some(ts) = resets_at else {
+        return String::new();
     };
-    let key = if g.key.is_empty() { "(unknown)".to_string() } else { g.key.clone() };
-    Row::new([
-        Cell::from(key),
-        Cell::from(thousands(g.tokens.total())),
-        Cell::from(format!("{:.2}", g.cost_usd)),
-        Cell::from(unpriced),
-    ])
+    let secs = ts - chrono::Utc::now().timestamp();
+    if secs <= 0 {
+        return t!("account.reset_suffix", when = "now").into_owned();
+    }
+    let (h, m) = (secs / 3600, (secs % 3600) / 60);
+    let when = if h > 0 {
+        format!("{h}h{m:02}m")
+    } else {
+        format!("{m}m")
+    };
+    t!("account.reset_suffix", when = when).into_owned()
 }
 
-/// Pick which groups to chart: the most recent ~14 days for the Day dimension
-/// (chronological), otherwise the top ~12 buckets (already tokens-desc).
-fn chart_subset(dim: Dimension, groups: &[Group]) -> Vec<&Group> {
-    match dim {
-        // by_day is ascending; keep the last 14 in chronological order.
-        Dimension::Day => {
-            let start = groups.len().saturating_sub(14);
-            groups[start..].iter().collect()
-        }
-        // already sorted tokens-desc; take the biggest 12.
-        _ => groups.iter().take(12).collect(),
-    }
-}
-
-/// Shorten a group key to fit under a bar.
-fn short_label(dim: Dimension, key: &str) -> String {
-    if key.is_empty() {
-        return "?".to_string();
-    }
-    match dim {
-        // YYYY-MM-DD -> MM-DD
-        Dimension::Day => key.get(5..).unwrap_or(key).to_string(),
-        // basename of a path
-        Dimension::Project => key
-            .rsplit(['/', '\\'])
-            .next()
-            .filter(|s| !s.is_empty())
-            .unwrap_or(key)
-            .chars()
-            .take(10)
-            .collect(),
-        // strip a vendor prefix, cap length
-        Dimension::Model => key
-            .rsplit_once('-')
-            .map(|(_, tail)| tail)
-            .filter(|t| t.len() >= 2)
-            .unwrap_or(key)
-            .chars()
-            .take(10)
-            .collect(),
-        Dimension::Source => key.to_string(),
-    }
-}
-
-/// Bar width that fits `n` bars (with 1-cell gaps) into `width`, min 3.
-fn bar_width_for(width: u16, n: usize) -> u16 {
-    if n == 0 {
-        return 3;
-    }
-    let inner = width.saturating_sub(2); // borders
-    let per = inner / n as u16;
-    per.saturating_sub(1).clamp(3, 12)
+/// Local "as of MM-DD HH:MM" stamp for a unix-millis capture time.
+fn fmt_captured(ms: i64) -> String {
+    let dt = chrono::DateTime::from_timestamp_millis(ms).unwrap_or_default();
+    format!("· {}", dt.with_timezone(&chrono::Local).format("%m-%d %H:%M"))
 }
 
 /// Run `ai-handoff autostart on|off` as a detached child (no console window),
@@ -1304,17 +1738,6 @@ fn state_label(state: &str) -> String {
         "consumed" => t!("state.consumed").into_owned(),
         other => other.to_string(),
     }
-}
-
-/// Translated dimension name for the Usage tab.
-fn dim_label(dim: Dimension) -> String {
-    let key = match dim {
-        Dimension::Day => "dim.day",
-        Dimension::Model => "dim.model",
-        Dimension::Project => "dim.project",
-        Dimension::Source => "dim.source",
-    };
-    t!(key).into_owned()
 }
 
 /// Flip membership of `key` in `set` (insert if absent, remove if present).
@@ -1412,20 +1835,6 @@ fn human_tokens(n: u64) -> String {
     format!("{s}{suffix}")
 }
 
-/// Group digits in threes with commas.
-fn thousands(n: u64) -> String {
-    let digits = n.to_string();
-    let bytes = digits.as_bytes();
-    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
-    for (i, b) in bytes.iter().enumerate() {
-        if i > 0 && (bytes.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(*b as char);
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1517,28 +1926,116 @@ mod tests {
         assert_eq!(app.tab, Tab::Capsule);
     }
 
-    #[test]
-    fn chart_subset_keeps_recent_days_and_top_others() {
-        use ai_handoff_usage::aggregate::Group;
-        let days: Vec<Group> = (1..=20)
-            .map(|d| Group {
-                key: format!("2026-06-{d:02}"),
-                tokens: Default::default(),
-                cost_usd: 0.0,
-                unpriced_tokens: 0,
-                events: 1,
-            })
-            .collect();
-        let subset = chart_subset(Dimension::Day, &days);
-        assert_eq!(subset.len(), 14);
-        assert_eq!(subset.last().unwrap().key, "2026-06-20"); // newest kept, chronological
+    /// Build an app with an injected Codex account (one slot) for nav tests.
+    fn account_app() -> App {
+        let mut app = test_app();
+        app.account.codex = AgentAccount {
+            identity: Some(account::Identity {
+                email: Some("dev@example.com".into()),
+                account_id: Some("acc-1".into()),
+                plan_type: Some("pro".into()),
+            }),
+            status: Some(account::AccountStatus {
+                plan_type: Some("team".into()),
+                five_hour: Some(account::RateWindow {
+                    used_percent: 18.0,
+                    window_minutes: 300,
+                    resets_at: Some(chrono::Utc::now().timestamp() + 7_680),
+                }),
+                weekly: Some(account::RateWindow {
+                    used_percent: 61.0,
+                    window_minutes: 10080,
+                    resets_at: None,
+                }),
+                captured_at: Some(chrono::Utc::now().timestamp_millis()),
+            }),
+            slots: vec![
+                account::PoolSlot {
+                    label: "dev@example.com".into(),
+                    path: std::path::PathBuf::from("/p/dev.authsnap"),
+                    active: true,
+                },
+                account::PoolSlot {
+                    label: "alt@example.com".into(),
+                    path: std::path::PathBuf::from("/p/alt.authsnap"),
+                    active: false,
+                },
+            ],
+        };
+        app
     }
 
     #[test]
-    fn short_label_shortens_per_dimension() {
-        assert_eq!(short_label(Dimension::Day, "2026-06-17"), "06-17");
-        assert_eq!(short_label(Dimension::Project, "C:/code/my-proj"), "my-proj");
-        assert_eq!(short_label(Dimension::Source, "codex"), "codex");
+    fn account_rows_list_agents_slots_and_add() {
+        let app = account_app();
+        let rows = app.acc_rows();
+        // Codex: header + 2 slots + add (4) ; Claude: header + add (2) = 6.
+        assert_eq!(rows.len(), 6);
+        assert!(matches!(rows[0].target, AccTarget::Header(Agent::Codex)));
+        assert!(matches!(rows[1].target, AccTarget::Slot(Agent::Codex, 0)));
+        assert!(matches!(rows[3].target, AccTarget::Add(Agent::Codex)));
+        assert!(matches!(rows[4].target, AccTarget::Header(Agent::Claude)));
+        assert!(rows[1].label.contains("dev@example.com"));
+        // The active slot is annotated.
+        assert!(rows[1].label.contains(&t!("account.active").into_owned()));
+    }
+
+    #[test]
+    fn account_plan_prefers_rollout_then_jwt() {
+        let app = account_app();
+        // status.plan_type ("team") wins over identity.plan_type ("pro").
+        assert_eq!(app.account_plan(Agent::Codex), "team");
+        // Claude has neither here -> the translated "unknown".
+        assert_eq!(app.account_plan(Agent::Claude), t!("account.plan_unknown").into_owned());
+    }
+
+    #[test]
+    fn account_nav_enters_detail_on_a_slot_and_back() {
+        let mut app = account_app();
+        app.on_key(key(KeyCode::Char('3'))); // -> Account tab bar
+        assert_eq!(app.tab, Tab::Account);
+        assert!(!app.focus_content);
+        app.on_key(key(KeyCode::Down)); // descend into the tree
+        assert!(app.focus_content);
+        assert_eq!(app.acc_focus, AccFocus::Tree);
+        app.on_key(key(KeyCode::Down)); // move onto the first Codex slot
+        assert!(matches!(app.acc_target(), Some(AccTarget::Slot(Agent::Codex, 0))));
+        app.on_key(key(KeyCode::Enter)); // cross into the detail pane
+        assert_eq!(app.acc_focus, AccFocus::Detail);
+        app.on_key(key(KeyCode::Left)); // back to the tree
+        assert_eq!(app.acc_focus, AccFocus::Tree);
+    }
+
+    #[test]
+    fn window_line_interpolates_in_all_locales() {
+        for loc in ["en", "ko", "ja", "zh"] {
+            rust_i18n::set_locale(loc);
+            let s = t!(
+                "account.window_line",
+                label = "5h",
+                used = "18",
+                left = "82",
+                reset = " · resets in 2h"
+            )
+            .into_owned();
+            assert!(s.contains("82"), "{loc}: {s}");
+            assert!(s.contains("resets in 2h"), "{loc} dropped reset: {s}");
+            assert!(!s.contains("%{"), "{loc} leaked a placeholder: {s}");
+        }
+        rust_i18n::set_locale("en");
+    }
+
+    #[test]
+    fn account_delete_needs_confirm() {
+        let mut app = account_app();
+        app.tab = Tab::Account;
+        app.focus_content = true;
+        app.acc_sel = 1; // first Codex slot
+        app.acc_focus = AccFocus::Detail;
+        app.on_key(key(KeyCode::Char('d'))); // arm
+        assert!(app.acc_confirm_delete);
+        app.on_key(key(KeyCode::Char('x'))); // any other key disarms
+        assert!(!app.acc_confirm_delete);
     }
 
     #[test]
@@ -1588,7 +2085,7 @@ mod tests {
         rust_i18n::set_locale("ko");
         assert_eq!(t!("tab.overview"), "개요");
         rust_i18n::set_locale("ja");
-        assert_eq!(t!("tab.usage"), "使用量");
+        assert_eq!(t!("tab.account"), "アカウント");
         rust_i18n::set_locale("zh");
         assert_eq!(t!("tab.settings"), "设置");
         rust_i18n::set_locale("en");
@@ -1605,16 +2102,6 @@ mod tests {
         assert_eq!(app.tab, Tab::Settings);
         app.on_key(key(KeyCode::Char('1')));
         assert_eq!(app.tab, Tab::Overview);
-    }
-
-    #[test]
-    fn g_cycles_usage_dimension() {
-        let mut app = test_app();
-        app.tab = Tab::Usage;
-        app.focus_content = true; // 'g' only acts once inside the tab content
-        assert_eq!(app.usage_dim, Dimension::Day);
-        app.on_key(key(KeyCode::Char('g')));
-        assert_eq!(app.usage_dim, Dimension::Model);
     }
 
     #[test]

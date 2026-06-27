@@ -1,4 +1,5 @@
 // modules added per task
+pub mod account;
 pub mod capsule;
 pub mod config;
 pub mod dashboard;
