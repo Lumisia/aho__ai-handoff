@@ -58,6 +58,11 @@ pub enum Commands {
         #[arg(value_enum)]
         action: AutostartAction,
     },
+    /// Inspect saved accounts and live status (add/switch/launch live in the TUI).
+    Account {
+        #[command(subcommand)]
+        action: AccountAction,
+    },
     /// Show estimated token usage from local Claude + Codex logs.
     Usage {
         /// Break down by this dimension instead of the default summary.
@@ -97,6 +102,25 @@ pub enum ConfigAction {
     Set { key: String, value: String },
     /// List every editable key with its effective value.
     List,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AccountAction {
+    /// List saved account slots for both agents.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the signed-in account + live plan/limits for both agents.
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Diagnose account setup (sign-in, vault slots, vendor CLIs on PATH).
+    Doctor {
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -165,6 +189,7 @@ pub fn run_cli(cli: Cli) -> anyhow::Result<i32> {
         Some(Commands::Statusline) => commands::statusline::run(),
         Some(Commands::Autostart { action }) => commands::autostart::run_cli(action),
         Some(Commands::Config { action }) => commands::config::run(action),
+        Some(Commands::Account { action }) => commands::account::run(action),
         Some(Commands::Usage {
             group_by,
             source,
@@ -311,6 +336,22 @@ mod tests {
         let legacy = Cli::try_parse_from(["ai-handoff", "install", "--no-plugin"]).unwrap();
         match legacy.command {
             Some(Commands::Install { no_plugin, .. }) => assert!(no_plugin),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_account_actions() {
+        match Cli::parse_from(["ai-handoff", "account", "list", "--json"]).command {
+            Some(Commands::Account { action: AccountAction::List { json } }) => assert!(json),
+            other => panic!("unexpected command: {other:?}"),
+        }
+        match Cli::parse_from(["ai-handoff", "account", "status"]).command {
+            Some(Commands::Account { action: AccountAction::Status { json } }) => assert!(!json),
+            other => panic!("unexpected command: {other:?}"),
+        }
+        match Cli::parse_from(["ai-handoff", "account", "doctor"]).command {
+            Some(Commands::Account { action: AccountAction::Doctor { .. } }) => {}
             other => panic!("unexpected command: {other:?}"),
         }
     }

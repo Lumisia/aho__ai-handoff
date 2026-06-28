@@ -28,7 +28,9 @@ pub fn add_account(agent: Agent) -> Result<String, String> {
         );
     }
     let (program, args, var) = login_command(agent);
-    let status = Command::new(program)
+    let exe = account::which(program)
+        .ok_or_else(|| format!("`{program}` not found on PATH — install it first"))?;
+    let status = Command::new(exe)
         .args(args)
         .env(var, &home)
         .status()
@@ -47,7 +49,9 @@ pub fn launch(agent: Agent, label: &str) -> Result<(), String> {
     let (var, home) = account::profile_env(agent, label);
     let _ = std::fs::create_dir_all(&home);
     let program = agent_program(agent);
-    Command::new(program)
+    let exe = account::which(program)
+        .ok_or_else(|| format!("`{program}` not found on PATH — install it first"))?;
+    Command::new(exe)
         .env(var, &home)
         .status()
         .map_err(|e| format!("could not launch `{program}`: {e}"))?;

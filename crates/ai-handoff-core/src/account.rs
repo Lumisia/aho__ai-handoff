@@ -130,6 +130,29 @@ pub fn claude_home() -> Option<PathBuf> {
     user_home().map(|h| h.join(".claude"))
 }
 
+/// Resolve a CLI program on `PATH`, honoring Windows `PATHEXT` so `.cmd`/`.bat`
+/// shims (e.g. npm-installed `codex`/`claude`) are found — `std::process` only
+/// appends `.exe` by itself. Returns the bare name's full path, or `None`.
+pub fn which(program: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let direct = dir.join(program);
+        if direct.is_file() {
+            return Some(direct);
+        }
+        if cfg!(windows) {
+            let exts = std::env::var("PATHEXT").unwrap_or_else(|_| ".EXE;.CMD;.BAT".into());
+            for ext in exts.split(';').filter(|e| !e.is_empty()) {
+                let cand = dir.join(format!("{program}{}", ext.to_ascii_lowercase()));
+                if cand.is_file() {
+                    return Some(cand);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// The live auth file an agent reads on startup.
 fn live_auth_path(agent: Agent) -> Option<PathBuf> {
     match agent {
