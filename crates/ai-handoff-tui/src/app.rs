@@ -356,6 +356,19 @@ impl App {
     /// Suspend the TUI, run an interactive vendor CLI, then restore and refresh.
     fn run_suspended(&mut self, pending: Pending, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
         ratatui::restore();
+        // Wipe the main screen + scrollback so prior login output doesn't pile up
+        // each time an account is added.
+        {
+            use std::io::Write;
+            let mut out = std::io::stdout();
+            let _ = crossterm::execute!(
+                out,
+                crossterm::terminal::Clear(crossterm::terminal::ClearType::Purge),
+                crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
+                crossterm::cursor::MoveTo(0, 0),
+            );
+            let _ = out.flush();
+        }
         let status = match &pending {
             Pending::AddAccount(agent) => match crate::account_login::add_account(*agent) {
                 Ok(label) => t!("status.account_captured", label = label).into_owned(),
@@ -1532,53 +1545,70 @@ impl App {
         f.render_widget(bar, area);
     }
 
-    /// The status pane: signed-in identity, plan, the two rate-limit gauges,
-    /// and (Codex only) the reset-credit count.
+    /// The status pane reflects the **selected** row: a saved account's details
+    /// (live limits only when it is the active one), or an agent summary on the
+    /// header / add rows.
     fn draw_account_status(&self, f: &mut Frame, area: Rect, focused: bool) {
-        let agent = self.acc_selected_agent();
-        let data = self.account.agent(agent);
+        match self.acc_target() {
+            Some(AccTarget::Slot(agent, i)) => self.draw_slot_detail(f, area, focused, agent, i),
+            _ => self.draw_agent_summary(f, area, focused, self.acc_selected_agent()),
+        }
+    }
 
+    /// Details for one saved account. Live plan/limits/credits show only when the
+    /// slot is the active account (the live data belongs to whoever is signed in).
+    fn draw_slot_detail(&self, f: &mut Frame, area: Rect, focused: bool, agent: Agent, i: usize) {
+        let data = self.account.agent(agent);
+        let Some(slot) = data.slots.get(i) else {
+            return self.draw_agent_summary(f, area, focused, agent);
+        };
         let block = focus_block(agent_name(agent).to_string(), focused);
         let inner = block.inner(area);
         f.render_widget(block, area);
 
+        let active = slot.active;
+        let constraints: Vec<Constraint> = if active {
+            vec![Constraint::Length(2), Constraint::Length(3), Constraint::Length(3), Constraint::Min(2)]
+        } else {
+            vec![Constraint::Length(2), Constraint::Min(2)]
+        };
         let sections = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(2),
-                Constraint::Length(3),
-                Constraint::Length(3),
-                Constraint::Min(2),
-            ])
+            .constraints(constraints)
             .split(inner);
 
-        // Header: signed-in email + plan.
-        let signed = match data.identity.as_ref().and_then(|i| i.email.as_deref()) {
-            Some(email) => t!("account.signed_in", email = email).into_owned(),
-            None => t!("account.not_signed_in").into_owned(),
+        // Header: this account's email + plan (live plan when active, else meta).
+        let email = slot.meta.email.as_deref().unwrap_or(&slot.meta.label);
+        let mut account_line = t!("account.account_line", email = email).into_owned();
+        if active {
+            account_line.push_str(&format!("  [{}]", t!("account.active")));
+        }
+        let plan = if active {
+            self.account_plan(agent)
+        } else {
+            slot.meta.plan_hint.clone().unwrap_or_else(|| t!("account.plan_unknown").into_owned())
         };
         let header = Paragraph::new(vec![
-            Line::from(signed),
-            Line::from(t!("account.plan", plan = self.account_plan(agent)).into_owned()),
+            Line::from(account_line),
+            Line::from(t!("account.plan", plan = plan).into_owned()),
         ]);
         f.render_widget(header, sections[0]);
 
-        // The two windows (5-hour, weekly) as gauges.
-        let status = data.status.as_ref();
-        self.draw_window(
-            f,
-            sections[1],
-            t!("account.five_hour").into_owned(),
-            status.and_then(|s| s.five_hour.as_ref()),
-        );
-        self.draw_window(
-            f,
-            sections[2],
-            t!("account.weekly").into_owned(),
-            status.and_then(|s| s.weekly.as_ref()),
-        );
+        if !active {
+            f.render_widget(
+                Paragraph::new(t!("account.inactive_hint").into_owned())
+                    .wrap(Wrap { trim: true })
+                    .fg(Color::DarkGray),
+                sections[1],
+            );
+            return;
+        }
 
-        // Notes: reset credits (Codex) + capture time / no-data.
+        // Active account: live 5-hour / weekly gauges + (Codex) reset credits.
+        let status = data.status.as_ref();
+        self.draw_window(f, sections[1], t!("account.five_hour").into_owned(), status.and_then(|s| s.five_hour.as_ref()));
+        self.draw_window(f, sections[2], t!("account.weekly").into_owned(), status.and_then(|s| s.weekly.as_ref()));
+
         let mut lines: Vec<Line> = Vec::new();
         if status.is_none() {
             lines.push(Line::from(t!("account.no_data").into_owned()).fg(Color::DarkGray));
@@ -1595,6 +1625,24 @@ impl App {
             lines.push(Line::from(fmt_captured(ms)).fg(Color::DarkGray));
         }
         f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), sections[3]);
+    }
+
+    /// A neutral summary for an agent header / add row (no live identity, so an
+    /// un-added agent never looks "signed in").
+    fn draw_agent_summary(&self, f: &mut Frame, area: Rect, focused: bool, agent: Agent) {
+        let data = self.account.agent(agent);
+        let block = focus_block(agent_name(agent).to_string(), focused);
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+
+        let mut lines = vec![Line::from(
+            t!("account.summary_count", count = data.slots.len()).into_owned(),
+        )];
+        if let Some(email) = data.slots.iter().find(|s| s.active).and_then(|s| s.meta.email.clone()) {
+            lines.push(Line::from(t!("account.summary_active", email = email).into_owned()));
+        }
+        lines.push(Line::from(t!("account.summary_add_hint").into_owned()).fg(Color::DarkGray));
+        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
     }
 
     /// Draw one rate-limit window as a labelled gauge (or a dash when absent).

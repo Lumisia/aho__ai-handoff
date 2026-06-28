@@ -599,6 +599,31 @@ account.signed_in:
   ko: "로그인: %{email}"
   ja: "サインイン: %{email}"
   zh: "已登录: %{email}"
+account.account_line:
+  en: "Account: %{email}"
+  ko: "계정: %{email}"
+  ja: "アカウント: %{email}"
+  zh: "账户: %{email}"
+account.inactive_hint:
+  en: "Not the active account — press s to switch, then plan/limits show here."
+  ko: "활성 계정 아님 — s로 전환하면 플랜·한도가 여기 표시됩니다."
+  ja: "アクティブではありません — s で切替えるとプラン・制限が表示されます。"
+  zh: "非当前账户 — 按 s 切换后这里显示套餐与限额。"
+account.summary_count:
+  en: "%{count} saved account(s)"
+  ko: "저장된 계정 %{count}개"
+  ja: "保存済みアカウント %{count}件"
+  zh: "已保存 %{count} 个账户"
+account.summary_active:
+  en: "active: %{email}"
+  ko: "활성: %{email}"
+  ja: "アクティブ: %{email}"
+  zh: "当前: %{email}"
+account.summary_add_hint:
+  en: "Press a (or +) to add an account · Enter on one to see its details."
+  ko: "a (또는 +) 로 계정 추가 · 계정에서 Enter로 상세 보기."
+  ja: "a（または +）でアカウント追加 · アカウントで Enter で詳細。"
+  zh: "按 a（或 +）添加账户 · 在账户上按 Enter 查看详情。"
 account.not_signed_in:
   en: "Not signed in"
   ko: "로그인 안 됨"
