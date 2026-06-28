@@ -270,7 +270,8 @@ fn identity_from_auth(value: &Value) -> Option<Identity> {
                 .and_then(|a| a.get("chatgpt_account_id"))
                 .and_then(Value::as_str)
                 .map(String::from)
-        });
+        })
+        .or_else(|| auth_ns.and_then(default_organization_id));
     let plan_type = auth_ns
         .and_then(|a| a.get("chatgpt_plan_type"))
         .and_then(Value::as_str)
@@ -304,6 +305,16 @@ fn request_auth_from_path(path: &Path) -> Option<(String, Option<String>)> {
     let access_token = value.get("tokens")?.get("access_token")?.as_str()?.to_string();
     let account_id = identity_from_auth(&value).and_then(|i| i.account_id);
     Some((access_token, account_id))
+}
+
+fn default_organization_id(auth: &Value) -> Option<String> {
+    let orgs = auth.get("organizations")?.as_array()?;
+    orgs.iter()
+        .find(|org| org.get("is_default").and_then(Value::as_bool).unwrap_or(false))
+        .or_else(|| orgs.first())
+        .and_then(|org| org.get("id").or_else(|| org.get("account_id")))
+        .and_then(Value::as_str)
+        .map(String::from)
 }
 
 // ---------------------------------------------------------------------------
@@ -494,7 +505,10 @@ pub fn save_slot(
 
 fn label_from_identity(agent: Agent, identity: Option<&Identity>) -> String {
     identity
-        .and_then(|i| i.email.clone().or_else(|| i.account_id.clone()))
+        .and_then(|i| match agent {
+            Agent::Codex => i.account_id.clone().or_else(|| i.email.clone()),
+            Agent::Claude => i.email.clone().or_else(|| i.account_id.clone()),
+        })
         .unwrap_or_else(|| format!("{}-account", agent.dir()))
 }
 
@@ -771,6 +785,48 @@ mod tests {
         });
         let id = identity_from_auth(&auth).expect("identity");
         assert_eq!(id.account_id.as_deref(), Some("explicit"));
+    }
+
+    #[test]
+    fn identity_uses_default_organization_as_account_id_fallback() {
+        let claims = r#"{
+            "email": "same@example.com",
+            "https://api.openai.com/auth": {
+                "organizations": [
+                    { "id": "acc-other", "is_default": false },
+                    { "id": "acc-default", "is_default": true }
+                ]
+            }
+        }"#;
+        let auth = serde_json::json!({
+            "tokens": { "id_token": fake_jwt(claims), "access_token": "secret-xyz" }
+        });
+        let id = identity_from_auth(&auth).expect("identity");
+        assert_eq!(id.account_id.as_deref(), Some("acc-default"));
+    }
+
+    #[test]
+    fn codex_slot_label_prefers_account_id_over_email() {
+        let personal = Identity {
+            email: Some("same@example.com".into()),
+            account_id: Some("acc-personal".into()),
+            plan_type: Some("plus".into()),
+        };
+        let work = Identity {
+            email: Some("same@example.com".into()),
+            account_id: Some("acc-work".into()),
+            plan_type: Some("business".into()),
+        };
+
+        assert_eq!(
+            label_from_identity(Agent::Codex, Some(&personal)),
+            "acc-personal"
+        );
+        assert_eq!(label_from_identity(Agent::Codex, Some(&work)), "acc-work");
+        assert_ne!(
+            label_from_identity(Agent::Codex, Some(&personal)),
+            label_from_identity(Agent::Codex, Some(&work))
+        );
     }
 
     #[test]

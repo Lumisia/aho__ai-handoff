@@ -949,10 +949,11 @@ impl App {
                 target: AccTarget::Header(agent),
             });
             for (i, slot) in data.slots.iter().enumerate() {
+                let display = slot.meta.email.as_deref().unwrap_or(&slot.meta.label);
                 let label = if slot.active {
-                    format!("• {}  [{}]", slot.meta.label, t!("account.active"))
+                    format!("• {}  [{}]", display, t!("account.active"))
                 } else {
-                    format!("• {}", slot.meta.label)
+                    format!("• {}", display)
                 };
                 rows.push(AccRow {
                     indent: 2,
@@ -2116,6 +2117,34 @@ mod tests {
         assert!(rows[1].label.contains("dev@example.com"));
         // The active slot is annotated.
         assert!(rows[1].label.contains(&t!("account.active").into_owned()));
+    }
+
+    #[test]
+    fn account_rows_show_email_when_slot_key_is_account_id() {
+        let mut app = test_app();
+        app.account.codex = AgentAccount {
+            status: None,
+            slots: vec![account::AccountSlot {
+                meta: account::AccountMeta {
+                    schema_version: 1,
+                    agent: "codex".into(),
+                    label: "acc-work".into(),
+                    email: Some("work@example.com".into()),
+                    plan_hint: Some("business".into()),
+                    account_id: Some("acc-work".into()),
+                    workspace_id: None,
+                    created_at: None,
+                    last_verified_at: None,
+                    source: None,
+                },
+                dir: std::path::PathBuf::from("/p/acc-work"),
+                active: false,
+            }],
+        };
+
+        let rows = app.acc_rows();
+        assert!(rows[1].label.contains("work@example.com"));
+        assert!(!rows[1].label.contains("acc-work"));
     }
 
     #[test]
