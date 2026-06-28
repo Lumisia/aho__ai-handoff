@@ -13,15 +13,27 @@
 //!      rate_limit_reset_credits: { available_count } }
 //! ```
 //!
+//! Reset-credit expiration details are fetched from:
+//!
+//! ```text
+//! GET https://chatgpt.com/backend-api/wham/rate-limit-reset-credits
+//!   Authorization: Bearer <access_token>
+//!   ChatGPT-Account-Id: <account_id>
+//! -> { credits: [{ granted_at, expires_at }] }
+//! ```
+//!
 //! The token comes from the slot's stored `auth.json` and is used only to set
 //! the header here — never logged, displayed, or returned.
 
+use std::cmp::Ordering;
 use std::time::Duration;
 
 use ai_handoff_core::account::{self, Agent, RateWindow};
+use chrono::DateTime;
 use serde_json::Value;
 
 const USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
+const RESET_CREDITS_URL: &str = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
 
 /// One account's usage snapshot from the backend.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -30,6 +42,14 @@ pub struct UsageData {
     pub five_hour: Option<RateWindow>,
     pub weekly: Option<RateWindow>,
     pub reset_credits: Option<i64>,
+    pub reset_credit_details: Vec<ResetCredit>,
+}
+
+/// One reset credit returned by `wham/rate-limit-reset-credits`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ResetCredit {
+    pub granted_at: String,
+    pub expires_at: String,
 }
 
 /// Fetch usage for a saved slot, using that slot's stored token.
@@ -54,7 +74,15 @@ fn fetch_usage(access_token: &str, account_id: Option<&str>) -> Result<UsageData
     match req.call() {
         Ok(resp) => {
             let body: Value = resp.into_json().map_err(|_| "bad response".to_string())?;
-            Ok(parse_usage(&body))
+            let mut usage = parse_usage(&body);
+            if usage.reset_credits.unwrap_or(0) > 0 {
+                if let Some(acc) = account_id {
+                    if let Ok(details) = fetch_reset_credit_details(&agent, access_token, acc) {
+                        usage.reset_credit_details = details;
+                    }
+                }
+            }
+            Ok(usage)
         }
         Err(ureq::Error::Status(401, _)) | Err(ureq::Error::Status(403, _)) => {
             Err("auth expired — re-add this account".to_string())
@@ -84,13 +112,75 @@ fn parse_usage(body: &Value) -> UsageData {
         })
     };
     UsageData {
-        plan: body.get("plan_type").and_then(Value::as_str).map(String::from),
+        plan: body
+            .get("plan_type")
+            .and_then(Value::as_str)
+            .map(String::from),
         five_hour: window("primary_window"),
         weekly: window("secondary_window"),
         reset_credits: body
             .get("rate_limit_reset_credits")
             .and_then(|c| c.get("available_count"))
             .and_then(Value::as_i64),
+        reset_credit_details: Vec::new(),
+    }
+}
+
+fn fetch_reset_credit_details(
+    agent: &ureq::Agent,
+    access_token: &str,
+    account_id: &str,
+) -> Result<Vec<ResetCredit>, String> {
+    match agent
+        .get(RESET_CREDITS_URL)
+        .set("Authorization", &format!("Bearer {access_token}"))
+        .set("ChatGPT-Account-Id", account_id)
+        .call()
+    {
+        Ok(resp) => {
+            let body: Value = resp.into_json().map_err(|_| "bad response".to_string())?;
+            Ok(parse_reset_credit_details(&body))
+        }
+        Err(ureq::Error::Status(401, _)) | Err(ureq::Error::Status(403, _)) => {
+            Err("auth expired — re-add this account".to_string())
+        }
+        Err(ureq::Error::Status(code, _)) => Err(format!("http {code}")),
+        Err(_) => Err("network error".to_string()),
+    }
+}
+
+fn parse_reset_credit_details(body: &Value) -> Vec<ResetCredit> {
+    let mut credits: Vec<ResetCredit> = body
+        .get("credits")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|raw| {
+            let granted_at = raw.get("granted_at").and_then(Value::as_str)?;
+            let expires_at = raw.get("expires_at").and_then(Value::as_str)?;
+            Some(ResetCredit {
+                granted_at: granted_at.to_string(),
+                expires_at: expires_at.to_string(),
+            })
+        })
+        .collect();
+    credits.sort_by(|a, b| {
+        cmp_credit_datetime(&a.expires_at, &b.expires_at)
+            .then_with(|| cmp_credit_datetime(&a.granted_at, &b.granted_at))
+    });
+    credits
+}
+
+fn cmp_credit_datetime(a: &str, b: &str) -> Ordering {
+    match (
+        DateTime::parse_from_rfc3339(a),
+        DateTime::parse_from_rfc3339(b),
+    ) {
+        (Ok(a), Ok(b)) => a
+            .timestamp()
+            .cmp(&b.timestamp())
+            .then_with(|| a.timestamp_subsec_nanos().cmp(&b.timestamp_subsec_nanos())),
+        _ => a.cmp(b),
     }
 }
 
@@ -126,5 +216,44 @@ mod tests {
         assert!(u.five_hour.is_none());
         assert!(u.weekly.is_none());
         assert!(u.reset_credits.is_none());
+    }
+
+    #[test]
+    fn parse_reset_credit_details_sorts_by_expiration() {
+        let body = serde_json::json!({
+            "credits": [
+                { "granted_at": "2026-06-27T00:00:00Z", "expires_at": "2026-07-27T00:00:00Z" },
+                { "granted_at": "2026-06-18T00:00:00Z", "expires_at": "2026-07-18T00:00:00Z" },
+                { "granted_at": "2026-06-18T00:00:01Z", "expires_at": "2026-07-18T09:00:00+09:00" },
+                { "granted_at": "2026-06-19T00:00:00Z", "expires_at": "2026-07-19T00:00:00Z" },
+                { "granted_at": "bad" },
+                null
+            ],
+            "rate_limit_reset_credits": { "available_count": 4 }
+        });
+
+        let credits = parse_reset_credit_details(&body);
+        assert_eq!(credits.len(), 4);
+        assert_eq!(
+            credits,
+            vec![
+                ResetCredit {
+                    granted_at: "2026-06-18T00:00:00Z".into(),
+                    expires_at: "2026-07-18T00:00:00Z".into(),
+                },
+                ResetCredit {
+                    granted_at: "2026-06-18T00:00:01Z".into(),
+                    expires_at: "2026-07-18T09:00:00+09:00".into(),
+                },
+                ResetCredit {
+                    granted_at: "2026-06-19T00:00:00Z".into(),
+                    expires_at: "2026-07-19T00:00:00Z".into(),
+                },
+                ResetCredit {
+                    granted_at: "2026-06-27T00:00:00Z".into(),
+                    expires_at: "2026-07-27T00:00:00Z".into(),
+                },
+            ]
+        );
     }
 }

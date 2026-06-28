@@ -215,7 +215,10 @@ fn parse_rate_limits(record: &Value) -> Option<AccountStatus> {
         .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
         .map(|dt| dt.timestamp_millis());
     Some(AccountStatus {
-        plan_type: rl.get("plan_type").and_then(Value::as_str).map(String::from),
+        plan_type: rl
+            .get("plan_type")
+            .and_then(Value::as_str)
+            .map(String::from),
         five_hour: rl.get("primary").and_then(&window),
         weekly: rl.get("secondary").and_then(&window),
         captured_at,
@@ -302,7 +305,11 @@ pub fn slot_request_auth(agent: Agent, label: &str) -> Option<(String, Option<St
 /// Read `(access_token, account_id)` from a Codex `auth.json` at `path`.
 fn request_auth_from_path(path: &Path) -> Option<(String, Option<String>)> {
     let value: Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
-    let access_token = value.get("tokens")?.get("access_token")?.as_str()?.to_string();
+    let access_token = value
+        .get("tokens")?
+        .get("access_token")?
+        .as_str()?
+        .to_string();
     let account_id = identity_from_auth(&value).and_then(|i| i.account_id);
     Some((access_token, account_id))
 }
@@ -310,7 +317,11 @@ fn request_auth_from_path(path: &Path) -> Option<(String, Option<String>)> {
 fn default_organization_id(auth: &Value) -> Option<String> {
     let orgs = auth.get("organizations")?.as_array()?;
     orgs.iter()
-        .find(|org| org.get("is_default").and_then(Value::as_bool).unwrap_or(false))
+        .find(|org| {
+            org.get("is_default")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
         .or_else(|| orgs.first())
         .and_then(|org| org.get("id").or_else(|| org.get("account_id")))
         .and_then(Value::as_str)
@@ -349,12 +360,16 @@ pub fn claude_identity() -> Option<Identity> {
 // Claude usage (statusline samples captured by the hook)
 // ---------------------------------------------------------------------------
 
-/// The latest Claude 5-hour usage sample (recorded by the statusline hook).
-/// Claude does not expose a weekly window locally, so `weekly` is `None`.
+/// The latest Claude usage sample (recorded by the statusline hook).
 pub fn claude_status() -> Option<AccountStatus> {
     let now_ms = chrono::Utc::now().timestamp_millis();
     // Accept samples up to a day old so the tab still shows the last reading.
     let usage = crate::sensor::read_claude_rate_limit(24 * 60 * 60 * 1000, now_ms)?;
+    let weekly = usage.weekly.map(|w| RateWindow {
+        used_percent: w.used_percent,
+        window_minutes: w.window_minutes as u64,
+        resets_at: w.resets_at.map(|r| r as i64),
+    });
     Some(AccountStatus {
         plan_type: None,
         five_hour: Some(RateWindow {
@@ -362,7 +377,7 @@ pub fn claude_status() -> Option<AccountStatus> {
             window_minutes: usage.window_minutes as u64,
             resets_at: usage.resets_at.map(|r| r as i64),
         }),
-        weekly: None,
+        weekly,
         captured_at: Some(usage.captured_at),
     })
 }
@@ -406,7 +421,13 @@ pub fn profile_env(agent: Agent, label: &str) -> (&'static str, PathBuf) {
 fn sanitize(label: &str) -> String {
     let s: String = label
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '@' | '.' | '_' | '-') { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '@' | '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     let s = s.trim_matches('_').to_string();
     if s.is_empty() {
@@ -441,7 +462,11 @@ pub fn list_slots(agent: Agent) -> Vec<AccountSlot> {
             Ok(b) => b,
             Err(_) => continue, // not a credential slot
         };
-        let label = dir.file_name().and_then(|s| s.to_str()).unwrap_or("?").to_string();
+        let label = dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("?")
+            .to_string();
         let meta = read_meta(&dir).unwrap_or(AccountMeta {
             schema_version: 1,
             agent: agent.dir().to_string(),
@@ -557,7 +582,8 @@ pub fn login_complete(agent: Agent, profile_home: &Path) -> bool {
 
 /// Read the Claude account email/plan from a config dir's `.claude.json`.
 fn claude_identity_from_dir(dir: &Path) -> Option<Identity> {
-    let value: Value = serde_json::from_slice(&std::fs::read(dir.join(".claude.json")).ok()?).ok()?;
+    let value: Value =
+        serde_json::from_slice(&std::fs::read(dir.join(".claude.json")).ok()?).ok()?;
     let email = value
         .get("oauthAccount")
         .and_then(|a| a.get("emailAddress"))
@@ -609,17 +635,24 @@ fn patch_claude_oauth_account(email: Option<String>) -> std::io::Result<()> {
     let Some(path) = user_home().map(|h| h.join(".claude.json")) else {
         return Ok(());
     };
-    let Ok(bytes) = std::fs::read(&path) else { return Ok(()) };
+    let Ok(bytes) = std::fs::read(&path) else {
+        return Ok(());
+    };
     let Ok(mut value) = serde_json::from_slice::<Value>(&bytes) else {
         return Ok(());
     };
-    let Some(obj) = value.as_object_mut() else { return Ok(()) };
+    let Some(obj) = value.as_object_mut() else {
+        return Ok(());
+    };
     match obj.get_mut("oauthAccount").and_then(|a| a.as_object_mut()) {
         Some(acc) => {
             acc.insert("emailAddress".into(), Value::String(email));
         }
         None => {
-            obj.insert("oauthAccount".into(), serde_json::json!({ "emailAddress": email }));
+            obj.insert(
+                "oauthAccount".into(),
+                serde_json::json!({ "emailAddress": email }),
+            );
         }
     }
     let json = serde_json::to_vec_pretty(&value).map_err(std::io::Error::other)?;
@@ -647,7 +680,9 @@ fn running_process_names() -> Vec<String> {
         .args(["/FO", "CSV", "/NH"])
         .output();
     #[cfg(not(windows))]
-    let output = std::process::Command::new("ps").args(["-A", "-o", "comm="]).output();
+    let output = std::process::Command::new("ps")
+        .args(["-A", "-o", "comm="])
+        .output();
     match output {
         Ok(o) => parse_process_names(&String::from_utf8_lossy(&o.stdout).to_lowercase()),
         Err(_) => Vec::new(),
@@ -761,6 +796,34 @@ mod tests {
     }
 
     #[test]
+    fn claude_status_maps_statusline_seven_day_to_weekly() {
+        let _guard = crate::test_support::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let input = serde_json::json!({
+            "session_id": "claude-weekly",
+            "rate_limits": {
+                "five_hour": { "used_percentage": 20.0 },
+                "seven_day": {
+                    "used_percentage": 45.0,
+                    "resets_at": 1_900_000_000.0
+                }
+            }
+        });
+        assert!(crate::sensor::record_claude_rate_limit(&input, now_ms));
+
+        let status = claude_status().expect("claude status");
+        let weekly = status.weekly.expect("weekly status");
+        assert_eq!(weekly.used_percent, 45.0);
+        assert_eq!(weekly.window_minutes, 10080);
+        assert_eq!(weekly.resets_at, Some(1_900_000_000));
+
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
     fn identity_decodes_email_plan_and_account_from_jwt() {
         let claims = r#"{
             "email": "dev@example.com",
@@ -835,7 +898,11 @@ mod tests {
         let csv = "\"codex.exe\",\"1234\",\"console\",\"1\",\"50,000 k\"\n\"explorer.exe\",\"42\",\"console\",\"1\",\"9 k\"\n";
         // Unix `ps -o comm=` style.
         let ps = "codex\nclaude\nbash\n";
-        let names = if cfg!(windows) { parse_process_names(csv) } else { parse_process_names(ps) };
+        let names = if cfg!(windows) {
+            parse_process_names(csv)
+        } else {
+            parse_process_names(ps)
+        };
         assert!(names.iter().any(|n| n.contains("codex")));
     }
 
@@ -856,7 +923,11 @@ mod tests {
 
         // Two distinct live auth files captured as two slots.
         let live = codex.path().join("auth.json");
-        std::fs::write(&live, br#"{"tokens":{"id_token":"x","account_id":"alice"}}"#).unwrap();
+        std::fs::write(
+            &live,
+            br#"{"tokens":{"id_token":"x","account_id":"alice"}}"#,
+        )
+        .unwrap();
         let a = snapshot_current(Agent::Codex).unwrap();
         assert_eq!(a, "alice");
 
@@ -871,13 +942,25 @@ mod tests {
         assert!(bob.active, "bob snapshot matches live bytes");
         assert_eq!(bob.meta.account_id.as_deref(), Some("bob"));
         assert_eq!(bob.meta.source.as_deref(), Some("capture-current"));
-        assert!(!slots.iter().find(|s| s.meta.label == "alice").unwrap().active);
+        assert!(
+            !slots
+                .iter()
+                .find(|s| s.meta.label == "alice")
+                .unwrap()
+                .active
+        );
 
         // Switch back to alice: the live file now matches the alice snapshot.
         switch_slot(Agent::Codex, "alice").unwrap();
         let live_bytes = std::fs::read(&live).unwrap();
         assert!(live_bytes.windows(5).any(|w| w == b"alice"));
-        assert!(list_slots(Agent::Codex).iter().find(|s| s.meta.label == "alice").unwrap().active);
+        assert!(
+            list_slots(Agent::Codex)
+                .iter()
+                .find(|s| s.meta.label == "alice")
+                .unwrap()
+                .active
+        );
 
         // Delete bob; only alice remains (idempotent on a second delete).
         delete_slot(Agent::Codex, "bob").unwrap();

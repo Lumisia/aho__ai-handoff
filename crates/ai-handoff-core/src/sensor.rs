@@ -25,10 +25,19 @@ fn parse_used_percent_line(line: &str) -> Option<f64> {
 // ---------------------------------------------------------------------------
 
 /// A Claude rate-limit sample captured from the statusline payload.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClaudeWindow {
+    pub used_percent: f64,
+    pub window_minutes: u32,
+    pub resets_at: Option<f64>,
+}
+
+/// A Claude rate-limit sample captured from the statusline payload.
 pub struct ClaudeUsage {
     pub used_percent: f64,
     pub window_minutes: u32,
     pub resets_at: Option<f64>,
+    pub weekly: Option<ClaudeWindow>,
     pub source: &'static str,
     pub captured_at: i64,
 }
@@ -47,12 +56,30 @@ fn sha256_hex(s: &str) -> String {
     hex
 }
 
+fn statusline_window(
+    input: &serde_json::Value,
+    name: &str,
+    window_minutes: u32,
+) -> Option<ClaudeWindow> {
+    let window = input.get("rate_limits").and_then(|rl| rl.get(name))?;
+    let used_percent = window.get("used_percentage").and_then(|v| v.as_f64())?;
+    if !used_percent.is_finite() || !(0.0..=100.0).contains(&used_percent) {
+        return None;
+    }
+    let resets_at = window.get("resets_at").and_then(|v| v.as_f64());
+    Some(ClaudeWindow {
+        used_percent,
+        window_minutes,
+        resets_at,
+    })
+}
+
 /// Record a Claude rate-limit sample from a statusline JSON payload.
 ///
-/// Extracts `rate_limits.five_hour.used_percentage`, `session_id`, and
-/// optionally `rate_limits.five_hour.resets_at` from `input`. Writes a
-/// sample JSON file under `paths::rate_limits_dir()` atomically (tmp +
-/// rename). Returns `true` iff the sample was written successfully.
+/// Extracts `rate_limits.five_hour`, optional `rate_limits.seven_day`,
+/// and `session_id` from `input`. Writes a sample JSON file under
+/// `paths::rate_limits_dir()` atomically (tmp + rename). Returns `true`
+/// iff the sample was written successfully.
 ///
 /// Returns `false` (and writes nothing, never panics) when:
 /// - `session_id` is absent or empty
@@ -64,23 +91,11 @@ pub fn record_claude_rate_limit(input: &serde_json::Value, now_ms: i64) -> bool 
         _ => return false,
     };
 
-    // Extract and validate used_percentage.
-    let used_percent = match input
-        .get("rate_limits")
-        .and_then(|rl| rl.get("five_hour"))
-        .and_then(|fh| fh.get("used_percentage"))
-        .and_then(|v| v.as_f64())
-    {
-        Some(p) if p.is_finite() && (0.0..=100.0).contains(&p) => p,
-        _ => return false,
+    let five_hour = match statusline_window(input, "five_hour", 300) {
+        Some(window) => window,
+        None => return false,
     };
-
-    // Extract optional resets_at (unix seconds, may be absent or null).
-    let resets_at: Option<f64> = input
-        .get("rate_limits")
-        .and_then(|rl| rl.get("five_hour"))
-        .and_then(|fh| fh.get("resets_at"))
-        .and_then(|v| v.as_f64());
+    let weekly = statusline_window(input, "seven_day", 10080);
 
     // Ensure the directory exists.
     let dir = crate::paths::rate_limits_dir();
@@ -96,8 +111,13 @@ pub fn record_claude_rate_limit(input: &serde_json::Value, now_ms: i64) -> bool 
     // Build the sample JSON.
     let sample = serde_json::json!({
         "session_id": session_id,
-        "used_percent": used_percent,
-        "resets_at": resets_at,
+        "used_percent": five_hour.used_percent,
+        "resets_at": five_hour.resets_at,
+        "weekly": weekly.as_ref().map(|w| serde_json::json!({
+            "used_percent": w.used_percent,
+            "window_minutes": w.window_minutes,
+            "resets_at": w.resets_at,
+        })),
         "captured_at": now_ms,
     });
     let json = match serde_json::to_vec(&sample) {
@@ -162,6 +182,28 @@ pub fn read_claude_rate_limit(freshness_ms: i64, now_ms: i64) -> Option<ClaudeUs
             None => continue,
         };
         let resets_at: Option<f64> = v.get("resets_at").and_then(|x| x.as_f64());
+        let weekly = v.get("weekly").and_then(|weekly| {
+            let used_percent = weekly.get("used_percent").and_then(|x| x.as_f64())?;
+            if !used_percent.is_finite() || !(0.0..=100.0).contains(&used_percent) {
+                return None;
+            }
+            let window_minutes = weekly
+                .get("window_minutes")
+                .and_then(|x| x.as_u64())
+                .and_then(|x| u32::try_from(x).ok())
+                .unwrap_or(10080);
+            let resets_at = weekly.get("resets_at").and_then(|x| x.as_f64());
+            if let Some(ra) = resets_at {
+                if now_ms >= (ra * 1000.0) as i64 {
+                    return None;
+                }
+            }
+            Some(ClaudeWindow {
+                used_percent,
+                window_minutes,
+                resets_at,
+            })
+        });
 
         // Validate freshness.
         if now_ms - captured_at > freshness_ms {
@@ -184,6 +226,7 @@ pub fn read_claude_rate_limit(freshness_ms: i64, now_ms: i64) -> Option<ClaudeUs
                 used_percent,
                 window_minutes: 300,
                 resets_at,
+                weekly,
                 source: "claude-statusline",
                 captured_at,
             });
@@ -256,6 +299,24 @@ mod tests {
         obj
     }
 
+    fn make_input_with_weekly(
+        session_id: &str,
+        five_used: f64,
+        weekly_used: f64,
+        weekly_resets_at: f64,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "session_id": session_id,
+            "rate_limits": {
+                "five_hour": { "used_percentage": five_used },
+                "seven_day": {
+                    "used_percentage": weekly_used,
+                    "resets_at": weekly_resets_at
+                }
+            }
+        })
+    }
+
     #[test]
     fn claude_sensor_all_cases() {
         let _guard = crate::test_support::env_lock();
@@ -266,23 +327,38 @@ mod tests {
 
         // --- record rejects: empty session_id ---
         let v = make_input(Some(""), Some(serde_json::json!(50.0)), None);
-        assert!(!record_claude_rate_limit(&v, now_ms), "empty session_id must return false");
+        assert!(
+            !record_claude_rate_limit(&v, now_ms),
+            "empty session_id must return false"
+        );
 
         // --- record rejects: missing session_id ---
         let v = make_input(None, Some(serde_json::json!(50.0)), None);
-        assert!(!record_claude_rate_limit(&v, now_ms), "missing session_id must return false");
+        assert!(
+            !record_claude_rate_limit(&v, now_ms),
+            "missing session_id must return false"
+        );
 
         // --- record rejects: used_percentage = 101 ---
         let v = make_input(Some("sid-A"), Some(serde_json::json!(101.0)), None);
-        assert!(!record_claude_rate_limit(&v, now_ms), "used_percentage=101 must return false");
+        assert!(
+            !record_claude_rate_limit(&v, now_ms),
+            "used_percentage=101 must return false"
+        );
 
         // --- record rejects: used_percentage = -1 ---
         let v = make_input(Some("sid-A"), Some(serde_json::json!(-1.0)), None);
-        assert!(!record_claude_rate_limit(&v, now_ms), "used_percentage=-1 must return false");
+        assert!(
+            !record_claude_rate_limit(&v, now_ms),
+            "used_percentage=-1 must return false"
+        );
 
         // --- record rejects: NaN ---
         let v = make_input(Some("sid-A"), Some(serde_json::json!(f64::NAN)), None);
-        assert!(!record_claude_rate_limit(&v, now_ms), "NaN used_percentage must return false");
+        assert!(
+            !record_claude_rate_limit(&v, now_ms),
+            "NaN used_percentage must return false"
+        );
 
         // Verify nothing was written for any of those rejections.
         let dir = crate::paths::rate_limits_dir();
@@ -302,6 +378,18 @@ mod tests {
         assert_eq!(usage.source, "claude-statusline");
         assert_eq!(usage.captured_at, now_ms);
         assert!(usage.resets_at.is_none());
+        assert!(usage.weekly.is_none());
+
+        let v = make_input_with_weekly("sid-weekly", 12.0, 34.0, 1_750_700_000.0);
+        assert!(record_claude_rate_limit(&v, now_ms + 500));
+        let usage = read_claude_rate_limit(60_000, now_ms + 500).expect("weekly sample");
+        let weekly = usage.weekly.expect("weekly window");
+        assert_eq!(weekly.used_percent, 34.0);
+        assert_eq!(weekly.window_minutes, 10080);
+        assert_eq!(weekly.resets_at, Some(1_750_700_000.0));
+        let _ = std::fs::remove_file(
+            crate::paths::rate_limits_dir().join(format!("{}.json", sha256_hex("sid-weekly"))),
+        );
 
         // --- resets_at in the past → read returns None ---
         // Write a new session with resets_at 1 second in the past (unix seconds).
@@ -345,7 +433,10 @@ mod tests {
         std::fs::write(&garbage, b"NOT JSON AT ALL!!!").unwrap();
         // Should still read the valid sample.
         let usage = read_claude_rate_limit(120_000, fresher_time + 1000);
-        assert!(usage.is_some(), "garbage file should be skipped, valid sample still returned");
+        assert!(
+            usage.is_some(),
+            "garbage file should be skipped, valid sample still returned"
+        );
 
         std::env::remove_var("AI_HANDOFF_HOME");
 

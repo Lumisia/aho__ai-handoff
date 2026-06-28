@@ -9,6 +9,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use chrono::{DateTime, Local};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -27,6 +28,7 @@ use rust_i18n::t;
 use ai_handoff_core::account::{self, Agent, RateWindow};
 use ai_handoff_core::dashboard::{CheckStatus, DashboardSnapshot};
 
+use crate::account_api::ResetCredit;
 use crate::capsule_ops;
 use crate::edit::{self, EditAction};
 use crate::viewmodel::{
@@ -576,9 +578,7 @@ impl App {
                     }
                     .into_owned();
                 }
-                Err(e) => {
-                    self.status = t!("status.autostart_failed", err = e).into_owned()
-                }
+                Err(e) => self.status = t!("status.autostart_failed", err = e).into_owned(),
             }
             return;
         }
@@ -1012,9 +1012,7 @@ impl App {
             }
             KeyCode::Enter | KeyCode::Right | KeyCode::Char(' ') => {
                 match rows.get(self.acc_sel).map(|r| r.target) {
-                    Some(AccTarget::Add(agent)) => {
-                        self.pending = Some(Pending::AddAccount(agent))
-                    }
+                    Some(AccTarget::Add(agent)) => self.pending = Some(Pending::AddAccount(agent)),
                     Some(AccTarget::Slot(..)) | Some(AccTarget::Header(_)) => {
                         self.acc_focus = AccFocus::Detail;
                         self.acc_confirm_delete = false;
@@ -1085,8 +1083,15 @@ impl App {
         let label = slot.meta.label.clone();
         // Managed (Business/Team/Enterprise) accounts: a forced workspace policy
         // may log the agent out on switch — caution the user.
-        let plan = slot.meta.plan_hint.clone().unwrap_or_default().to_lowercase();
-        let managed = ["business", "team", "enterprise"].iter().any(|k| plan.contains(k));
+        let plan = slot
+            .meta
+            .plan_hint
+            .clone()
+            .unwrap_or_default()
+            .to_lowercase();
+        let managed = ["business", "team", "enterprise"]
+            .iter()
+            .any(|k| plan.contains(k));
         // Warn (don't block) if a session is open — it may keep the old account.
         let running = account::agent_running(agent);
         match account::switch_slot(agent, &label) {
@@ -1190,21 +1195,30 @@ impl App {
         self.draw_token_donut(f, left[0]);
         self.draw_token_legend(f, left[1]);
 
-        let rows = health_rows(&self.snapshot).into_iter().map(health_table_row);
-        let table = Table::new(rows, [Constraint::Length(18), Constraint::Length(8), Constraint::Min(10)])
-            .header(
-                Row::new([
-                    t!("table.check").into_owned(),
-                    t!("table.status").into_owned(),
-                    t!("table.detail").into_owned(),
-                ])
-                .style(Style::default().add_modifier(Modifier::BOLD)),
-            )
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(t!("overview.health").into_owned()),
-            );
+        let rows = health_rows(&self.snapshot)
+            .into_iter()
+            .map(health_table_row);
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Length(18),
+                Constraint::Length(8),
+                Constraint::Min(10),
+            ],
+        )
+        .header(
+            Row::new([
+                t!("table.check").into_owned(),
+                t!("table.status").into_owned(),
+                t!("table.detail").into_owned(),
+            ])
+            .style(Style::default().add_modifier(Modifier::BOLD)),
+        )
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(t!("overview.health").into_owned()),
+        );
         f.render_widget(table, cols[1]);
     }
 
@@ -1329,7 +1343,11 @@ impl App {
             } else {
                 t!("capsule.edit_hint")
             };
-            let banner = t!("capsule.edit_banner", field = field_label(field), hint = hint);
+            let banner = t!(
+                "capsule.edit_banner",
+                field = field_label(field),
+                hint = hint
+            );
             let lines = vec![
                 Line::from(banner.into_owned()).italic(),
                 Line::from(""),
@@ -1365,7 +1383,11 @@ impl App {
     /// when the detail pane is active) followed by read-only context.
     fn capsule_body_lines(&self, detail: &CapDetail) -> Vec<Line<'static>> {
         let Some(c) = detail.parsed.as_ref() else {
-            return detail.raw.lines().map(|l| Line::from(l.to_string())).collect();
+            return detail
+                .raw
+                .lines()
+                .map(|l| Line::from(l.to_string()))
+                .collect();
         };
         let detail_active = self.focus_content && self.cap_focus == CapFocus::Detail;
         let mut lines = vec![Line::from(Span::styled(
@@ -1405,7 +1427,10 @@ impl App {
             c.source_agent,
             c.target_agent
         )));
-        lines.push(Line::from(format!("  {}: {state}", t!("capsule.field_state"))));
+        lines.push(Line::from(format!(
+            "  {}: {state}",
+            t!("capsule.field_state")
+        )));
         lines.push(Line::from(format!(
             "  {}: {}",
             t!("capsule.field_created"),
@@ -1484,8 +1509,14 @@ impl App {
                         r += 0.04;
                     }
                 }
-                ctx.draw(&Points { coords: &claude_pts, color: CLAUDE_COLOR });
-                ctx.draw(&Points { coords: &codex_pts, color: CODEX_COLOR });
+                ctx.draw(&Points {
+                    coords: &claude_pts,
+                    color: CLAUDE_COLOR,
+                });
+                ctx.draw(&Points {
+                    coords: &codex_pts,
+                    color: CODEX_COLOR,
+                });
             });
         f.render_widget(canvas, area);
     }
@@ -1493,7 +1524,13 @@ impl App {
     fn draw_token_legend(&self, f: &mut Frame, area: Rect) {
         let (claude, codex) = self.source_split();
         let total = claude + codex;
-        let pct = |n: u64| if total > 0 { n as f64 / total as f64 * 100.0 } else { 0.0 };
+        let pct = |n: u64| {
+            if total > 0 {
+                n as f64 / total as f64 * 100.0
+            } else {
+                0.0
+            }
+        };
         let total_line = t!(
             "overview.total",
             tokens = human_tokens(total),
@@ -1503,7 +1540,11 @@ impl App {
             Line::from(total_line.into_owned()),
             Line::from(vec![
                 Span::styled("● claude  ", Style::default().fg(CLAUDE_COLOR)),
-                Span::raw(format!("{:>7}  {:>4.0}%", human_tokens(claude), pct(claude))),
+                Span::raw(format!(
+                    "{:>7}  {:>4.0}%",
+                    human_tokens(claude),
+                    pct(claude)
+                )),
             ]),
             Line::from(vec![
                 Span::styled("● codex   ", Style::default().fg(CODEX_COLOR)),
@@ -1545,7 +1586,9 @@ impl App {
                 } else if let AccTarget::Header(agent) = r.target {
                     Line::from(Span::styled(
                         text,
-                        Style::default().fg(agent_color(agent)).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(agent_color(agent))
+                            .add_modifier(Modifier::BOLD),
                     ))
                 } else {
                     Line::from(text)
@@ -1591,8 +1634,8 @@ impl App {
                 action_style(focused && has_slot),
             ));
         }
-        let bar = Paragraph::new(Line::from(spans))
-            .block(focus_block(t!("account.actions"), focused));
+        let bar =
+            Paragraph::new(Line::from(spans)).block(focus_block(t!("account.actions"), focused));
         f.render_widget(bar, area);
     }
 
@@ -1633,9 +1676,13 @@ impl App {
         let mut five: Option<RateWindow> = None;
         let mut weekly: Option<RateWindow> = None;
         let mut credits: Option<i64> = None;
+        let mut credit_details: Vec<ResetCredit> = Vec::new();
         let mut note: Option<Line> = None;
         match agent {
-            Agent::Codex => match self.acc_usage.get(&Self::usage_key(agent, &slot.meta.label)) {
+            Agent::Codex => match self
+                .acc_usage
+                .get(&Self::usage_key(agent, &slot.meta.label))
+            {
                 Some(UsageState::Loaded(u)) => {
                     if u.plan.is_some() {
                         plan = u.plan.clone();
@@ -1643,15 +1690,23 @@ impl App {
                     five = u.five_hour.clone();
                     weekly = u.weekly.clone();
                     credits = u.reset_credits;
+                    credit_details = u.reset_credit_details.clone();
                 }
                 Some(UsageState::Loading) => {
-                    note = Some(Line::from(t!("account.usage_loading").into_owned()).fg(Color::DarkGray))
+                    note = Some(
+                        Line::from(t!("account.usage_loading").into_owned()).fg(Color::DarkGray),
+                    )
                 }
                 Some(UsageState::Error(e)) => {
-                    note = Some(Line::from(t!("account.usage_error", err = e.clone()).into_owned()).fg(Color::Red))
+                    note = Some(
+                        Line::from(t!("account.usage_error", err = e.clone()).into_owned())
+                            .fg(Color::Red),
+                    )
                 }
                 None => {
-                    note = Some(Line::from(t!("account.usage_press_r").into_owned()).fg(Color::DarkGray))
+                    note = Some(
+                        Line::from(t!("account.usage_press_r").into_owned()).fg(Color::DarkGray),
+                    )
                 }
             },
             Agent::Claude => {
@@ -1661,7 +1716,9 @@ impl App {
                         weekly = s.weekly.clone();
                     }
                 } else {
-                    note = Some(Line::from(t!("account.claude_inactive").into_owned()).fg(Color::DarkGray));
+                    note = Some(
+                        Line::from(t!("account.claude_inactive").into_owned()).fg(Color::DarkGray),
+                    );
                 }
             }
         }
@@ -1679,8 +1736,18 @@ impl App {
         ]);
         f.render_widget(header, sections[0]);
 
-        self.draw_window(f, sections[1], t!("account.five_hour").into_owned(), five.as_ref());
-        self.draw_window(f, sections[2], t!("account.weekly").into_owned(), weekly.as_ref());
+        self.draw_window(
+            f,
+            sections[1],
+            t!("account.five_hour").into_owned(),
+            five.as_ref(),
+        );
+        self.draw_window(
+            f,
+            sections[2],
+            t!("account.weekly").into_owned(),
+            weekly.as_ref(),
+        );
 
         let mut lines: Vec<Line> = Vec::new();
         if let Some(n) = note {
@@ -1691,8 +1758,25 @@ impl App {
                 t!("account.reset_credits").into_owned(),
                 Style::default().add_modifier(Modifier::BOLD),
             )));
-            lines.push(Line::from(t!("account.reset_credits_value", count = c).into_owned()));
-            lines.push(Line::from(t!("account.reset_credits_hint").into_owned()).fg(Color::DarkGray));
+            lines.push(Line::from(
+                t!("account.reset_credits_value", count = c).into_owned(),
+            ));
+            for (idx, detail) in credit_details.iter().enumerate() {
+                lines.push(Line::from(
+                    t!(
+                        "account.reset_credit_item",
+                        n = idx + 1,
+                        expires = format_credit_datetime(&detail.expires_at),
+                        granted = format_credit_datetime(&detail.granted_at)
+                    )
+                    .into_owned(),
+                ));
+            }
+            if credit_details.is_empty() {
+                lines.push(
+                    Line::from(t!("account.reset_credits_hint").into_owned()).fg(Color::DarkGray),
+                );
+            }
         }
         f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), sections[3]);
     }
@@ -1708,8 +1792,15 @@ impl App {
         let mut lines = vec![Line::from(
             t!("account.summary_count", count = data.slots.len()).into_owned(),
         )];
-        if let Some(email) = data.slots.iter().find(|s| s.active).and_then(|s| s.meta.email.clone()) {
-            lines.push(Line::from(t!("account.summary_active", email = email).into_owned()));
+        if let Some(email) = data
+            .slots
+            .iter()
+            .find(|s| s.active)
+            .and_then(|s| s.meta.email.clone())
+        {
+            lines.push(Line::from(
+                t!("account.summary_active", email = email).into_owned(),
+            ));
         }
         lines.push(Line::from(t!("account.summary_add_hint").into_owned()).fg(Color::DarkGray));
         f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
@@ -1754,8 +1845,11 @@ impl App {
         });
         let table = Table::new(rows, [Constraint::Min(36), Constraint::Length(14)])
             .header(
-                Row::new([t!("table.setting").into_owned(), t!("table.value").into_owned()])
-                    .style(Style::default().add_modifier(Modifier::BOLD)),
+                Row::new([
+                    t!("table.setting").into_owned(),
+                    t!("table.value").into_owned(),
+                ])
+                .style(Style::default().add_modifier(Modifier::BOLD)),
             )
             .block(
                 Block::default()
@@ -1766,8 +1860,8 @@ impl App {
     }
 
     fn draw_status(&self, f: &mut Frame, area: Rect) {
-        let para = Paragraph::new(Span::raw(&self.status))
-            .block(Block::default().borders(Borders::ALL));
+        let para =
+            Paragraph::new(Span::raw(&self.status)).block(Block::default().borders(Borders::ALL));
         f.render_widget(para, area);
     }
 }
@@ -1840,6 +1934,15 @@ fn fmt_reset(resets_at: Option<i64>) -> String {
     t!("account.reset_suffix", when = when).into_owned()
 }
 
+fn format_credit_datetime(value: &str) -> String {
+    DateTime::parse_from_rfc3339(value)
+        .map(|dt| {
+            dt.with_timezone(&Local)
+                .format("%Y-%m-%d %H:%M")
+                .to_string()
+        })
+        .unwrap_or_else(|_| value.to_string())
+}
 
 /// Run `ai-handoff autostart on|off` as a detached child (no console window),
 /// so the OS logon entry is actually registered/removed — not just the config.
@@ -1861,7 +1964,9 @@ fn apply_autostart(on: bool) -> std::io::Result<()> {
     if status.success() {
         Ok(())
     } else {
-        Err(std::io::Error::other(format!("autostart command exited with {status}")))
+        Err(std::io::Error::other(format!(
+            "autostart command exited with {status}"
+        )))
     }
 }
 
@@ -2148,6 +2253,14 @@ mod tests {
     }
 
     #[test]
+    fn account_action_labels_distinguish_app_switch_from_cli_launch() {
+        assert_eq!(t!("account.btn_switch", locale = "ko"), "[s] 앱 전환");
+        assert_eq!(t!("account.btn_launch", locale = "ko"), "[l] CLI로 실행");
+        assert!(t!("hint.account_detail", locale = "ko").contains("s 앱 전환"));
+        assert!(t!("hint.account_detail", locale = "ko").contains("l CLI로 실행"));
+    }
+
+    #[test]
     fn account_nav_enters_detail_on_a_slot_and_back() {
         let mut app = account_app();
         app.on_key(key(KeyCode::Char('3'))); // -> Account tab bar
@@ -2157,7 +2270,10 @@ mod tests {
         assert!(app.focus_content);
         assert_eq!(app.acc_focus, AccFocus::Tree);
         app.on_key(key(KeyCode::Down)); // move onto the first Codex slot
-        assert!(matches!(app.acc_target(), Some(AccTarget::Slot(Agent::Codex, 0))));
+        assert!(matches!(
+            app.acc_target(),
+            Some(AccTarget::Slot(Agent::Codex, 0))
+        ));
         app.on_key(key(KeyCode::Enter)); // cross into the detail pane
         assert_eq!(app.acc_focus, AccFocus::Detail);
         app.on_key(key(KeyCode::Left)); // back to the tree
@@ -2167,9 +2283,9 @@ mod tests {
     #[test]
     fn window_line_interpolates_in_all_locales() {
         for loc in ["en", "ko", "ja", "zh"] {
-            rust_i18n::set_locale(loc);
             let s = t!(
                 "account.window_line",
+                locale = loc,
                 label = "5h",
                 used = "18",
                 left = "82",
@@ -2180,7 +2296,6 @@ mod tests {
             assert!(s.contains("resets in 2h"), "{loc} dropped reset: {s}");
             assert!(!s.contains("%{"), "{loc} leaked a placeholder: {s}");
         }
-        rust_i18n::set_locale("en");
     }
 
     #[test]
@@ -2236,7 +2351,10 @@ mod tests {
                 session: "s".into(),
                 model: "claude-opus-4-8".into(),
                 day: "2026-06-17".into(),
-                tokens: Tokens { input: 10, ..Default::default() },
+                tokens: Tokens {
+                    input: 10,
+                    ..Default::default()
+                },
             },
             UsageEvent {
                 source: Source::Codex,
@@ -2244,12 +2362,14 @@ mod tests {
                 session: "s".into(),
                 model: "gpt-5.5".into(),
                 day: "2026-06-17".into(),
-                tokens: Tokens { input: 4, ..Default::default() },
+                tokens: Tokens {
+                    input: 4,
+                    ..Default::default()
+                },
             },
         ];
         let dir = tempfile::tempdir().unwrap();
-        let snapshot =
-            ai_handoff_core::dashboard::dashboard_snapshot_for(dir.path(), dir.path());
+        let snapshot = ai_handoff_core::dashboard::dashboard_snapshot_for(dir.path(), dir.path());
         let app = App::new(
             snapshot,
             UsageView::from_events(&events),
@@ -2261,14 +2381,10 @@ mod tests {
 
     #[test]
     fn tab_titles_translate_with_locale() {
-        rust_i18n::set_locale("ko");
-        assert_eq!(t!("tab.overview"), "개요");
-        rust_i18n::set_locale("ja");
-        assert_eq!(t!("tab.account"), "アカウント");
-        rust_i18n::set_locale("zh");
-        assert_eq!(t!("tab.settings"), "设置");
-        rust_i18n::set_locale("en");
-        assert_eq!(t!("tab.capsule"), "Capsule");
+        assert_eq!(t!("tab.overview", locale = "ko"), "개요");
+        assert_eq!(t!("tab.account", locale = "ja"), "アカウント");
+        assert_eq!(t!("tab.settings", locale = "zh"), "设置");
+        assert_eq!(t!("tab.capsule", locale = "en"), "Capsule");
     }
 
     #[test]
@@ -2304,7 +2420,10 @@ mod tests {
         app.on_key(key(KeyCode::Char('4'))); // -> Settings tab bar
         app.on_key(key(KeyCode::Down)); // descend
         assert!(app.focus_content);
-        assert_eq!(app.settings_idx, 0, "the descending Down must not also move");
+        assert_eq!(
+            app.settings_idx, 0,
+            "the descending Down must not also move"
+        );
     }
 
     #[test]
@@ -2326,7 +2445,6 @@ mod tests {
 
     #[test]
     fn settings_status_shows_selected_description() {
-        rust_i18n::set_locale("en");
         let mut app = test_app();
         app.on_key(key(KeyCode::Char('4'))); // -> Settings tab bar
         app.on_key(key(KeyCode::Down)); // descend; status = desc of row 0
@@ -2428,7 +2546,10 @@ mod tests {
             },
             files: vec![],
             next_prompt: None,
-            redaction: RedactionMeta { applied: true, ruleset: "default-v2".into() },
+            redaction: RedactionMeta {
+                applied: true,
+                ruleset: "default-v2".into(),
+            },
             consumption: Consumption {
                 state: ConsumptionState::Pending,
                 consumed_by: None,
@@ -2473,8 +2594,7 @@ mod tests {
         // Toggle state: disk + in-memory both become consumed.
         app.on_key(key(KeyCode::Char('s')));
         assert_eq!(app.cap_tree[0].projects[0].capsules[0].state, "consumed");
-        let on_disk: Capsule =
-            serde_json::from_slice(&std::fs::read(&cap_path).unwrap()).unwrap();
+        let on_disk: Capsule = serde_json::from_slice(&std::fs::read(&cap_path).unwrap()).unwrap();
         assert_eq!(on_disk.consumption.state, ConsumptionState::Consumed);
 
         // Edit the goal: 'e' loads it, type, Enter saves.
@@ -2483,8 +2603,7 @@ mod tests {
         assert_eq!(app.cap_edit_buf, "old goal");
         app.on_key(key(KeyCode::Char('!')));
         app.on_key(key(KeyCode::Enter));
-        let on_disk: Capsule =
-            serde_json::from_slice(&std::fs::read(&cap_path).unwrap()).unwrap();
+        let on_disk: Capsule = serde_json::from_slice(&std::fs::read(&cap_path).unwrap()).unwrap();
         assert_eq!(on_disk.summary.goal, "old goal!");
         assert_eq!(app.cap_focus, CapFocus::Detail);
 

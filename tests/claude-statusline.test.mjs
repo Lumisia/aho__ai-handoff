@@ -33,6 +33,23 @@ test('records and reads a fresh Claude five-hour rate limit for the same session
   });
 }));
 
+test('records and reads Claude seven-day rate limit when statusline provides it', () => withRoot(() => {
+  const recorded = recordClaudeRateLimit({
+    session_id: 'claude-s1',
+    rate_limits: {
+      five_hour: { used_percentage: 12 },
+      seven_day: { used_percentage: 34, resets_at: 98765 },
+    },
+  }, { now: 1_000 });
+
+  assert.equal(recorded, true);
+  assert.deepEqual(readClaudeRateLimit({ sessionId: 'claude-s1', now: 1_500, freshnessMs: 1_000 })?.weekly, {
+    usedPercent: 34,
+    windowMinutes: 10_080,
+    resetsAt: 98765,
+  });
+}));
+
 test('does not record status-line input without a usable five-hour rate limit', () => withRoot(() => {
   assert.equal(recordClaudeRateLimit({ session_id: 's1' }, { now: 1 }), false);
   assert.equal(readClaudeRateLimit({ sessionId: 's1', now: 1, freshnessMs: 100 }), null);

@@ -16,11 +16,22 @@ export function recordClaudeRateLimit(input, { now = Date.now() } = {}) {
   const used = fiveHour?.used_percentage;
   const path = samplePath(input?.session_id);
   if (!path || typeof used !== 'number' || !Number.isFinite(used) || used < 0 || used > 100) return false;
+  const sevenDay = input?.rate_limits?.seven_day;
+  const weeklyUsed = sevenDay?.used_percentage;
+  const weekly = typeof weeklyUsed === 'number' && Number.isFinite(weeklyUsed) && weeklyUsed >= 0 && weeklyUsed <= 100
+    ? {
+        used_percent: weeklyUsed,
+        window_minutes: 10_080,
+        resets_at: sevenDay.resets_at ?? null,
+        captured_at: now,
+      }
+    : null;
 
   writeFileAtomic(path, JSON.stringify({
     session_id: input.session_id,
     used_percent: used,
     resets_at: fiveHour.resets_at ?? null,
+    weekly,
     captured_at: now,
   }, null, 2) + '\n');
   const cwd = input.cwd || input.workspace?.current_dir;
@@ -56,11 +67,19 @@ export function readClaudeRateLimit({ sessionId, freshnessMs = 10_000, now = Dat
     if (!best || sample.captured_at > best.captured_at) best = sample;
   }
   if (!best) return null;
-  return {
+  const result = {
     usedPercent: best.used_percent,
     windowMinutes: 300,
     resetsAt: best.resets_at,
     source: 'claude-statusline',
     capturedAt: best.captured_at,
   };
+  if (sampleIsUsable(best.weekly, freshnessMs, now)) {
+    result.weekly = {
+      usedPercent: best.weekly.used_percent,
+      windowMinutes: best.weekly.window_minutes ?? 10_080,
+      resetsAt: best.weekly.resets_at,
+    };
+  }
+  return result;
 }
