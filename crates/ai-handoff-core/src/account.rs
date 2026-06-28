@@ -288,10 +288,20 @@ fn identity_from_auth(value: &Value) -> Option<Identity> {
 /// reset-credit count; the token must never be logged, displayed, or passed to
 /// any agent. Returns `None` when not signed in.
 pub fn codex_request_auth() -> Option<(String, Option<String>)> {
-    let path = codex_home()?.join("auth.json");
-    let value: Value = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
-    let tokens = value.get("tokens")?;
-    let access_token = tokens.get("access_token")?.as_str()?.to_string();
+    request_auth_from_path(&codex_home()?.join("auth.json"))
+}
+
+/// The `(access_token, account_id)` stored in a saved slot — used to fetch that
+/// account's own usage. Codex only (Claude's `.credentials.json` has no bearer
+/// token of this shape, so this returns `None` for Claude).
+pub fn slot_request_auth(agent: Agent, label: &str) -> Option<(String, Option<String>)> {
+    request_auth_from_path(&slot_dir(agent, label).join(cred_filename(agent)))
+}
+
+/// Read `(access_token, account_id)` from a Codex `auth.json` at `path`.
+fn request_auth_from_path(path: &Path) -> Option<(String, Option<String>)> {
+    let value: Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    let access_token = value.get("tokens")?.get("access_token")?.as_str()?.to_string();
     let account_id = identity_from_auth(&value).and_then(|i| i.account_id);
     Some((access_token, account_id))
 }
@@ -507,6 +517,28 @@ pub fn capture_login(agent: Agent, profile_home: &Path, source: &str) -> std::io
         Agent::Claude => claude_identity_from_dir(profile_home),
     };
     save_slot(agent, &bytes, identity.as_ref(), source)
+}
+
+/// Whether an official login into `profile_home` has finished writing a usable
+/// credential (used to poll while the vendor CLI runs in another window).
+pub fn login_complete(agent: Agent, profile_home: &Path) -> bool {
+    let bytes = match std::fs::read(profile_home.join(cred_filename(agent))) {
+        Ok(b) if !b.is_empty() => b,
+        _ => return false,
+    };
+    match agent {
+        // Codex writes auth.json atomically on success — require a real token.
+        Agent::Codex => serde_json::from_slice::<Value>(&bytes)
+            .ok()
+            .and_then(|v| {
+                v.get("tokens")
+                    .and_then(|t| t.get("access_token"))
+                    .and_then(Value::as_str)
+                    .map(|s| !s.is_empty())
+            })
+            .unwrap_or(false),
+        Agent::Claude => true,
+    }
 }
 
 /// Read the Claude account email/plan from a config dir's `.claude.json`.

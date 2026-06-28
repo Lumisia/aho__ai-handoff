@@ -167,22 +167,30 @@ struct AccRow {
     target: AccTarget,
 }
 
-/// A deferred action that needs the terminal suspended (an interactive vendor
-/// CLI takes over the screen). Set by a keypress, run by the event loop.
+/// A deferred action queued by a keypress and started by the event loop (each
+/// opens its own window, so the TUI is never suspended).
 #[derive(Clone, PartialEq, Eq, Debug)]
 enum Pending {
-    /// `codex login` / `claude auth login`, then capture into the vault.
+    /// `codex login` / `claude auth login` in a new window, then capture.
     AddAccount(Agent),
-    /// Launch the agent under a saved slot's profile home.
+    /// Launch the agent under a saved slot's profile home, in a new window.
     Launch(Agent, String),
 }
 
-/// The reset-credit ("초기화권") fetch is an explicit, network-gated action.
-#[derive(Clone, PartialEq, Eq)]
-enum CreditsState {
-    /// Not fetched yet (the count needs an authenticated backend call).
-    Idle,
-    Loaded(i64),
+/// An in-flight add: a login window is open and we poll its temp home for the
+/// credential to appear.
+struct LoginPoll {
+    agent: Agent,
+    home: PathBuf,
+    deadline: std::time::Instant,
+}
+
+/// Per-account usage fetched from the backend (5h / weekly / credits). Fetched
+/// in a background thread so navigating accounts never blocks.
+#[derive(Clone, PartialEq)]
+enum UsageState {
+    Loading,
+    Loaded(crate::account_api::UsageData),
     Error(String),
 }
 
@@ -190,7 +198,8 @@ enum CreditsState {
 /// saved snapshots in the pool.
 #[derive(Default)]
 struct AgentAccount {
-    identity: Option<account::Identity>,
+    /// Live usage for the *active* account (Claude only — Codex usage is fetched
+    /// per-account from the backend instead).
     status: Option<account::AccountStatus>,
     slots: Vec<account::AccountSlot>,
 }
@@ -207,12 +216,10 @@ impl AccountData {
     fn load_live() -> Self {
         AccountData {
             codex: AgentAccount {
-                identity: account::codex_identity(),
-                status: account::codex_status(),
+                status: None, // Codex usage is fetched per-account from the backend.
                 slots: account::list_slots(Agent::Codex),
             },
             claude: AgentAccount {
-                identity: account::claude_identity(),
                 status: account::claude_status(),
                 slots: account::list_slots(Agent::Claude),
             },
@@ -245,10 +252,15 @@ pub struct App {
     acc_sel: usize,
     /// A delete needs a second confirm press; armed here.
     acc_confirm_delete: bool,
-    /// The (Codex) reset-credit count: fetched on demand over the network.
-    acc_credits: CreditsState,
-    /// A terminal-suspending action queued by a keypress (add / launch).
+    /// Per-account usage cache, keyed by `usage_key(agent, label)`.
+    acc_usage: std::collections::HashMap<String, UsageState>,
+    /// Background-fetch result channel (key, usage result).
+    usage_tx: std::sync::mpsc::Sender<(String, Result<crate::account_api::UsageData, String>)>,
+    usage_rx: std::sync::mpsc::Receiver<(String, Result<crate::account_api::UsageData, String>)>,
+    /// An action queued by a keypress (add / launch), started next loop.
     pending: Option<Pending>,
+    /// An open login window being polled for its captured credential.
+    login_poll: Option<LoginPoll>,
     // --- Capsule tab state ---
     cap_tree: Vec<CapsuleAgent>,
     cap_expanded_agents: HashSet<usize>,
@@ -300,6 +312,7 @@ impl App {
         let cap_tree = capsule_tree(&snapshot.capsules);
         // Start with every agent expanded so the projects are visible at a glance.
         let cap_expanded_agents = (0..cap_tree.len()).collect();
+        let (usage_tx, usage_rx) = std::sync::mpsc::channel();
         App {
             tab: Tab::Overview,
             focus_content: false,
@@ -312,8 +325,11 @@ impl App {
             acc_focus: AccFocus::Tree,
             acc_sel: 0,
             acc_confirm_delete: false,
-            acc_credits: CreditsState::Idle,
+            acc_usage: std::collections::HashMap::new(),
+            usage_tx,
+            usage_rx,
             pending: None,
+            login_poll: None,
             cap_tree,
             cap_expanded_agents,
             cap_expanded_projects: HashSet::new(),
@@ -344,46 +360,72 @@ impl App {
                     }
                 }
             }
-            // A key may have queued an interactive action (login / launch) that
-            // needs the whole terminal; run it with the TUI suspended.
+            // A key may have queued an action (login / launch). Each opens its
+            // own window, so the TUI keeps running here.
             if let Some(pending) = self.pending.take() {
-                self.run_suspended(pending, terminal)?;
+                self.handle_pending(pending);
+            }
+            self.poll_login();
+            // Apply any background per-account usage fetches that finished.
+            while let Ok((key, res)) = self.usage_rx.try_recv() {
+                let state = match res {
+                    Ok(u) => UsageState::Loaded(u),
+                    Err(e) => UsageState::Error(e),
+                };
+                self.acc_usage.insert(key, state);
             }
         }
         Ok(())
     }
 
-    /// Suspend the TUI, run an interactive vendor CLI, then restore and refresh.
-    fn run_suspended(&mut self, pending: Pending, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
-        ratatui::restore();
-        // Wipe the main screen + scrollback so prior login output doesn't pile up
-        // each time an account is added.
-        {
-            use std::io::Write;
-            let mut out = std::io::stdout();
-            let _ = crossterm::execute!(
-                out,
-                crossterm::terminal::Clear(crossterm::terminal::ClearType::Purge),
-                crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
-                crossterm::cursor::MoveTo(0, 0),
-            );
-            let _ = out.flush();
+    /// Start a queued action: launch opens a window immediately; add opens a
+    /// login window and arms a poll for the captured credential.
+    fn handle_pending(&mut self, pending: Pending) {
+        match pending {
+            Pending::Launch(agent, label) => {
+                self.status = match crate::account_login::spawn_launch_window(agent, &label) {
+                    Ok(()) => t!("status.account_launched", label = label).into_owned(),
+                    Err(e) => t!("status.account_launch_failed", err = e).into_owned(),
+                };
+            }
+            Pending::AddAccount(agent) => match crate::account_login::spawn_add_window(agent) {
+                Ok(home) => {
+                    self.login_poll = Some(LoginPoll {
+                        agent,
+                        home,
+                        deadline: std::time::Instant::now() + Duration::from_secs(300),
+                    });
+                    self.status = t!("status.account_login_window").into_owned();
+                }
+                Err(e) => {
+                    self.status = t!("status.account_capture_failed", err = e).into_owned();
+                }
+            },
         }
-        let status = match &pending {
-            Pending::AddAccount(agent) => match crate::account_login::add_account(*agent) {
-                Ok(label) => t!("status.account_captured", label = label).into_owned(),
-                Err(e) => t!("status.account_capture_failed", err = e).into_owned(),
-            },
-            Pending::Launch(agent, label) => match crate::account_login::launch(*agent, label) {
-                Ok(()) => t!("status.account_launched", label = label).into_owned(),
-                Err(e) => t!("status.account_launch_failed", err = e).into_owned(),
-            },
+    }
+
+    /// While a login window is open, capture the credential once it lands (or
+    /// give up after the deadline).
+    fn poll_login(&mut self) {
+        let Some(poll) = self.login_poll.as_ref() else {
+            return;
         };
-        *terminal = ratatui::init();
-        terminal.clear()?;
-        self.reload_account();
-        self.status = status;
-        Ok(())
+        if account::login_complete(poll.agent, &poll.home) {
+            let (agent, home) = (poll.agent, poll.home.clone());
+            self.login_poll = None;
+            let status = match account::capture_login(agent, &home, "official-cli-login") {
+                Ok(label) => t!("status.account_captured", label = label).into_owned(),
+                Err(e) => t!("status.account_capture_failed", err = e.to_string()).into_owned(),
+            };
+            let _ = std::fs::remove_dir_all(&home);
+            self.reload_account();
+            self.status = status;
+        } else if std::time::Instant::now() > poll.deadline {
+            let home = poll.home.clone();
+            self.login_poll = None;
+            let _ = std::fs::remove_dir_all(&home);
+            self.status = t!("status.account_login_timeout").into_owned();
+        }
     }
 
     /// Handle one keypress. Pure except for a config file write on Settings edit.
@@ -863,6 +905,36 @@ impl App {
             AccFocus::Tree => self.acc_tree_key(key),
             AccFocus::Detail => self.acc_detail_key(key),
         }
+        // Whatever moved the selection, make sure the now-selected account's
+        // usage is being fetched (cached after the first time).
+        self.acc_ensure_usage(false);
+    }
+
+    /// Cache key for an account's fetched usage.
+    fn usage_key(agent: Agent, label: &str) -> String {
+        format!("{agent:?}:{label}")
+    }
+
+    /// Kick off a background usage fetch for the selected Codex account (Claude
+    /// has no per-account usage endpoint). No-op if already cached unless `force`.
+    fn acc_ensure_usage(&mut self, force: bool) {
+        let Some((agent, i)) = self.acc_selected_slot() else {
+            return;
+        };
+        if agent != Agent::Codex {
+            return;
+        }
+        let label = self.account.agent(agent).slots[i].meta.label.clone();
+        let key = Self::usage_key(agent, &label);
+        if !force && self.acc_usage.contains_key(&key) {
+            return;
+        }
+        self.acc_usage.insert(key.clone(), UsageState::Loading);
+        let tx = self.usage_tx.clone();
+        std::thread::spawn(move || {
+            let res = crate::account_api::fetch_slot_usage(agent, &label);
+            let _ = tx.send((key, res));
+        });
     }
 
     /// The flattened, visible rows of the account tree (both agents, always
@@ -998,7 +1070,7 @@ impl App {
                     self.pending = Some(Pending::Launch(agent, label));
                 }
             }
-            KeyCode::Char('r') => self.acc_refresh_credits(),
+            KeyCode::Char('r') => self.acc_ensure_usage(true),
             _ => {}
         }
     }
@@ -1018,8 +1090,6 @@ impl App {
         let running = account::agent_running(agent);
         match account::switch_slot(agent, &label) {
             Ok(()) => {
-                // The live account changed — the cached credit count is stale.
-                self.acc_credits = CreditsState::Idle;
                 self.reload_account();
                 self.status = if managed {
                     t!("status.account_switched_managed", label = label)
@@ -1054,31 +1124,16 @@ impl App {
         }
     }
 
-    /// Fetch the Codex reset-credit count (the one network call; uses the token
-    /// only to set the auth header — never logged or displayed).
-    fn acc_refresh_credits(&mut self) {
-        if self.acc_selected_agent() != Agent::Codex {
-            return;
-        }
-        match crate::account_api::fetch_reset_credits() {
-            Ok(n) => {
-                self.acc_credits = CreditsState::Loaded(n);
-                self.status = t!("status.account_credits_ok", count = n).into_owned();
-            }
-            Err(e) => {
-                self.status = t!("status.account_credits_failed", err = e.clone()).into_owned();
-                self.acc_credits = CreditsState::Error(e);
-            }
-        }
-    }
-
-    /// Re-scan the live system after a pool change and clamp the selection.
+    /// Re-scan the live system after a pool change and clamp the selection. The
+    /// usage cache is dropped (the set of accounts may have changed).
     fn reload_account(&mut self) {
         self.account = AccountData::load_live();
+        self.acc_usage.clear();
         let n = self.acc_rows().len();
         if self.acc_sel >= n {
             self.acc_sel = n.saturating_sub(1);
         }
+        self.acc_ensure_usage(false);
     }
 
     // --- drawing -------------------------------------------------------
@@ -1535,11 +1590,6 @@ impl App {
                 action_style(focused && has_slot),
             ));
         }
-        spans.push(Span::raw("  "));
-        spans.push(Span::styled(
-            format!(" {} ", t!("account.btn_add")),
-            action_style(focused),
-        ));
         let bar = Paragraph::new(Line::from(spans))
             .block(focus_block(t!("account.actions"), focused));
         f.render_widget(bar, area);
@@ -1565,64 +1615,83 @@ impl App {
         let block = focus_block(agent_name(agent).to_string(), focused);
         let inner = block.inner(area);
         f.render_widget(block, area);
-
-        let active = slot.active;
-        let constraints: Vec<Constraint> = if active {
-            vec![Constraint::Length(2), Constraint::Length(3), Constraint::Length(3), Constraint::Min(2)]
-        } else {
-            vec![Constraint::Length(2), Constraint::Min(2)]
-        };
         let sections = Layout::default()
             .direction(Direction::Vertical)
-            .constraints(constraints)
+            .constraints([
+                Constraint::Length(2),
+                Constraint::Length(3),
+                Constraint::Length(3),
+                Constraint::Min(2),
+            ])
             .split(inner);
 
-        // Header: this account's email + plan (live plan when active, else meta).
+        // Resolve this account's own usage. Codex: fetched per-account from the
+        // backend (so each slot shows its own numbers, not the active one's).
+        // Claude: only the active account exposes local usage.
+        let mut plan = slot.meta.plan_hint.clone();
+        let mut five: Option<RateWindow> = None;
+        let mut weekly: Option<RateWindow> = None;
+        let mut credits: Option<i64> = None;
+        let mut note: Option<Line> = None;
+        match agent {
+            Agent::Codex => match self.acc_usage.get(&Self::usage_key(agent, &slot.meta.label)) {
+                Some(UsageState::Loaded(u)) => {
+                    if u.plan.is_some() {
+                        plan = u.plan.clone();
+                    }
+                    five = u.five_hour.clone();
+                    weekly = u.weekly.clone();
+                    credits = u.reset_credits;
+                }
+                Some(UsageState::Loading) => {
+                    note = Some(Line::from(t!("account.usage_loading").into_owned()).fg(Color::DarkGray))
+                }
+                Some(UsageState::Error(e)) => {
+                    note = Some(Line::from(t!("account.usage_error", err = e.clone()).into_owned()).fg(Color::Red))
+                }
+                None => {
+                    note = Some(Line::from(t!("account.usage_press_r").into_owned()).fg(Color::DarkGray))
+                }
+            },
+            Agent::Claude => {
+                if slot.active {
+                    if let Some(s) = data.status.as_ref() {
+                        five = s.five_hour.clone();
+                        weekly = s.weekly.clone();
+                    }
+                } else {
+                    note = Some(Line::from(t!("account.claude_inactive").into_owned()).fg(Color::DarkGray));
+                }
+            }
+        }
+
+        // Header: account email (+ active mark) + plan.
         let email = slot.meta.email.as_deref().unwrap_or(&slot.meta.label);
         let mut account_line = t!("account.account_line", email = email).into_owned();
-        if active {
+        if slot.active {
             account_line.push_str(&format!("  [{}]", t!("account.active")));
         }
-        let plan = if active {
-            self.account_plan(agent)
-        } else {
-            slot.meta.plan_hint.clone().unwrap_or_else(|| t!("account.plan_unknown").into_owned())
-        };
+        let plan_text = plan.unwrap_or_else(|| t!("account.plan_unknown").into_owned());
         let header = Paragraph::new(vec![
             Line::from(account_line),
-            Line::from(t!("account.plan", plan = plan).into_owned()),
+            Line::from(t!("account.plan", plan = plan_text).into_owned()),
         ]);
         f.render_widget(header, sections[0]);
 
-        if !active {
-            f.render_widget(
-                Paragraph::new(t!("account.inactive_hint").into_owned())
-                    .wrap(Wrap { trim: true })
-                    .fg(Color::DarkGray),
-                sections[1],
-            );
-            return;
-        }
-
-        // Active account: live 5-hour / weekly gauges + (Codex) reset credits.
-        let status = data.status.as_ref();
-        self.draw_window(f, sections[1], t!("account.five_hour").into_owned(), status.and_then(|s| s.five_hour.as_ref()));
-        self.draw_window(f, sections[2], t!("account.weekly").into_owned(), status.and_then(|s| s.weekly.as_ref()));
+        self.draw_window(f, sections[1], t!("account.five_hour").into_owned(), five.as_ref());
+        self.draw_window(f, sections[2], t!("account.weekly").into_owned(), weekly.as_ref());
 
         let mut lines: Vec<Line> = Vec::new();
-        if status.is_none() {
-            lines.push(Line::from(t!("account.no_data").into_owned()).fg(Color::DarkGray));
+        if let Some(n) = note {
+            lines.push(n);
         }
-        if agent == Agent::Codex {
+        if let Some(c) = credits {
             lines.push(Line::from(Span::styled(
                 t!("account.reset_credits").into_owned(),
                 Style::default().add_modifier(Modifier::BOLD),
             )));
-            lines.push(self.credits_line());
+            lines.push(Line::from(t!("account.reset_credits_value", count = c).into_owned()));
             lines.push(Line::from(t!("account.reset_credits_hint").into_owned()).fg(Color::DarkGray));
-        }
-        if let Some(ms) = status.and_then(|s| s.captured_at) {
-            lines.push(Line::from(fmt_captured(ms)).fg(Color::DarkGray));
         }
         f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), sections[3]);
     }
@@ -1671,32 +1740,6 @@ impl App {
                 f.render_widget(para, area);
             }
         }
-    }
-
-    /// The reset-credit line, reflecting the (network-gated) fetch state.
-    fn credits_line(&self) -> Line<'static> {
-        match &self.acc_credits {
-            CreditsState::Loaded(n) => {
-                Line::from(t!("account.reset_credits_value", count = *n).into_owned())
-            }
-            CreditsState::Error(e) => {
-                Line::from(t!("account.reset_credits_error", err = e.clone()).into_owned())
-                    .fg(Color::Red)
-            }
-            CreditsState::Idle => {
-                Line::from(t!("account.reset_credits_press").into_owned()).fg(Color::DarkGray)
-            }
-        }
-    }
-
-    /// Resolve the plan label (rollout plan_type, then JWT plan, then "unknown").
-    fn account_plan(&self, agent: Agent) -> String {
-        let data = self.account.agent(agent);
-        data.status
-            .as_ref()
-            .and_then(|s| s.plan_type.clone())
-            .or_else(|| data.identity.as_ref().and_then(|i| i.plan_type.clone()))
-            .unwrap_or_else(|| t!("account.plan_unknown").into_owned())
     }
 
     fn draw_settings(&self, f: &mut Frame, area: Rect) {
@@ -1796,11 +1839,6 @@ fn fmt_reset(resets_at: Option<i64>) -> String {
     t!("account.reset_suffix", when = when).into_owned()
 }
 
-/// Local "as of MM-DD HH:MM" stamp for a unix-millis capture time.
-fn fmt_captured(ms: i64) -> String {
-    let dt = chrono::DateTime::from_timestamp_millis(ms).unwrap_or_default();
-    format!("· {}", dt.with_timezone(&chrono::Local).format("%m-%d %H:%M"))
-}
 
 /// Run `ai-handoff autostart on|off` as a detached child (no console window),
 /// so the OS logon entry is actually registered/removed — not just the config.
@@ -2056,25 +2094,7 @@ mod tests {
     fn account_app() -> App {
         let mut app = test_app();
         app.account.codex = AgentAccount {
-            identity: Some(account::Identity {
-                email: Some("dev@example.com".into()),
-                account_id: Some("acc-1".into()),
-                plan_type: Some("pro".into()),
-            }),
-            status: Some(account::AccountStatus {
-                plan_type: Some("team".into()),
-                five_hour: Some(account::RateWindow {
-                    used_percent: 18.0,
-                    window_minutes: 300,
-                    resets_at: Some(chrono::Utc::now().timestamp() + 7_680),
-                }),
-                weekly: Some(account::RateWindow {
-                    used_percent: 61.0,
-                    window_minutes: 10080,
-                    resets_at: None,
-                }),
-                captured_at: Some(chrono::Utc::now().timestamp_millis()),
-            }),
+            status: None,
             slots: vec![
                 test_slot("dev@example.com", true),
                 test_slot("alt@example.com", false),
@@ -2096,15 +2116,6 @@ mod tests {
         assert!(rows[1].label.contains("dev@example.com"));
         // The active slot is annotated.
         assert!(rows[1].label.contains(&t!("account.active").into_owned()));
-    }
-
-    #[test]
-    fn account_plan_prefers_rollout_then_jwt() {
-        let app = account_app();
-        // status.plan_type ("team") wins over identity.plan_type ("pro").
-        assert_eq!(app.account_plan(Agent::Codex), "team");
-        // Claude has neither here -> the translated "unknown".
-        assert_eq!(app.account_plan(Agent::Claude), t!("account.plan_unknown").into_owned());
     }
 
     #[test]
