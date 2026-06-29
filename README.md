@@ -26,7 +26,7 @@ You need:
 
 - Claude Code and/or Codex
 - macOS, Linux, Windows, or WSL
-- one install method: Homebrew, `curl`, Git Bash, or WSL
+- one install method: Homebrew, `curl`, PowerShell, Git Bash, or WSL
 
 You do not need Node.js or Rust to use a release build.
 
@@ -48,12 +48,26 @@ brew install --cask Lumisia/ai-handoff/ai-handoff
 ai-handoff install --yes
 ```
 
+### Windows (PowerShell)
+
+Run this in PowerShell. It downloads the CLI, adds it to your user PATH, and runs the installer.
+
+```powershell
+Set-ExecutionPolicy Bypass -Scope Process -Force; irm https://raw.githubusercontent.com/Lumisia/aho__ai-handoff/master/scripts/install.ps1 | iex
+```
+
+To pass options (skip prompts, pick one agent, pin a version), fetch the script into a scriptblock:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Lumisia/aho__ai-handoff/master/scripts/install.ps1))) -Yes -Only codex
+```
+
 ### Shell Installer
 
 Use this on macOS, Linux, WSL, or Git Bash.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Lumisia/claude-codex-auto-handoff/main/scripts/install.sh | sh -s -- --yes
+curl -fsSL https://raw.githubusercontent.com/Lumisia/aho__ai-handoff/master/scripts/install.sh | sh -s -- --yes
 ```
 
 After install:

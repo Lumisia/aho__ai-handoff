@@ -26,7 +26,7 @@ AI Handoff 是一个本地优先的 Claude Code 与 Codex 工作交接工具。
 
 - Claude Code 和/或 Codex
 - macOS、Linux、Windows 或 WSL
-- 一种安装方式：Homebrew、`curl`、Git Bash 或 WSL
+- 一种安装方式：Homebrew、`curl`、PowerShell、Git Bash 或 WSL
 
 普通用户使用 release build 时不需要 Node.js 或 Rust。
 
@@ -48,12 +48,26 @@ brew install --cask Lumisia/ai-handoff/ai-handoff
 ai-handoff install --yes
 ```
 
+### Windows (PowerShell)
+
+在 PowerShell 中运行。它会下载 CLI，加入用户 PATH，并运行安装程序。
+
+```powershell
+Set-ExecutionPolicy Bypass -Scope Process -Force; irm https://raw.githubusercontent.com/Lumisia/aho__ai-handoff/master/scripts/install.ps1 | iex
+```
+
+如需传入选项（跳过提示、只装一个 agent、固定版本），把脚本取成 scriptblock 再运行：
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Lumisia/aho__ai-handoff/master/scripts/install.ps1))) -Yes -Only codex
+```
+
 ### Shell Installer
 
 适用于 macOS、Linux、WSL 或 Git Bash。
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Lumisia/claude-codex-auto-handoff/main/scripts/install.sh | sh -s -- --yes
+curl -fsSL https://raw.githubusercontent.com/Lumisia/aho__ai-handoff/master/scripts/install.sh | sh -s -- --yes
 ```
 
 安装后：

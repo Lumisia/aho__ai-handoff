@@ -4,7 +4,7 @@
   "plugins": [
     {
       "name": "ai-handoff",
-      "source": { "source": "url", "url": "https://github.com/Lumisia/claude-codex-auto-handoff.git" },
+      "source": { "source": "url", "url": "https://github.com/Lumisia/aho__ai-handoff.git"},
       "description": "Automatic, integrity-checked task handoff and verified memory recall between Claude Code and Codex with native v2 CLI and skills.",
       "category": "Developer Tools"
     }

@@ -1,0 +1,58 @@
+name: Release
+
+# Builds the ai-handoff CLI per platform and uploads the archives that the
+# installers (scripts/install.sh, scripts/install.ps1, Homebrew) download from
+# GitHub Releases. Triggered by pushing a version tag, e.g. `git tag v2.0.1 &&
+# git push origin v2.0.1`.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target_name: linux-x86_64
+            ext: tar.gz
+          - os: macos-13
+            target_name: darwin-x86_64
+            ext: tar.gz
+          - os: macos-14
+            target_name: darwin-aarch64
+            ext: tar.gz
+          - os: windows-latest
+            target_name: windows-x86_64
+            ext: zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release -p ai-handoff-cli
+
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        run: |
+          artifact="ai-handoff-cli-${{ matrix.target_name }}.${{ matrix.ext }}"
+          tar -czf "$artifact" -C target/release ai-handoff
+          echo "ARTIFACT=$artifact" >> "$GITHUB_ENV"
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $artifact = "ai-handoff-cli-${{ matrix.target_name }}.${{ matrix.ext }}"
+          Compress-Archive -Path target/release/ai-handoff.exe -DestinationPath $artifact -Force
+          "ARTIFACT=$artifact" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ARTIFACT }}

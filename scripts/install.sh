@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-repo="Lumisia/claude-codex-auto-handoff"
+repo="Lumisia/aho__ai-handoff"
 version="latest"
 yes=""
 dry_run=""
