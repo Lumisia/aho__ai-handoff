@@ -1,4 +1,4 @@
-use std::io::{Read, Write};
+use std::io::{BufRead, Read, Write};
 
 use ai_handoff_core::{
     install::{
@@ -255,8 +255,10 @@ fn filter_agents(
 fn confirm(input: &mut dyn Read, out: &mut dyn Write, prompt: &str) -> anyhow::Result<bool> {
     write!(out, "{prompt}")?;
     out.flush()?;
+    // Read a single line, not until EOF: an interactive terminal never sends
+    // EOF after the user presses Enter, so read_to_string would block forever.
     let mut answer = String::new();
-    input.read_to_string(&mut answer)?;
+    std::io::BufReader::new(input).read_line(&mut answer)?;
     Ok(matches!(
         answer.trim().to_ascii_lowercase().as_str(),
         "y" | "yes"
@@ -266,6 +268,19 @@ fn confirm(input: &mut dyn Read, out: &mut dyn Write, prompt: &str) -> anyhow::R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn confirm_reads_one_line_without_waiting_for_eof() {
+        // Trailing bytes after the newline stand in for an interactive stream
+        // that never reaches EOF; read_line must return on the newline alone.
+        let mut input: &[u8] = b"y\nleftover";
+        let mut output = Vec::new();
+        assert!(confirm(&mut input, &mut output, "Apply? ").unwrap());
+
+        let mut no: &[u8] = b"n\n";
+        let mut output = Vec::new();
+        assert!(!confirm(&mut no, &mut output, "Apply? ").unwrap());
+    }
 
     #[test]
     fn autostart_failure_aborts_before_config_writes() {
