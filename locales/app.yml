@@ -233,6 +233,11 @@ status.save_failed:
   zh: "保存失败: %{err}"
 
 # ── Overview tab ────────────────────────────────────────────────────────
+status.capsule_refreshed:
+  en: "capsules refreshed: %{count}"
+  ko: "capsules refreshed: %{count}"
+  ja: "capsules refreshed: %{count}"
+  zh: "capsules refreshed: %{count}"
 overview.health:
   en: Health
   ko: 상태

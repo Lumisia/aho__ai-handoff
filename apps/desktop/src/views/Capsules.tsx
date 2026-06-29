@@ -39,7 +39,12 @@ export default function Capsules({ initial }: { initial: CapsuleList }) {
         {selected && (
           <>
             <h3>{selected.capsule_id}</h3>
-            <p>{selected.project_id}</p>
+            <p>
+              {selected.project_label}
+              {selected.project_label !== selected.project_id && (
+                <small> ({selected.project_id})</small>
+              )}
+            </p>
             <code>{selected.path}</code>
             {error && <p className="inline-error">{error}</p>}
             <pre>{raw?.text ?? "Select item to load raw JSON."}</pre>

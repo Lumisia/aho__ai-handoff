@@ -30,6 +30,7 @@ export interface InstallSummary {
 export interface CapsuleSummary {
   capsule_id: string;
   project_id: string;
+  project_label: string;
   created_at: string;
   source_agent: string;
   target_agent: string;

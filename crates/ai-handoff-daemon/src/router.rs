@@ -1,6 +1,6 @@
 use crate::{
     dedupe::{dedupe_key, Deduper},
-    store::{find_pending, mark_consumed, save_capsule},
+    store::{find_pending, mark_consumed, save_capsule, save_project_label},
 };
 use ai_handoff_core::{
     capsule::{
@@ -142,6 +142,7 @@ impl Handler for Router {
             HookEventKind::Stop => {
                 if let Some(payload) = extract_capsule_payload(&normalized.raw) {
                     let capsule = build_capsule(&payload, &project_id, &normalized);
+                    let _ = save_project_label(&project_id, &normalized.cwd);
                     let _ = save_capsule(&capsule);
                 }
                 Self::ok(req, json!({}), json!({}))
@@ -182,6 +183,7 @@ fn handle_checkpoint(req: &ai_handoff_ipc::protocol::Request) -> Response {
     capsule.created_at = now.to_rfc3339_opts(SecondsFormat::Secs, true);
     capsule.session.session_id = req.session_id.clone();
 
+    let _ = save_project_label(&project_id, &cwd);
     match save_capsule(&capsule) {
         Ok(path) => Router::ok(
             req,
@@ -624,6 +626,15 @@ mod tests {
         let project_id = fingerprint(cwd.path());
         let count = std::fs::read_dir(ai_handoff_core::paths::project_dir(&project_id))
             .unwrap()
+            .filter(|entry| {
+                entry.as_ref().ok().is_some_and(|entry| {
+                    entry
+                        .path()
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        .is_some_and(|ext| ext == "json")
+                })
+            })
             .count();
         assert_eq!(count, 1);
         std::env::remove_var("AI_HANDOFF_HOME");

@@ -19,7 +19,9 @@ impl Default for ClientConfig {
 }
 
 pub fn send(req: &Request, cfg: &ClientConfig) -> Response {
+    cleanup_response(&req.request_id);
     if write_request(req).is_err() {
+        cleanup_request(&req.request_id);
         return degraded(&req.request_id, "daemon_unavailable");
     }
 
@@ -30,22 +32,38 @@ pub fn send(req: &Request, cfg: &ClientConfig) -> Response {
         match std::fs::read(&response_path) {
             Ok(bytes) => match serde_json::from_slice::<Response>(&bytes) {
                 Ok(response) => {
-                    let _ = std::fs::remove_file(
-                        requests_dir().join(format!("{}.json", req.request_id)),
-                    );
+                    cleanup_request(&req.request_id);
                     let _ = std::fs::remove_file(response_path);
                     return response;
                 }
-                Err(_) => return degraded(&req.request_id, "daemon_unavailable"),
+                Err(_) => {
+                    cleanup_request(&req.request_id);
+                    cleanup_response(&req.request_id);
+                    return degraded(&req.request_id, "daemon_unavailable");
+                }
             },
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 std::thread::sleep(cfg.poll_interval);
             }
-            Err(_) => return degraded(&req.request_id, "daemon_unavailable"),
+            Err(_) => {
+                cleanup_request(&req.request_id);
+                cleanup_response(&req.request_id);
+                return degraded(&req.request_id, "daemon_unavailable");
+            }
         }
     }
 
+    cleanup_request(&req.request_id);
+    cleanup_response(&req.request_id);
     degraded(&req.request_id, "daemon_unavailable")
+}
+
+fn cleanup_request(request_id: &str) {
+    let _ = std::fs::remove_file(requests_dir().join(format!("{request_id}.json")));
+}
+
+fn cleanup_response(request_id: &str) {
+    let _ = std::fs::remove_file(responses_dir().join(format!("{request_id}.json")));
 }
 
 fn write_request(req: &Request) -> std::io::Result<()> {
@@ -154,6 +172,10 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(1));
         assert_eq!(resp.status, Status::Degraded);
         assert_eq!(resp.warnings, vec!["daemon_unavailable"]);
+        assert!(
+            !requests_dir().join("req-offline.json").exists(),
+            "timed-out requests must not be processed later when the daemon starts"
+        );
         std::env::remove_var("AI_HANDOFF_HOME");
     }
 }

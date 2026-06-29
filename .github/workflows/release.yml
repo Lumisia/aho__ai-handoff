@@ -27,9 +27,6 @@ jobs:
           - os: ubuntu-latest
             target_name: linux-x86_64
             ext: tar.gz
-          - os: macos-13
-            target_name: darwin-x86_64
-            ext: tar.gz
           - os: macos-14
             target_name: darwin-aarch64
             ext: tar.gz

@@ -141,6 +141,13 @@ fn checkpoint_with_daemon_online_writes_capsule() {
     let project_id = ai_handoff_core::fingerprint::fingerprint(cwd.path());
     let pending = ai_handoff_daemon::store::find_pending(&project_id).unwrap();
     assert_eq!(pending.summary.goal, "manual checkpoint");
+    assert_eq!(
+        std::fs::read_to_string(
+            ai_handoff_core::paths::project_dir(&project_id).join("project.label")
+        )
+        .unwrap(),
+        cwd.path().file_name().unwrap().to_string_lossy()
+    );
     std::env::set_current_dir(previous_cwd).unwrap();
     std::env::remove_var("AI_HANDOFF_HOME");
 }

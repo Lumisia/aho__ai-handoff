@@ -14,6 +14,20 @@ pub fn save_capsule(c: &Capsule) -> std::io::Result<PathBuf> {
     Ok(path)
 }
 
+pub fn save_project_label(project_id: &str, cwd: &Path) -> std::io::Result<()> {
+    let Some(label) = cwd
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    else {
+        return Ok(());
+    };
+    let dir = paths::project_dir(project_id);
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join("project.label"), label)
+}
+
 pub fn find_pending(project_id: &str) -> Option<Capsule> {
     let dir = paths::project_dir(project_id);
     let entries = std::fs::read_dir(dir).ok()?;

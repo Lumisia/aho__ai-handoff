@@ -9,6 +9,7 @@ use serde_json::Value;
 use crate::{
     capsule::Capsule,
     capsule_codec,
+    fingerprint::fingerprint,
     install::{duplicate, state},
     paths,
 };
@@ -59,6 +60,7 @@ pub struct InstallSummary {
 pub struct CapsuleSummary {
     pub capsule_id: String,
     pub project_id: String,
+    pub project_label: String,
     pub created_at: String,
     pub source_agent: String,
     pub target_agent: String,
@@ -196,6 +198,11 @@ pub fn list_capsules() -> CapsuleList {
 }
 
 pub fn list_capsules_for(home: &Path) -> CapsuleList {
+    let current = std::env::current_dir().ok();
+    list_capsules_for_with_current(home, current.as_deref())
+}
+
+fn list_capsules_for_with_current(home: &Path, current_cwd: Option<&Path>) -> CapsuleList {
     let root = home.join("store").join("capsules");
     let mut items = Vec::new();
     let mut skipped = 0usize;
@@ -205,6 +212,8 @@ pub fn list_capsules_for(home: &Path) -> CapsuleList {
             if !project.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                 continue;
             }
+            let project_id = project.file_name().to_string_lossy().into_owned();
+            let project_label = project_label_for(&project.path(), &project_id, current_cwd);
             if let Ok(files) = fs::read_dir(project.path()) {
                 for file in files.flatten() {
                     let path = file.path();
@@ -212,7 +221,9 @@ pub fn list_capsules_for(home: &Path) -> CapsuleList {
                         continue;
                     }
                     match capsule_codec::read_capsule(&path) {
-                        Ok(capsule) => items.push(summary_from_capsule(capsule, path)),
+                        Ok(capsule) => {
+                            items.push(summary_from_capsule(capsule, path, project_label.clone()))
+                        }
                         Err(_) => skipped += 1,
                     }
                 }
@@ -227,6 +238,34 @@ pub fn list_capsules_for(home: &Path) -> CapsuleList {
         pending_count,
         skipped,
     }
+}
+
+fn project_label_for(project_dir: &Path, project_id: &str, current_cwd: Option<&Path>) -> String {
+    let from_sidecar = fs::read_to_string(project_dir.join("project.label"))
+        .ok()
+        .map(|label| label.trim().to_string())
+        .filter(|label| !label.is_empty());
+    if let Some(label) = from_sidecar {
+        return label;
+    }
+
+    if let Some(cwd) = current_cwd {
+        if fingerprint(cwd) == project_id {
+            if let Some(label) = path_label(cwd) {
+                return label;
+            }
+        }
+    }
+
+    project_id.to_string()
+}
+
+fn path_label(path: &Path) -> Option<String> {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
 }
 
 fn is_capsule_file(path: &Path) -> bool {
@@ -571,10 +610,11 @@ fn event_has_ai_handoff(value: Option<&Value>) -> bool {
         .unwrap_or(false)
 }
 
-fn summary_from_capsule(capsule: Capsule, path: PathBuf) -> CapsuleSummary {
+fn summary_from_capsule(capsule: Capsule, path: PathBuf, project_label: String) -> CapsuleSummary {
     CapsuleSummary {
         capsule_id: capsule.capsule_id,
         project_id: capsule.project_id,
+        project_label,
         created_at: capsule.created_at,
         source_agent: format!("{:?}", capsule.source_agent),
         target_agent: format!("{:?}", capsule.target_agent),
@@ -828,5 +868,51 @@ trusted_hash = "sha256:trusted-v2"
         assert_eq!(list.items[0].capsule_id, "cap_20260625_020202_abcd");
         assert_eq!(list.items[1].capsule_id, "cap_20260625_010101_abcd");
         assert_eq!(list.items[1].summary_preview, "ship dashboard");
+    }
+
+    #[test]
+    fn capsule_list_uses_project_label_sidecar() {
+        let temp = tempfile::tempdir().unwrap();
+        let good = capsule(
+            "cap_20260625_010101_abcd",
+            "fbaadf85a8ab14c83af2cacc",
+            "2026-06-25T01:01:01Z",
+        );
+        let project_dir = temp.path().join("store/capsules/fbaadf85a8ab14c83af2cacc");
+        write(&project_dir.join("project.label"), "ai-handoff\n");
+        write(
+            &project_dir.join("cap_20260625_010101_abcd.json"),
+            &serde_json::to_string_pretty(&good).unwrap(),
+        );
+
+        let list = list_capsules_for(temp.path());
+
+        assert_eq!(list.items[0].project_id, "fbaadf85a8ab14c83af2cacc");
+        assert_eq!(list.items[0].project_label, "ai-handoff");
+    }
+
+    #[test]
+    fn capsule_list_labels_current_project_fingerprint_from_cwd() {
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = temp.path().join("ai-handoff");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let project_id = crate::fingerprint::fingerprint(&cwd);
+        let good = capsule(
+            "cap_20260625_010101_abcd",
+            &project_id,
+            "2026-06-25T01:01:01Z",
+        );
+        write(
+            &temp
+                .path()
+                .join("store/capsules")
+                .join(&project_id)
+                .join("cap_20260625_010101_abcd.json"),
+            &serde_json::to_string_pretty(&good).unwrap(),
+        );
+
+        let list = list_capsules_for_with_current(temp.path(), Some(&cwd));
+
+        assert_eq!(list.items[0].project_label, "ai-handoff");
     }
 }

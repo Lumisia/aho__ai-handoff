@@ -527,7 +527,8 @@ pub fn save_slot(
     identity: Option<&Identity>,
     source: &str,
 ) -> std::io::Result<String> {
-    let label = sanitize(&label_from_identity(agent, identity));
+    let base_label = sanitize(&label_from_identity(agent, identity));
+    let label = resolve_slot_label(agent, &base_label, cred_bytes, identity);
     let dir = slot_dir(agent, &label);
     std::fs::create_dir_all(&dir)?;
     atomic_write(&dir.join(cred_filename(agent)), cred_bytes)?;
@@ -547,6 +548,79 @@ pub fn save_slot(
     let json = serde_json::to_vec_pretty(&meta).map_err(std::io::Error::other)?;
     atomic_write(&dir.join("account.json"), &json)?;
     Ok(label)
+}
+
+fn resolve_slot_label(
+    agent: Agent,
+    base_label: &str,
+    cred_bytes: &[u8],
+    identity: Option<&Identity>,
+) -> String {
+    if slot_can_be_reused(agent, base_label, cred_bytes, identity) {
+        return base_label.to_string();
+    }
+
+    if let Some(email) = identity.and_then(|i| i.email.as_deref()) {
+        let email_label = sanitize(email);
+        if email_label != base_label
+            && slot_can_be_reused(agent, &email_label, cred_bytes, identity)
+        {
+            return email_label;
+        }
+    }
+
+    for n in 2.. {
+        let label = format!("{base_label}-{n}");
+        if slot_can_be_reused(agent, &label, cred_bytes, identity) {
+            return label;
+        }
+    }
+    unreachable!("unbounded suffix search must find a slot label")
+}
+
+fn slot_can_be_reused(
+    agent: Agent,
+    label: &str,
+    cred_bytes: &[u8],
+    identity: Option<&Identity>,
+) -> bool {
+    let dir = slot_dir(agent, label);
+    if !dir.exists() {
+        return true;
+    }
+    if std::fs::read(dir.join(cred_filename(agent)))
+        .map(|existing| existing == cred_bytes)
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    read_meta(&dir)
+        .as_ref()
+        .is_some_and(|meta| meta_matches_identity(meta, identity))
+}
+
+fn meta_matches_identity(meta: &AccountMeta, identity: Option<&Identity>) -> bool {
+    let Some(identity) = identity else {
+        return false;
+    };
+    let mut matched_field = false;
+    if let Some(email) = identity.email.as_deref() {
+        if let Some(existing) = meta.email.as_deref() {
+            matched_field = true;
+            if !existing.eq_ignore_ascii_case(email) {
+                return false;
+            }
+        }
+    }
+    if let Some(account_id) = identity.account_id.as_deref() {
+        if let Some(existing) = meta.account_id.as_deref() {
+            matched_field = true;
+            if existing != account_id {
+                return false;
+            }
+        }
+    }
+    matched_field
 }
 
 fn label_from_identity(agent: Agent, identity: Option<&Identity>) -> String {
@@ -953,6 +1027,67 @@ mod tests {
             label_from_identity(Agent::Codex, Some(&personal)),
             label_from_identity(Agent::Codex, Some(&work))
         );
+    }
+
+    #[test]
+    fn save_slot_preserves_existing_slot_when_label_collides_with_different_email() {
+        let _guard = crate::test_support::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+
+        let naver = Identity {
+            email: Some("h2171@naver.com".into()),
+            account_id: Some("shared-account".into()),
+            plan_type: Some("plus".into()),
+        };
+        let gmail = Identity {
+            email: Some("h2171@gmail.com".into()),
+            account_id: Some("shared-account".into()),
+            plan_type: Some("plus".into()),
+        };
+
+        let first = save_slot(Agent::Codex, b"naver-credential", Some(&naver), "test").unwrap();
+        let second = save_slot(Agent::Codex, b"gmail-credential", Some(&gmail), "test").unwrap();
+
+        assert_eq!(first, "shared-account");
+        assert_eq!(second, "h2171@gmail.com");
+        let slots = list_slots(Agent::Codex);
+        assert_eq!(slots.len(), 2);
+        assert_eq!(
+            std::fs::read(slot_dir(Agent::Codex, &first).join("auth.json")).unwrap(),
+            b"naver-credential"
+        );
+        assert_eq!(
+            std::fs::read(slot_dir(Agent::Codex, &second).join("auth.json")).unwrap(),
+            b"gmail-credential"
+        );
+
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn save_slot_updates_same_identity_in_place() {
+        let _guard = crate::test_support::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+
+        let identity = Identity {
+            email: Some("same@example.com".into()),
+            account_id: Some("same-account".into()),
+            plan_type: Some("plus".into()),
+        };
+
+        let first = save_slot(Agent::Codex, b"old-token", Some(&identity), "test").unwrap();
+        let second = save_slot(Agent::Codex, b"new-token", Some(&identity), "test").unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(list_slots(Agent::Codex).len(), 1);
+        assert_eq!(
+            std::fs::read(slot_dir(Agent::Codex, &first).join("auth.json")).unwrap(),
+            b"new-token"
+        );
+
+        std::env::remove_var("AI_HANDOFF_HOME");
     }
 
     #[test]

@@ -140,6 +140,7 @@ pub struct CapsuleAgent {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CapsuleProject {
     pub project_id: String,
+    pub project_label: String,
     pub capsules: Vec<CapsuleSummary>,
 }
 
@@ -169,6 +170,7 @@ pub fn capsule_tree(list: &CapsuleList) -> Vec<CapsuleAgent> {
             Some(pi) => agent.projects[pi].capsules.push(item.clone()),
             None => agent.projects.push(CapsuleProject {
                 project_id: item.project_id.clone(),
+                project_label: item.project_label.clone(),
                 capsules: vec![item.clone()],
             }),
         }
@@ -313,6 +315,7 @@ mod tests {
         let cap = |agent: &str, project: &str, id: &str| CapsuleSummary {
             capsule_id: id.into(),
             project_id: project.into(),
+            project_label: format!("label-{project}"),
             created_at: "2026-06-25T01:01:01Z".into(),
             source_agent: agent.into(),
             target_agent: "Codex".into(),
@@ -336,6 +339,7 @@ mod tests {
         assert_eq!(tree[0].count, 3);
         assert_eq!(tree[0].projects.len(), 2);
         assert_eq!(tree[0].projects[0].project_id, "proj-a");
+        assert_eq!(tree[0].projects[0].project_label, "label-proj-a");
         assert_eq!(tree[0].projects[0].capsules.len(), 2);
         assert_eq!(tree[1].agent, "ClaudeCode");
         assert_eq!(tree[1].projects.len(), 1);

@@ -205,7 +205,7 @@ struct CapRow {
 }
 
 /// What a `CapRow` points at, by index into the agent → project → capsule tree.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum CapTarget {
     Agent(usize),
     Project(usize, usize),
@@ -1296,6 +1296,10 @@ impl App {
     }
 
     fn on_capsule_key(&mut self, key: KeyEvent) {
+        if matches!(key.code, KeyCode::Char('r')) {
+            self.cap_refresh();
+            return;
+        }
         match self.cap_focus {
             CapFocus::Tree => self.cap_tree_key(key),
             CapFocus::Detail => self.cap_detail_key(key),
@@ -1401,6 +1405,102 @@ impl App {
         self.cap_focus = CapFocus::Tree;
         self.cap_confirm_delete = false;
         self.status = t!("hint.capsule_tree").into_owned();
+    }
+
+    fn cap_refresh(&mut self) {
+        let had_tree = !self.cap_tree.is_empty();
+        let selected_path = self
+            .selected_capsule()
+            .map(|(ai, pi, ci)| self.cap_tree[ai].projects[pi].capsules[ci].path.clone());
+        let expanded_agents = self
+            .cap_expanded_agents
+            .iter()
+            .filter_map(|ai| self.cap_tree.get(*ai).map(|agent| agent.agent.clone()))
+            .collect::<HashSet<_>>();
+        let expanded_projects = self
+            .cap_expanded_projects
+            .iter()
+            .filter_map(|(ai, pi)| {
+                let agent = self.cap_tree.get(*ai)?;
+                let project = agent.projects.get(*pi)?;
+                Some((agent.agent.clone(), project.project_id.clone()))
+            })
+            .collect::<HashSet<_>>();
+
+        self.snapshot = ai_handoff_core::dashboard::dashboard_snapshot();
+        self.cap_tree = capsule_tree(&self.snapshot.capsules);
+        self.cap_expanded_agents = self
+            .cap_tree
+            .iter()
+            .enumerate()
+            .filter_map(|(ai, agent)| {
+                if !had_tree || expanded_agents.contains(&agent.agent) {
+                    Some(ai)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        self.cap_expanded_projects = self
+            .cap_tree
+            .iter()
+            .enumerate()
+            .flat_map(|(ai, agent)| {
+                let expanded_projects = &expanded_projects;
+                agent
+                    .projects
+                    .iter()
+                    .enumerate()
+                    .filter_map(move |(pi, project)| {
+                        if expanded_projects
+                            .contains(&(agent.agent.clone(), project.project_id.clone()))
+                        {
+                            Some((ai, pi))
+                        } else {
+                            None
+                        }
+                    })
+            })
+            .collect();
+
+        if let Some(path) = selected_path.as_deref() {
+            if let Some((ai, pi, ci)) = self.find_capsule_by_path(path) {
+                self.cap_expanded_agents.insert(ai);
+                self.cap_expanded_projects.insert((ai, pi));
+                if let Some(row) = self
+                    .cap_rows()
+                    .iter()
+                    .position(|row| row.target == CapTarget::Capsule(ai, pi, ci))
+                {
+                    self.cap_sel = row;
+                }
+            }
+        }
+
+        let n = self.cap_rows().len();
+        if self.cap_sel >= n {
+            self.cap_sel = n.saturating_sub(1);
+        }
+        self.cap_detail = None;
+        self.cap_load_content();
+        self.status = t!(
+            "status.capsule_refreshed",
+            count = self.snapshot.capsules.items.len()
+        )
+        .into_owned();
+    }
+
+    fn find_capsule_by_path(&self, path: &str) -> Option<(usize, usize, usize)> {
+        for (ai, agent) in self.cap_tree.iter().enumerate() {
+            for (pi, project) in agent.projects.iter().enumerate() {
+                for (ci, capsule) in project.capsules.iter().enumerate() {
+                    if capsule.path == path {
+                        return Some((ai, pi, ci));
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Keys while editing the selected capsule field.
@@ -1577,7 +1677,7 @@ impl App {
                     label: format!(
                         "{} {} ({})",
                         if p_exp { "▾" } else { "▸" },
-                        project_label(&proj.project_id),
+                        project_label(&proj.project_label),
                         proj.capsules.len()
                     ),
                     target: CapTarget::Project(ai, pi),
@@ -2726,7 +2826,7 @@ impl App {
         for cap in self.snapshot.capsules.items.iter().take(3) {
             lines.push(format!(
                 "{} {} -> {} {}",
-                project_label(&cap.project_id),
+                project_label(&cap.project_label),
                 cap.source_agent,
                 cap.target_agent,
                 cap.created_at.get(..10).unwrap_or(&cap.created_at)
@@ -4929,6 +5029,7 @@ mod tests {
             items: vec![CapsuleSummary {
                 capsule_id: "c1".into(),
                 project_id: "proj-a".into(),
+                project_label: "Project A".into(),
                 created_at: "2026-06-25T01:01:01Z".into(),
                 source_agent: "Codex".into(),
                 target_agent: "ClaudeCode".into(),
@@ -5002,6 +5103,7 @@ mod tests {
             items: vec![CapsuleSummary {
                 capsule_id: "cap_1".into(),
                 project_id: "projX".into(),
+                project_label: "Project X".into(),
                 created_at: "2026-06-25T12:00:00Z".into(),
                 source_agent: "Codex".into(),
                 target_agent: "ClaudeCode".into(),
@@ -5046,5 +5148,78 @@ mod tests {
         app.on_key(key(KeyCode::Char('d')));
         assert!(!cap_path.exists());
         assert!(app.cap_tree.is_empty());
+    }
+
+    #[test]
+    fn capsule_r_refreshes_tree_from_disk() {
+        use ai_handoff_core::capsule::{
+            AgentKind, Capsule, Consumption, ConsumptionState, RedactionMeta, Session, Summary,
+        };
+
+        let home = tempfile::tempdir().unwrap();
+        let previous_home = std::env::var_os("AI_HANDOFF_HOME");
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        let snapshot = ai_handoff_core::dashboard::dashboard_snapshot_for(home.path(), home.path());
+        let usage = UsageView::from_events(&[]);
+        let cfg = ai_handoff_core::config::Config::default();
+        let mut app = App::new(
+            snapshot,
+            usage,
+            settings_rows(&cfg),
+            home.path().join("config.toml"),
+        );
+        app.tab = Tab::Capsule;
+        app.focus_content = true;
+        assert!(app.cap_tree.is_empty());
+
+        let capsule = Capsule {
+            schema_version: 2,
+            capsule_id: "cap_20260625_120000_abcd".into(),
+            project_id: "proj-refresh".into(),
+            created_at: "2026-06-25T12:00:00Z".into(),
+            source_agent: AgentKind::Codex,
+            target_agent: AgentKind::ClaudeCode,
+            session: Session::default(),
+            summary: Summary {
+                goal: "fresh capsule".into(),
+                done: vec![],
+                remaining: vec![],
+                risks: vec![],
+            },
+            files: vec![],
+            next_prompt: None,
+            redaction: RedactionMeta {
+                applied: false,
+                ruleset: "none".into(),
+            },
+            consumption: Consumption {
+                state: ConsumptionState::Pending,
+                consumed_by: None,
+                consumed_at: None,
+            },
+        };
+        let project_dir = home.path().join("store/capsules/proj-refresh");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(project_dir.join("project.label"), "ai-handoff").unwrap();
+        ai_handoff_core::capsule_codec::write_capsule(
+            &project_dir.join("cap_20260625_120000_abcd.json"),
+            &capsule,
+            ai_handoff_core::config::CapsuleFormat::Json,
+        )
+        .unwrap();
+
+        app.on_key(key(KeyCode::Char('r')));
+
+        assert_eq!(app.cap_tree.len(), 1);
+        assert_eq!(app.cap_tree[0].projects[0].project_label, "ai-handoff");
+        assert_eq!(
+            app.cap_tree[0].projects[0].capsules[0].summary_preview,
+            "fresh capsule"
+        );
+
+        match previous_home {
+            Some(value) => std::env::set_var("AI_HANDOFF_HOME", value),
+            None => std::env::remove_var("AI_HANDOFF_HOME"),
+        }
     }
 }
