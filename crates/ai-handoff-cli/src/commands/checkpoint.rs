@@ -2,21 +2,37 @@ use ai_handoff_ipc::{
     client::{send, ClientConfig},
     protocol::{ClientInfo, Request, Status, VERSION},
 };
+use anyhow::Context;
 use chrono::{SecondsFormat, Utc};
 use serde_json::{json, Value};
 use std::io::{Read, Write};
 
-pub fn run(message: Option<String>) -> anyhow::Result<i32> {
-    let stdin = std::io::stdin();
+pub fn run(
+    message: Option<String>,
+    agent: Option<String>,
+    file: Option<std::path::PathBuf>,
+) -> anyhow::Result<i32> {
+    // --file bypasses stdin, which several shells (notably PowerShell) do not
+    // pipe to native executables reliably; fall back to stdin when absent.
+    let mut raw_text = String::new();
+    if let Some(path) = file {
+        raw_text = std::fs::read_to_string(&path)
+            .with_context(|| format!("could not read capsule file {}", path.display()))?;
+    } else {
+        let stdin = std::io::stdin();
+        let _ = stdin.lock().read_to_string(&mut raw_text);
+    }
     let stdout = std::io::stdout();
-    let mut input = stdin.lock();
     let mut out = stdout.lock();
-    Ok(run_io(message, &mut input, &mut out))
+    Ok(run_io(message, agent, &raw_text, &mut out))
 }
 
-pub fn run_io(message: Option<String>, input: &mut dyn Read, out: &mut dyn Write) -> i32 {
-    let mut raw_text = String::new();
-    let _ = input.read_to_string(&mut raw_text);
+pub fn run_io(
+    message: Option<String>,
+    agent: Option<String>,
+    raw_text: &str,
+    out: &mut dyn Write,
+) -> i32 {
     let input_json = serde_json::from_str::<Value>(raw_text.trim()).unwrap_or(Value::Null);
     let cwd = std::env::current_dir()
         .map(|path| path.to_string_lossy().into_owned())
@@ -29,6 +45,18 @@ pub fn run_io(message: Option<String>, input: &mut dyn Read, out: &mut dyn Write
                 .map(str::to_string)
         })
         .unwrap_or_else(|| "manual checkpoint".to_string());
+    // Source agent sets the handoff direction. Precedence: --agent flag, then a
+    // stdin `agent` field, then default codex. Normalize aliases to the values
+    // the daemon's parse_agent accepts.
+    let agent = agent
+        .or_else(|| {
+            input_json
+                .get("agent")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .map(|value| normalize_agent(&value))
+        .unwrap_or_else(|| "codex".to_string());
 
     let mut raw_hook_input = if input_json.is_object() {
         input_json
@@ -45,7 +73,7 @@ pub fn run_io(message: Option<String>, input: &mut dyn Read, out: &mut dyn Write
         version: VERSION,
         request_id: uuid::Uuid::new_v4().to_string(),
         kind: "checkpoint".to_string(),
-        agent: "codex".to_string(),
+        agent: agent.clone(),
         event: "checkpoint".to_string(),
         received_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
         cwd: cwd.clone(),
@@ -66,5 +94,13 @@ pub fn run_io(message: Option<String>, input: &mut dyn Read, out: &mut dyn Write
         0
     } else {
         1
+    }
+}
+
+fn normalize_agent(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "claude" | "claude-code" | "claude_code" | "claudecode" => "claude-code".to_string(),
+        "codex" => "codex".to_string(),
+        other => other.to_string(),
     }
 }

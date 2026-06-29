@@ -27,6 +27,14 @@ pub enum Commands {
     Checkpoint {
         #[arg(long)]
         message: Option<String>,
+        /// Source agent writing the capsule (codex or claude-code). Sets the
+        /// handoff direction; defaults to codex when omitted.
+        #[arg(long)]
+        agent: Option<String>,
+        /// Read the JSON capsule body from this file instead of stdin. Avoids
+        /// shell stdin quirks (PowerShell does not pipe to native stdin).
+        #[arg(long)]
+        file: Option<std::path::PathBuf>,
     },
     Tui,
     Dashboard,
@@ -165,7 +173,11 @@ pub fn run_cli(cli: Cli) -> anyhow::Result<i32> {
         Some(Commands::Hook { event, agent }) => commands::hook::run(&event, agent),
         Some(Commands::Daemon { action }) => commands::daemon::run(action),
         Some(Commands::Doctor { json }) => commands::doctor::run(json),
-        Some(Commands::Checkpoint { message }) => commands::checkpoint::run(message),
+        Some(Commands::Checkpoint {
+            message,
+            agent,
+            file,
+        }) => commands::checkpoint::run(message, agent, file),
         Some(Commands::Dashboard) => commands::dashboard::run(),
         Some(Commands::Install {
             dry_run,

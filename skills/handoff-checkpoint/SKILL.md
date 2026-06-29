@@ -13,11 +13,26 @@ automatic 5-hour threshold.
 
 ## Usage
 
-    ai-handoff checkpoint --message "<goal summary>"
-    aho checkpoint --message "<goal summary>"
+    ai-handoff checkpoint --agent <self> --message "<goal summary>"
+    aho checkpoint --agent <self> --message "<goal summary>"
 
-For richer handoff detail, send JSON on stdin. The daemon trims each field using
-the shared config limits:
+Always pass `--agent` set to the agent you are: `claude-code` if you are Claude
+Code, `codex` if you are Codex. It sets the handoff direction (source → target).
+Omitting it defaults the source to codex, which records the wrong direction when
+Claude Code runs the checkpoint.
+
+For richer handoff detail, supply a JSON capsule body. Write the JSON to a file
+and pass `--file`, which is robust across shells:
+
+    ai-handoff checkpoint --agent <self> --file <path-to.json>
+
+Prefer `--file` over piping JSON on stdin. PowerShell does not pipe to a native
+executable's stdin, so `<json> | ai-handoff checkpoint` silently drops the body
+and only `--message` survives. On POSIX shells stdin still works.
+
+JSON fields (top level): `goal`, `done` (array), `remaining` (array),
+`risks` (array), `next_prompt` (string), optional `agent`. The daemon trims each
+field using the shared config limits:
 
 - `capsule.next_prompt_max_items`
 - `capsule.remaining_max_items`
@@ -25,7 +40,7 @@ the shared config limits:
 - `capsule.risks_max_items`
 
 Invoke from the skill list as the handoff checkpoint entry. The user-facing command is
-`/handoff checkpoint <goal>`; run `ai-handoff checkpoint --message "<goal>"` and report
-the capsule ID on success.
+`/handoff checkpoint <goal>`; run `ai-handoff checkpoint --agent <self> --message "<goal>"`
+and report the capsule ID on success.
 
 Never include secrets, credentials, or raw transcript text in the message.
