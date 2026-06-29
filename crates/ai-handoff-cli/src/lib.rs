@@ -343,15 +343,21 @@ mod tests {
     #[test]
     fn parses_account_actions() {
         match Cli::parse_from(["ai-handoff", "account", "list", "--json"]).command {
-            Some(Commands::Account { action: AccountAction::List { json } }) => assert!(json),
+            Some(Commands::Account {
+                action: AccountAction::List { json },
+            }) => assert!(json),
             other => panic!("unexpected command: {other:?}"),
         }
         match Cli::parse_from(["ai-handoff", "account", "status"]).command {
-            Some(Commands::Account { action: AccountAction::Status { json } }) => assert!(!json),
+            Some(Commands::Account {
+                action: AccountAction::Status { json },
+            }) => assert!(!json),
             other => panic!("unexpected command: {other:?}"),
         }
         match Cli::parse_from(["ai-handoff", "account", "doctor"]).command {
-            Some(Commands::Account { action: AccountAction::Doctor { .. } }) => {}
+            Some(Commands::Account {
+                action: AccountAction::Doctor { .. },
+            }) => {}
             other => panic!("unexpected command: {other:?}"),
         }
     }

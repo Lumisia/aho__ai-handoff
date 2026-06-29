@@ -30,6 +30,17 @@ pub fn run_io(message: Option<String>, input: &mut dyn Read, out: &mut dyn Write
         })
         .unwrap_or_else(|| "manual checkpoint".to_string());
 
+    let mut raw_hook_input = if input_json.is_object() {
+        input_json
+    } else {
+        json!({})
+    };
+    if let Some(obj) = raw_hook_input.as_object_mut() {
+        obj.insert("cwd".to_string(), json!(cwd.clone()));
+        obj.entry("message".to_string())
+            .or_insert_with(|| json!(message.clone()));
+    }
+
     let req = Request {
         version: VERSION,
         request_id: uuid::Uuid::new_v4().to_string(),
@@ -40,7 +51,7 @@ pub fn run_io(message: Option<String>, input: &mut dyn Read, out: &mut dyn Write
         cwd: cwd.clone(),
         session_id: None,
         turn_id: None,
-        raw_hook_input: json!({ "cwd": cwd, "message": message }),
+        raw_hook_input,
         client: ClientInfo {
             binary_version: env!("CARGO_PKG_VERSION").to_string(),
             pid: std::process::id(),

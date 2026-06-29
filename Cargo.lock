@@ -100,6 +100,7 @@ version = "2.0.0-mvp"
 dependencies = [
  "ai-handoff-core",
  "ai-handoff-usage",
+ "base64 0.22.1",
  "chrono",
  "crossterm",
  "ratatui",

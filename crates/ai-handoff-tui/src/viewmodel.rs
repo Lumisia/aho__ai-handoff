@@ -5,16 +5,18 @@ use ai_handoff_core::config::{self, Config, KeyKind};
 use ai_handoff_core::dashboard::{CapsuleList, CapsuleSummary, CheckStatus, DashboardSnapshot};
 use ai_handoff_usage::{
     aggregate::{self, Group},
-    model::UsageEvent,
+    model::{Tokens, UsageEvent},
     Dimension,
 };
+
+const DAY_BREAKDOWN_WINDOW_DAYS: i64 = 30;
 
 /// Aggregated usage for the Usage tab.
 #[derive(Debug, Clone)]
 pub struct UsageView {
     pub total: Group,
     pub by_source: Vec<Group>,
-    /// Chronological (ascending day) for the per-day bars.
+    /// Recent day rows, newest first, with empty days included for the window.
     pub by_day: Vec<Group>,
     pub by_model: Vec<Group>,
     pub by_project: Vec<Group>,
@@ -22,8 +24,39 @@ pub struct UsageView {
 
 impl UsageView {
     pub fn from_events(events: &[UsageEvent]) -> Self {
-        let mut by_day = aggregate::group_by(events, Dimension::Day);
-        by_day.sort_by(|a, b| a.key.cmp(&b.key));
+        Self::from_events_for_today(events, chrono::Local::now().date_naive())
+    }
+
+    pub fn from_events_for_today(events: &[UsageEvent], today: chrono::NaiveDate) -> Self {
+        let since = today - chrono::Duration::days(DAY_BREAKDOWN_WINDOW_DAYS - 1);
+        let since = since.format("%Y-%m-%d").to_string();
+        let through = today.format("%Y-%m-%d").to_string();
+        let recent_events = events
+            .iter()
+            .filter(|event| {
+                let day = event.day.as_str();
+                day >= since.as_str() && day <= through.as_str()
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut grouped_by_day = aggregate::group_by(&recent_events, Dimension::Day)
+            .into_iter()
+            .map(|g| (g.key.clone(), g))
+            .collect::<std::collections::HashMap<_, _>>();
+        let by_day = (0..DAY_BREAKDOWN_WINDOW_DAYS)
+            .map(|offset| {
+                let key = (today - chrono::Duration::days(offset))
+                    .format("%Y-%m-%d")
+                    .to_string();
+                grouped_by_day.remove(&key).unwrap_or_else(|| Group {
+                    key,
+                    tokens: Tokens::default(),
+                    cost_usd: 0.0,
+                    unpriced_tokens: 0,
+                    events: 0,
+                })
+            })
+            .collect();
         UsageView {
             total: aggregate::totals(events),
             by_source: aggregate::group_by(events, Dimension::Source),
@@ -128,7 +161,11 @@ pub fn capsule_tree(list: &CapsuleList) -> Vec<CapsuleAgent> {
         };
         let agent = &mut agents[ai];
         agent.count += 1;
-        match agent.projects.iter().position(|p| p.project_id == item.project_id) {
+        match agent
+            .projects
+            .iter()
+            .position(|p| p.project_id == item.project_id)
+        {
             Some(pi) => agent.projects[pi].capsules.push(item.clone()),
             None => agent.projects.push(CapsuleProject {
                 project_id: item.project_id.clone(),
@@ -175,20 +212,97 @@ mod tests {
     }
 
     #[test]
-    fn usage_view_orders_days_ascending() {
+    fn usage_view_orders_days_descending_and_fills_empty_window() {
         let events = vec![
-            ev(Source::Codex, "gpt-5.5", "2026-06-18", Tokens { input: 5, ..Default::default() }),
-            ev(Source::Codex, "gpt-5.5", "2026-06-16", Tokens { input: 5, ..Default::default() }),
-            ev(Source::Codex, "gpt-5.5", "2026-06-17", Tokens { input: 5, ..Default::default() }),
+            ev(
+                Source::Codex,
+                "gpt-5.5",
+                "2026-06-18",
+                Tokens {
+                    input: 5,
+                    ..Default::default()
+                },
+            ),
+            ev(
+                Source::Codex,
+                "gpt-5.5",
+                "2026-06-16",
+                Tokens {
+                    input: 5,
+                    ..Default::default()
+                },
+            ),
+            ev(
+                Source::Codex,
+                "gpt-5.5",
+                "2026-06-17",
+                Tokens {
+                    input: 5,
+                    ..Default::default()
+                },
+            ),
         ];
-        let v = UsageView::from_events(&events);
+        let v = UsageView::from_events_for_today(
+            &events,
+            chrono::NaiveDate::from_ymd_opt(2026, 6, 18).unwrap(),
+        );
         let days: Vec<&str> = v.by_day.iter().map(|g| g.key.as_str()).collect();
-        assert_eq!(days, ["2026-06-16", "2026-06-17", "2026-06-18"]);
+        assert_eq!(days.len(), 30);
+        assert_eq!(&days[0..3], ["2026-06-18", "2026-06-17", "2026-06-16"]);
+        assert_eq!(days[29], "2026-05-20");
+        assert_eq!(v.by_day[0].tokens.total(), 5);
+        assert_eq!(v.by_day[3].tokens.total(), 0);
+    }
+
+    #[test]
+    fn usage_view_day_breakdown_uses_recent_window_ending_today() {
+        let events = vec![
+            ev(
+                Source::Codex,
+                "gpt-5.5",
+                "2026-03-24",
+                Tokens {
+                    input: 10,
+                    ..Default::default()
+                },
+            ),
+            ev(
+                Source::Claude,
+                "claude-opus-4-8",
+                "2026-06-29",
+                Tokens {
+                    input: 20,
+                    ..Default::default()
+                },
+            ),
+        ];
+
+        let v = UsageView::from_events_for_today(
+            &events,
+            chrono::NaiveDate::from_ymd_opt(2026, 6, 29).unwrap(),
+        );
+
+        assert_eq!(v.total.tokens.total(), 30);
+        let days: Vec<&str> = v.by_day.iter().map(|g| g.key.as_str()).collect();
+        assert_eq!(days.len(), 30);
+        assert_eq!(days[0], "2026-06-29");
+        assert_eq!(days[29], "2026-05-31");
+        assert!(!days.contains(&"2026-03-24"));
+        assert_eq!(v.by_day[0].tokens.total(), 20);
+        assert_eq!(v.by_day[1].tokens.total(), 0);
     }
 
     #[test]
     fn breakdown_selects_the_right_dimension() {
-        let events = vec![ev(Source::Claude, "claude-opus-4-8", "2026-06-17", Tokens { input: 1, ..Default::default() })];
+        let events = vec![ev(
+            Source::Claude,
+            "claude-opus-4-8",
+            "2026-06-17",
+            Tokens {
+                input: 1,
+                ..Default::default()
+            },
+        )];
         let v = UsageView::from_events(&events);
         assert_eq!(v.breakdown(Dimension::Model).len(), 1);
         assert_eq!(v.breakdown(Dimension::Source)[0].key, "claude");
@@ -230,15 +344,36 @@ mod tests {
     #[test]
     fn settings_rows_cover_all_keys_with_kinds() {
         let rows = settings_rows(&Config::default());
-        assert_eq!(rows.len(), 8);
+        assert_eq!(rows.len(), 19);
         let threshold = rows
             .iter()
             .find(|r| r.key == "triggers.five_hour.threshold_percent")
             .unwrap();
         assert_eq!(threshold.value, "80");
         assert_eq!(threshold.kind, KeyKind::Percent);
-        let mode = rows.iter().find(|r| r.key == "triggers.five_hour.mode").unwrap();
+        let mode = rows
+            .iter()
+            .find(|r| r.key == "triggers.five_hour.mode")
+            .unwrap();
         assert_eq!(mode.value, "ask");
         assert_eq!(mode.kind, KeyKind::Mode);
+        let format = rows.iter().find(|r| r.key == "capsule.format").unwrap();
+        assert_eq!(format.value, "json");
+        assert_eq!(format.kind, KeyKind::CapsuleFormat);
+        let limit = rows
+            .iter()
+            .find(|r| r.key == "capsule.remaining_max_items")
+            .unwrap();
+        assert_eq!(limit.value, "5");
+        assert_eq!(limit.kind, KeyKind::Count);
+        let preset = rows.iter().find(|r| r.key == "theme.preset").unwrap();
+        assert_eq!(preset.value, "default");
+        assert_eq!(preset.kind, KeyKind::ThemePreset);
+        let color = rows
+            .iter()
+            .find(|r| r.key == "theme.focus_border_color")
+            .unwrap();
+        assert_eq!(color.value, "#FFA500");
+        assert_eq!(color.kind, KeyKind::Color);
     }
 }

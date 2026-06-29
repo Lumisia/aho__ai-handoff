@@ -11,7 +11,10 @@ pub mod state;
 
 pub use backup::{backup_file, backup_path};
 pub use detect::{detect_agents, targets_for, AgentPresence, InstallTargets};
-pub use plugin::{generate_bundle, merge_marketplace_entry, remove_marketplace_entry};
+pub use plugin::{
+    generate_bundle, generate_handoff_user_skills, merge_marketplace_entry,
+    remove_marketplace_entry,
+};
 pub use state::{
     load, save, state_path, AutostartKind, AutostartState, ClaudeState, ClaudeStatuslineState,
     CodexState, FileMod, InstallState, PluginRecord,
@@ -336,6 +339,7 @@ pub fn apply_install(
             // Generate the bundle first; record its files for surgical uninstall.
             let mut record =
                 generate_bundle(crate::capsule::AgentKind::Codex, &exe, &t.codex_plugin_dir)?;
+            let handoff_skill = generate_handoff_user_skills(&t.codex_handoff_skills_dir)?;
             // Marketplace registration (never-clobber merge computed above).
             write_with_backup(&t.agents_marketplace, &marketplace_after, now)?;
             record.marketplace_file = Some(t.agents_marketplace.to_string_lossy().into_owned());
@@ -346,6 +350,7 @@ pub fn apply_install(
                 backup: config_backup,
             });
             st.codex.plugin = Some(record);
+            st.codex.handoff_skill = Some(handoff_skill);
             record_codex_config(&mut st, &config_edit, &prior);
         }
     }
@@ -362,7 +367,9 @@ pub fn apply_install(
                 &exe,
                 &t.claude_plugin_dir,
             )?;
+            let handoff_skill = generate_handoff_user_skills(&t.claude_handoff_skills_dir)?;
             st.claude.plugin = Some(record);
+            st.claude.handoff_skill = Some(handoff_skill);
         }
 
         let settings_backup = write_with_backup(&t.claude_settings, &settings_after_all, now)?;
@@ -378,9 +385,10 @@ pub fn apply_install(
         // captured foreign value.
         let installed_command = sl_apply.installed_command;
         let previous = if sl_apply.current_was_ours {
-            prior.claude.statusline.and_then(|s| {
-                remove_managed_statusline_previous(s.previous, &installed_command)
-            })
+            prior
+                .claude
+                .statusline
+                .and_then(|s| remove_managed_statusline_previous(s.previous, &installed_command))
         } else {
             remove_managed_statusline_previous(sl_apply.previous, &installed_command)
         };
@@ -479,6 +487,9 @@ pub fn apply_uninstall(_t: &InstallTargets, st: &InstallState) -> anyhow::Result
             }
         }
     }
+    if let Some(rec) = &st.codex.handoff_skill {
+        remove_recorded_files(rec)?;
+    }
 
     // Claude settings.json
     if let Some(fm) = &st.claude.settings_file {
@@ -498,6 +509,9 @@ pub fn apply_uninstall(_t: &InstallTargets, st: &InstallState) -> anyhow::Result
     if let Some(rec) = &st.claude.plugin {
         remove_plugin_bundle(rec)?;
     }
+    if let Some(rec) = &st.claude.handoff_skill {
+        remove_recorded_files(rec)?;
+    }
 
     Ok(())
 }
@@ -513,6 +527,40 @@ fn remove_plugin_bundle(rec: &PluginRecord) -> std::io::Result<()> {
     if root.exists() {
         std::fs::remove_dir_all(root)?;
     }
+    Ok(())
+}
+
+fn remove_recorded_files(rec: &PluginRecord) -> std::io::Result<()> {
+    let root = Path::new(&rec.root);
+    let prune_root = root
+        .file_name()
+        .and_then(|s| s.to_str())
+        .is_some_and(|name| name != "skills");
+
+    for rel in &rec.files {
+        let path = root.join(rel);
+        if path.exists() {
+            std::fs::remove_file(&path)?;
+        }
+        let mut current = path.parent();
+        while let Some(dir) = current {
+            if dir == root && !prune_root {
+                break;
+            }
+            match std::fs::remove_dir(dir) {
+                Ok(()) => {
+                    if dir == root {
+                        break;
+                    }
+                    current = dir.parent();
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+                Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => break,
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -836,16 +884,53 @@ mod tests {
             .join(".claude-plugin/plugin.json")
             .exists());
         assert!(t.claude_plugin_dir.join("hooks/hooks.json").exists());
-        assert!(t.claude_plugin_dir.join("skills/handoff/SKILL.md").exists());
+        assert!(t
+            .claude_plugin_dir
+            .join("skills/handoff-checkpoint/SKILL.md")
+            .exists());
+        assert!(t
+            .claude_plugin_dir
+            .join("skills/handoff-doctor/SKILL.md")
+            .exists());
+        assert!(t
+            .claude_plugin_dir
+            .join("skills/handoff-config/SKILL.md")
+            .exists());
+        assert!(t
+            .claude_handoff_skills_dir
+            .join("handoff-checkpoint/SKILL.md")
+            .exists());
+        assert!(t
+            .claude_handoff_skills_dir
+            .join("handoff-doctor/SKILL.md")
+            .exists());
+        assert!(t
+            .claude_handoff_skills_dir
+            .join("handoff-config/SKILL.md")
+            .exists());
         assert!(t
             .codex_plugin_dir
             .join(".codex-plugin/plugin.json")
             .exists());
         assert!(t.codex_plugin_dir.join("hooks/hooks.json").exists());
+        assert!(t
+            .codex_handoff_skills_dir
+            .join("handoff-checkpoint/SKILL.md")
+            .exists());
+        assert!(t
+            .codex_handoff_skills_dir
+            .join("handoff-doctor/SKILL.md")
+            .exists());
+        assert!(t
+            .codex_handoff_skills_dir
+            .join("handoff-config/SKILL.md")
+            .exists());
 
         // Plugin records persisted.
         assert!(st.claude.plugin.is_some());
+        assert!(st.claude.handoff_skill.is_some());
         let codex_rec = st.codex.plugin.as_ref().unwrap();
+        assert!(st.codex.handoff_skill.is_some());
         assert_eq!(
             codex_rec.marketplace_file.as_deref(),
             Some(t.agents_marketplace.to_string_lossy().as_ref())
@@ -929,6 +1014,18 @@ mod tests {
         // Bundle dirs deleted.
         assert!(!t.claude_plugin_dir.exists());
         assert!(!t.codex_plugin_dir.exists());
+        assert!(!t
+            .claude_handoff_skills_dir
+            .join("handoff-checkpoint")
+            .exists());
+        assert!(!t.claude_handoff_skills_dir.join("handoff-doctor").exists());
+        assert!(!t.claude_handoff_skills_dir.join("handoff-config").exists());
+        assert!(!t
+            .codex_handoff_skills_dir
+            .join("handoff-checkpoint")
+            .exists());
+        assert!(!t.codex_handoff_skills_dir.join("handoff-doctor").exists());
+        assert!(!t.codex_handoff_skills_dir.join("handoff-config").exists());
 
         // Our marketplace entry gone, foreign one preserved.
         let mp: serde_json::Value =

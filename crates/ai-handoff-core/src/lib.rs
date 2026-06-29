@@ -1,6 +1,7 @@
 // modules added per task
 pub mod account;
 pub mod capsule;
+pub mod capsule_codec;
 pub mod config;
 pub mod dashboard;
 pub mod fingerprint;

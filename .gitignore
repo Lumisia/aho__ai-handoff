@@ -15,6 +15,9 @@ apps/desktop/src-tauri/gen/
 .ai-handoff-store/
 ai-handoff-hooks-report.md
 
+# local investigation scratch clones
+.tmp-*/
+
 # subagent-driven-development scratch (briefs, reports, diffs, ledger)
 .superpowers/
 

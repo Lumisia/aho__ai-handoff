@@ -33,14 +33,70 @@ impl Price {
 /// matching family wins, so list more specific keys before broader ones.
 const TABLE: &[(&str, Price)] = &[
     // Anthropic Claude (input / cache-read / cache-write / output $ per Mtok).
-    ("claude-opus", Price { input: 15.0, cache_read: 1.5, cache_write: 18.75, output: 75.0 }),
-    ("claude-sonnet", Price { input: 3.0, cache_read: 0.3, cache_write: 3.75, output: 15.0 }),
-    ("claude-haiku", Price { input: 0.8, cache_read: 0.08, cache_write: 1.0, output: 4.0 }),
+    (
+        "claude-opus",
+        Price {
+            input: 15.0,
+            cache_read: 1.5,
+            cache_write: 18.75,
+            output: 75.0,
+        },
+    ),
+    (
+        "claude-sonnet",
+        Price {
+            input: 3.0,
+            cache_read: 0.3,
+            cache_write: 3.75,
+            output: 15.0,
+        },
+    ),
+    (
+        "claude-haiku",
+        Price {
+            input: 0.8,
+            cache_read: 0.08,
+            cache_write: 1.0,
+            output: 4.0,
+        },
+    ),
     // OpenAI Codex / GPT-5 family (Codex reports cached input separately).
-    ("gpt-5-codex", Price { input: 1.25, cache_read: 0.125, cache_write: 0.0, output: 10.0 }),
-    ("gpt-5", Price { input: 1.25, cache_read: 0.125, cache_write: 0.0, output: 10.0 }),
-    ("o3", Price { input: 2.0, cache_read: 0.5, cache_write: 0.0, output: 8.0 }),
-    ("o4-mini", Price { input: 1.1, cache_read: 0.275, cache_write: 0.0, output: 4.4 }),
+    (
+        "gpt-5-codex",
+        Price {
+            input: 1.25,
+            cache_read: 0.125,
+            cache_write: 0.0,
+            output: 10.0,
+        },
+    ),
+    (
+        "gpt-5",
+        Price {
+            input: 1.25,
+            cache_read: 0.125,
+            cache_write: 0.0,
+            output: 10.0,
+        },
+    ),
+    (
+        "o3",
+        Price {
+            input: 2.0,
+            cache_read: 0.5,
+            cache_write: 0.0,
+            output: 8.0,
+        },
+    ),
+    (
+        "o4-mini",
+        Price {
+            input: 1.1,
+            cache_read: 0.275,
+            cache_write: 0.0,
+            output: 4.4,
+        },
+    ),
 ];
 
 /// Look up a best-effort price for `model`. Matching is case-insensitive by
@@ -79,21 +135,48 @@ mod tests {
     #[test]
     fn unknown_model_has_no_price() {
         assert!(price_for("some-future-model").is_none());
-        assert!(estimate_cost("some-future-model", &Tokens { input: 1000, ..Default::default() }).is_none());
+        assert!(estimate_cost(
+            "some-future-model",
+            &Tokens {
+                input: 1000,
+                ..Default::default()
+            }
+        )
+        .is_none());
     }
 
     #[test]
     fn cost_math_is_per_million() {
-        let p = Price { input: 15.0, cache_read: 1.5, cache_write: 18.75, output: 75.0 };
+        let p = Price {
+            input: 15.0,
+            cache_read: 1.5,
+            cache_write: 18.75,
+            output: 75.0,
+        };
         // 1M input + 1M output = $15 + $75 = $90.
-        let t = Tokens { input: 1_000_000, cache_read: 0, cache_write: 0, output: 1_000_000 };
+        let t = Tokens {
+            input: 1_000_000,
+            cache_read: 0,
+            cache_write: 0,
+            output: 1_000_000,
+        };
         assert!((p.cost(&t) - 90.0).abs() < 1e-9);
     }
 
     #[test]
     fn cost_includes_cache_buckets() {
-        let p = Price { input: 0.0, cache_read: 1.0, cache_write: 2.0, output: 0.0 };
-        let t = Tokens { input: 0, cache_read: 1_000_000, cache_write: 1_000_000, output: 0 };
+        let p = Price {
+            input: 0.0,
+            cache_read: 1.0,
+            cache_write: 2.0,
+            output: 0.0,
+        };
+        let t = Tokens {
+            input: 0,
+            cache_read: 1_000_000,
+            cache_write: 1_000_000,
+            output: 0,
+        };
         assert!((p.cost(&t) - 3.0).abs() < 1e-9);
     }
 

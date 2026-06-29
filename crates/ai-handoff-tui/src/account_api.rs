@@ -29,11 +29,14 @@ use std::cmp::Ordering;
 use std::time::Duration;
 
 use ai_handoff_core::account::{self, Agent, RateWindow};
+use base64::Engine;
 use chrono::DateTime;
 use serde_json::Value;
 
 const USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const RESET_CREDITS_URL: &str = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
+const CLAUDE_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
+const CLAUDE_CURRENT_SESSION_URL_PREFIX: &str = "https://claude.ai/api/organizations";
 
 /// One account's usage snapshot from the backend.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -54,9 +57,18 @@ pub struct ResetCredit {
 
 /// Fetch usage for a saved slot, using that slot's stored token.
 pub fn fetch_slot_usage(agent: Agent, label: &str) -> Result<UsageData, String> {
-    let (token, account_id) =
-        account::slot_request_auth(agent, label).ok_or("no usable token in this account")?;
-    fetch_usage(&token, account_id.as_deref())
+    match agent {
+        Agent::Codex => {
+            let (token, account_id) = account::slot_request_auth(agent, label)
+                .ok_or("no usable token in this account")?;
+            fetch_usage(&token, account_id.as_deref())
+        }
+        Agent::Claude => {
+            let (token, plan) =
+                account::claude_slot_oauth(label).ok_or("no usable token in this account")?;
+            fetch_claude_usage(&token, plan)
+        }
+    }
 }
 
 fn fetch_usage(access_token: &str, account_id: Option<&str>) -> Result<UsageData, String> {
@@ -126,6 +138,235 @@ fn parse_usage(body: &Value) -> UsageData {
     }
 }
 
+fn fetch_claude_usage(access_token: &str, plan: Option<String>) -> Result<UsageData, String> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(4))
+        .timeout_read(Duration::from_secs(8))
+        .user_agent("claude-code")
+        .build();
+    match fetch_claude_oauth_usage(&agent, access_token, plan.clone()) {
+        Ok(usage) if claude_usage_has_windows(&usage) => Ok(usage),
+        Ok(_) => fetch_claude_current_session_usage(&agent, access_token, plan)
+            .map_err(|err| format!("usage response missing limits; fallback: {err}")),
+        Err(err) if err.allows_fallback() => {
+            let primary = err.message();
+            fetch_claude_current_session_usage(&agent, access_token, plan)
+                .map_err(|fallback| format!("{primary}; fallback: {fallback}"))
+        }
+        Err(err) => Err(err.message()),
+    }
+}
+
+fn fetch_claude_oauth_usage(
+    agent: &ureq::Agent,
+    access_token: &str,
+    plan: Option<String>,
+) -> Result<UsageData, ClaudeUsageFetchError> {
+    match agent
+        .get(CLAUDE_USAGE_URL)
+        .set("Authorization", &format!("Bearer {access_token}"))
+        .set("anthropic-beta", "oauth-2025-04-20")
+        .set("Accept", "application/json")
+        .call()
+    {
+        Ok(resp) => {
+            let body: Value = resp
+                .into_json()
+                .map_err(|_| ClaudeUsageFetchError::Other("bad response".to_string()))?;
+            Ok(parse_claude_usage(&body, plan))
+        }
+        Err(ureq::Error::Status(401, _)) | Err(ureq::Error::Status(403, _)) => {
+            Err(ClaudeUsageFetchError::AuthExpired)
+        }
+        Err(ureq::Error::Status(429, resp)) => {
+            let retry = resp.header("retry-after").unwrap_or("later");
+            Err(ClaudeUsageFetchError::RateLimited(retry.to_string()))
+        }
+        Err(ureq::Error::Status(code, _)) => {
+            Err(ClaudeUsageFetchError::Other(format!("http {code}")))
+        }
+        Err(_) => Err(ClaudeUsageFetchError::Other("network error".to_string())),
+    }
+}
+
+fn fetch_claude_current_session_usage(
+    agent: &ureq::Agent,
+    access_token: &str,
+    plan: Option<String>,
+) -> Result<UsageData, String> {
+    let url = claude_current_session_url(access_token).ok_or("no Claude org id in token")?;
+    match agent
+        .get(&url)
+        .set("Authorization", &format!("Bearer {access_token}"))
+        .set("Accept", "application/json")
+        .set("Content-Type", "application/json")
+        .set("Origin", "https://claude.ai")
+        .set("Referer", "https://claude.ai/new")
+        .set(
+            "User-Agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+        )
+        .call()
+    {
+        Ok(resp) => {
+            let body: Value = resp.into_json().map_err(|_| "bad response".to_string())?;
+            let usage = parse_claude_usage(&body, plan);
+            if claude_usage_has_windows(&usage) {
+                Ok(usage)
+            } else {
+                Err("current_session response missing limits".to_string())
+            }
+        }
+        Err(ureq::Error::Status(401, _)) | Err(ureq::Error::Status(403, _)) => {
+            Err("auth expired — re-add this account".to_string())
+        }
+        Err(ureq::Error::Status(429, resp)) => {
+            let retry = resp.header("retry-after").unwrap_or("later");
+            Err(format!("rate limited — retry {retry}"))
+        }
+        Err(ureq::Error::Status(code, _)) => Err(format!("http {code}")),
+        Err(_) => Err("network error".to_string()),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ClaudeUsageFetchError {
+    AuthExpired,
+    RateLimited(String),
+    Other(String),
+}
+
+impl ClaudeUsageFetchError {
+    fn allows_fallback(&self) -> bool {
+        matches!(self, Self::Other(_))
+    }
+
+    fn message(self) -> String {
+        match self {
+            Self::AuthExpired => "auth expired — re-add this account".to_string(),
+            Self::RateLimited(retry) => format!("rate limited — retry {retry}"),
+            Self::Other(message) => message,
+        }
+    }
+}
+
+fn claude_usage_has_windows(usage: &UsageData) -> bool {
+    usage.five_hour.is_some() || usage.weekly.is_some()
+}
+
+fn claude_current_session_url(access_token: &str) -> Option<String> {
+    let org_uuid = claude_org_uuid_from_token(access_token)?;
+    Some(format!(
+        "{CLAUDE_CURRENT_SESSION_URL_PREFIX}/{org_uuid}/usage_report/current_session"
+    ))
+}
+
+fn claude_org_uuid_from_token(access_token: &str) -> Option<String> {
+    let payload = access_token.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload.trim())
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(payload.trim()))
+        .ok()?;
+    let claims: Value = serde_json::from_slice(&bytes).ok()?;
+    let org = claims
+        .get("organizationUUID")
+        .or_else(|| claims.get("organization_uuid"))
+        .or_else(|| claims.get("org_uuid"))
+        .or_else(|| claims.get("orgUuid"))
+        .or_else(|| claims.get("lastActiveOrg"))
+        .and_then(Value::as_str)?;
+    if claude_org_id_is_safe(org) {
+        Some(org.to_string())
+    } else {
+        None
+    }
+}
+
+fn claude_org_id_is_safe(org: &str) -> bool {
+    !org.is_empty()
+        && org
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+}
+
+fn parse_claude_usage(body: &Value, plan: Option<String>) -> UsageData {
+    UsageData {
+        plan,
+        five_hour: claude_window(body, &["five_hour", "five_hour_limit"], 300),
+        weekly: claude_window(body, &["seven_day", "weekly", "weekly_limit"], 10080),
+        reset_credits: None,
+        reset_credit_details: Vec::new(),
+    }
+}
+
+fn claude_window(body: &Value, keys: &[&str], window_minutes: u64) -> Option<RateWindow> {
+    let raw = keys
+        .iter()
+        .find_map(|key| body.get(*key))
+        .or_else(|| {
+            body.get("rate_limits")
+                .and_then(|rl| keys.iter().find_map(|key| rl.get(*key)))
+        })
+        .or_else(|| claude_limit_array_item(body, keys))?;
+    let direct_used = raw
+        .get("utilization")
+        .or_else(|| raw.get("used_percentage"))
+        .or_else(|| raw.get("percent"))
+        .or_else(|| raw.get("percentage"))
+        .or_else(|| raw.get("usage"))
+        .and_then(Value::as_f64)
+        .map(normalize_claude_percent);
+    let used_percent = direct_used.or_else(|| {
+        raw.get("percent_remaining")
+            .and_then(Value::as_f64)
+            .map(|remaining| 100.0 - normalize_claude_percent(remaining))
+    })?;
+    let resets_at = raw
+        .get("resets_at")
+        .or_else(|| raw.get("resetsAt"))
+        .or_else(|| raw.get("reset_at"))
+        .and_then(parse_claude_reset);
+    Some(RateWindow {
+        used_percent,
+        window_minutes,
+        resets_at,
+    })
+}
+
+fn claude_limit_array_item<'a>(body: &'a Value, keys: &[&str]) -> Option<&'a Value> {
+    body.get("limits")
+        .or_else(|| body.get("quotas"))
+        .or_else(|| body.get("rate_limits"))?
+        .as_array()?
+        .iter()
+        .find(|item| {
+            item.get("kind")
+                .or_else(|| item.get("id"))
+                .or_else(|| item.get("name"))
+                .and_then(Value::as_str)
+                .is_some_and(|name| keys.contains(&name))
+        })
+}
+
+fn normalize_claude_percent(value: f64) -> f64 {
+    let pct = if (0.0..=1.0).contains(&value) {
+        value * 100.0
+    } else {
+        value
+    };
+    pct.clamp(0.0, 100.0)
+}
+
+fn parse_claude_reset(value: &Value) -> Option<i64> {
+    if let Some(n) = value.as_i64() {
+        return Some(n);
+    }
+    let s = value.as_str()?;
+    DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|dt| dt.timestamp())
+}
+
 fn fetch_reset_credit_details(
     agent: &ureq::Agent,
     access_token: &str,
@@ -187,6 +428,15 @@ fn cmp_credit_datetime(a: &str, b: &str) -> Ordering {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
+
+    fn b64url(s: &str) -> String {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(s.as_bytes())
+    }
+
+    fn fake_jwt(claims: &str) -> String {
+        format!("{}.{}.{}", b64url("{}"), b64url(claims), "sig")
+    }
 
     #[test]
     fn parse_usage_reads_windows_plan_and_credits() {
@@ -216,6 +466,81 @@ mod tests {
         assert!(u.five_hour.is_none());
         assert!(u.weekly.is_none());
         assert!(u.reset_credits.is_none());
+    }
+
+    #[test]
+    fn parse_claude_usage_reads_five_hour_and_weekly() {
+        let body = serde_json::json!({
+            "five_hour": { "utilization": 0.42, "resets_at": "2026-07-01T00:00:00Z" },
+            "seven_day": { "utilization": 11.0, "resets_at": "2026-07-08T00:00:00Z" }
+        });
+
+        let u = parse_claude_usage(&body, Some("pro".into()));
+
+        assert_eq!(u.plan.as_deref(), Some("pro"));
+        let five = u.five_hour.expect("5h");
+        assert_eq!(five.used_percent, 42.0);
+        assert_eq!(five.window_minutes, 300);
+        assert_eq!(five.resets_at, Some(1782864000));
+        let weekly = u.weekly.expect("weekly");
+        assert_eq!(weekly.used_percent, 11.0);
+        assert_eq!(weekly.window_minutes, 10080);
+        assert_eq!(weekly.resets_at, Some(1783468800));
+    }
+
+    #[test]
+    fn parse_claude_usage_reads_current_session_rate_limits() {
+        let body = serde_json::json!({
+            "rate_limits": {
+                "five_hour_limit": {
+                    "utilization": 0.62,
+                    "resets_at": "2026-07-01T00:00:00Z"
+                },
+                "weekly_limit": {
+                    "utilization": 94.0,
+                    "resets_at": "2026-07-08T00:00:00Z"
+                }
+            }
+        });
+
+        let u = parse_claude_usage(&body, Some("pro".into()));
+
+        assert_eq!(u.plan.as_deref(), Some("pro"));
+        let five = u.five_hour.expect("5h");
+        assert_eq!(five.used_percent, 62.0);
+        assert_eq!(five.window_minutes, 300);
+        assert_eq!(five.resets_at, Some(1782864000));
+        let weekly = u.weekly.expect("weekly");
+        assert_eq!(weekly.used_percent, 94.0);
+        assert_eq!(weekly.window_minutes, 10080);
+        assert_eq!(weekly.resets_at, Some(1783468800));
+    }
+
+    #[test]
+    fn claude_org_uuid_from_token_reads_organization_uuid() {
+        let token = fake_jwt(r#"{"organizationUUID":"123e4567-e89b-12d3-a456-426614174000"}"#);
+
+        assert_eq!(
+            claude_org_uuid_from_token(&token).as_deref(),
+            Some("123e4567-e89b-12d3-a456-426614174000")
+        );
+    }
+
+    #[test]
+    fn claude_org_uuid_from_token_reads_last_active_org() {
+        let token = fake_jwt(r#"{"lastActiveOrg":"123e4567-e89b-12d3-a456-426614174001"}"#);
+
+        assert_eq!(
+            claude_org_uuid_from_token(&token).as_deref(),
+            Some("123e4567-e89b-12d3-a456-426614174001")
+        );
+    }
+
+    #[test]
+    fn claude_org_uuid_from_token_rejects_unsafe_path_segments() {
+        let token = fake_jwt(r#"{"organizationUUID":"../secret"}"#);
+
+        assert!(claude_org_uuid_from_token(&token).is_none());
     }
 
     #[test]

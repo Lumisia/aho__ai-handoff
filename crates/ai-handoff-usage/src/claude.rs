@@ -127,14 +127,29 @@ mod tests {
 
     #[test]
     fn parses_assistant_usage_into_normalized_event() {
-        let events = parse_str(&assistant_line("msg_1", "claude-opus-4-8", 2, 0, 39459, 245));
+        let events = parse_str(&assistant_line(
+            "msg_1",
+            "claude-opus-4-8",
+            2,
+            0,
+            39459,
+            245,
+        ));
         assert_eq!(events.len(), 1);
         let e = &events[0];
         assert_eq!(e.source, Source::Claude);
         assert_eq!(e.model, "claude-opus-4-8");
         assert_eq!(e.project, "C:/proj");
         assert_eq!(e.session, "sess1");
-        assert_eq!(e.tokens, Tokens { input: 2, cache_read: 0, cache_write: 39459, output: 245 });
+        assert_eq!(
+            e.tokens,
+            Tokens {
+                input: 2,
+                cache_read: 0,
+                cache_write: 39459,
+                output: 245
+            }
+        );
     }
 
     #[test]
@@ -171,7 +186,11 @@ mod tests {
     fn missing_file_is_not_fatal() {
         let mut seen = HashSet::new();
         let mut out = Vec::new();
-        let res = parse_file(Path::new("C:/nope/does-not-exist.jsonl"), &mut seen, &mut out);
+        let res = parse_file(
+            Path::new("C:/nope/does-not-exist.jsonl"),
+            &mut seen,
+            &mut out,
+        );
         assert!(res.is_err()); // open failed, but no panic
         assert!(out.is_empty());
     }

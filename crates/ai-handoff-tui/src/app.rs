@@ -7,7 +7,8 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
@@ -26,7 +27,9 @@ use ratatui::{
 use rust_i18n::t;
 
 use ai_handoff_core::account::{self, Agent, RateWindow};
+use ai_handoff_core::config::{self, Config, KeyKind};
 use ai_handoff_core::dashboard::{CheckStatus, DashboardSnapshot};
+use ai_handoff_usage::Dimension;
 
 use crate::account_api::ResetCredit;
 use crate::capsule_ops;
@@ -39,18 +42,29 @@ use crate::viewmodel::{
 pub enum Tab {
     Overview,
     Capsule,
+    Usage,
     Account,
+    Integration,
     Settings,
 }
 
 impl Tab {
-    const ALL: [Tab; 4] = [Tab::Overview, Tab::Capsule, Tab::Account, Tab::Settings];
+    const ALL: [Tab; 6] = [
+        Tab::Overview,
+        Tab::Capsule,
+        Tab::Usage,
+        Tab::Account,
+        Tab::Integration,
+        Tab::Settings,
+    ];
     /// Translation key for the tab's title (resolved at render time via `t!`).
     fn title_key(self) -> &'static str {
         match self {
             Tab::Overview => "tab.overview",
             Tab::Capsule => "tab.capsule",
+            Tab::Usage => "tab.usage",
             Tab::Account => "tab.account",
+            Tab::Integration => "tab.integration",
             Tab::Settings => "tab.settings",
         }
     }
@@ -82,19 +96,20 @@ fn setting_desc(key: &str) -> String {
         "autostart.enabled" => "setting.autostart",
         "statusline.show" => "setting.statusline",
         "language" => "setting.language",
+        "capsule.format" => "setting.capsule_format",
+        "capsule.next_prompt_max_items" => "setting.capsule_next_prompt_max_items",
+        "capsule.remaining_max_items" => "setting.capsule_remaining_max_items",
+        "capsule.done_max_items" => "setting.capsule_done_max_items",
+        "capsule.risks_max_items" => "setting.capsule_risks_max_items",
+        "theme.preset" => "setting.theme_preset",
+        "theme.codex_color" => "setting.theme_codex_color",
+        "theme.claude_color" => "setting.theme_claude_color",
+        "theme.focus_border_color" => "setting.theme_focus_border_color",
+        "theme.selection_bg_color" => "setting.theme_selection_bg_color",
+        "theme.selection_fg_color" => "setting.theme_selection_fg_color",
         _ => return String::new(),
     };
     t!(desc_key).into_owned()
-}
-
-/// The description for `key`, or the generic Settings hint when there is none.
-fn setting_desc_or_hint(key: Option<&str>) -> String {
-    let desc = key.map(setting_desc).unwrap_or_default();
-    if desc.is_empty() {
-        t!("hint.settings").into_owned()
-    } else {
-        desc
-    }
 }
 
 /// The quit-confirmation hint, in the active language.
@@ -102,11 +117,85 @@ fn quit_hint() -> String {
     t!("hint.quit").into_owned()
 }
 
-/// Claude = orange, Codex = purple (the token-split donut + legend).
+/// Claude = orange, Codex = light purple (agent labels + usage visuals).
 const CLAUDE_COLOR: Color = Color::Rgb(230, 140, 30);
-const CODEX_COLOR: Color = Color::Rgb(150, 90, 220);
-/// A lighter purple for the "Codex" label text in the Capsule / Account trees.
 const CODEX_LABEL_COLOR: Color = Color::Rgb(185, 150, 235);
+const DEFAULT_FOCUS_BORDER_COLOR: Color = Color::Rgb(255, 165, 0);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TuiTheme {
+    codex: Color,
+    claude: Color,
+    focus_border: Color,
+    selection_bg: Color,
+    selection_fg: Color,
+}
+
+impl Default for TuiTheme {
+    fn default() -> Self {
+        Self {
+            codex: CODEX_LABEL_COLOR,
+            claude: CLAUDE_COLOR,
+            focus_border: DEFAULT_FOCUS_BORDER_COLOR,
+            selection_bg: Color::Cyan,
+            selection_fg: Color::Black,
+        }
+    }
+}
+
+impl TuiTheme {
+    fn from_config(cfg: &Config) -> Self {
+        let base_cfg = config::theme_config_for_preset(cfg.theme.preset);
+        let default_cfg = config::ThemeConfig::default();
+        let mut theme = Self {
+            codex: tui_color(base_cfg.codex_color.as_str()).unwrap_or(Self::default().codex),
+            claude: tui_color(base_cfg.claude_color.as_str()).unwrap_or(Self::default().claude),
+            focus_border: tui_color(base_cfg.focus_border_color.as_str())
+                .unwrap_or(Self::default().focus_border),
+            selection_bg: tui_color(base_cfg.selection_bg_color.as_str())
+                .unwrap_or(Self::default().selection_bg),
+            selection_fg: tui_color(base_cfg.selection_fg_color.as_str())
+                .unwrap_or(Self::default().selection_fg),
+        };
+        let custom = cfg.theme.preset == config::ThemePreset::Custom;
+        if custom || cfg.theme.codex_color.as_str() != default_cfg.codex_color.as_str() {
+            theme.codex = tui_color(cfg.theme.codex_color.as_str()).unwrap_or(theme.codex);
+        }
+        if custom || cfg.theme.claude_color.as_str() != default_cfg.claude_color.as_str() {
+            theme.claude = tui_color(cfg.theme.claude_color.as_str()).unwrap_or(theme.claude);
+        }
+        if custom
+            || cfg.theme.focus_border_color.as_str() != default_cfg.focus_border_color.as_str()
+        {
+            theme.focus_border =
+                tui_color(cfg.theme.focus_border_color.as_str()).unwrap_or(theme.focus_border);
+        }
+        if custom
+            || cfg.theme.selection_bg_color.as_str() != default_cfg.selection_bg_color.as_str()
+        {
+            theme.selection_bg =
+                tui_color(cfg.theme.selection_bg_color.as_str()).unwrap_or(theme.selection_bg);
+        }
+        if custom
+            || cfg.theme.selection_fg_color.as_str() != default_cfg.selection_fg_color.as_str()
+        {
+            theme.selection_fg =
+                tui_color(cfg.theme.selection_fg_color.as_str()).unwrap_or(theme.selection_fg);
+        }
+        theme
+    }
+}
+
+fn tui_color(raw: &str) -> Option<Color> {
+    let value = raw.trim();
+    if let Some((r, g, b)) = config::ColorSpec::parse(value)
+        .ok()
+        .and_then(|spec| spec.rgb())
+    {
+        return Some(Color::Rgb(r, g, b));
+    }
+    value.parse::<u8>().ok().map(Color::Indexed)
+}
 
 /// One visible line in the Capsule tab's tree (agent → project → capsule).
 struct CapRow {
@@ -151,6 +240,76 @@ enum AccFocus {
     Detail,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum UsageFocus {
+    Chart,
+    Details,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum UsageViewMode {
+    Summary,
+    Day,
+    Project,
+    Model,
+    Source,
+}
+
+impl UsageViewMode {
+    fn next(self) -> Self {
+        match self {
+            Self::Summary => Self::Day,
+            Self::Day => Self::Project,
+            Self::Project => Self::Model,
+            Self::Model => Self::Source,
+            Self::Source => Self::Summary,
+        }
+    }
+
+    fn label_key(self) -> &'static str {
+        match self {
+            Self::Summary => "usage.mode.summary",
+            Self::Day => "usage.mode.day",
+            Self::Project => "usage.mode.project",
+            Self::Model => "usage.mode.model",
+            Self::Source => "usage.mode.source",
+        }
+    }
+
+    fn dimension(self) -> Option<Dimension> {
+        match self {
+            Self::Summary => None,
+            Self::Day => Some(Dimension::Day),
+            Self::Project => Some(Dimension::Project),
+            Self::Model => Some(Dimension::Model),
+            Self::Source => Some(Dimension::Source),
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum IntegrationFocus {
+    Status,
+    Repair,
+    Hooks,
+    Diagnostics,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum IntegrationPage {
+    Home,
+    Detail,
+    RepairCenter,
+    DoctorRun,
+    Logs,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SettingsFocus {
+    Category,
+    Detail,
+}
+
 /// What an account row points at.
 #[derive(Clone, Copy)]
 enum AccTarget {
@@ -177,6 +336,51 @@ enum Pending {
     AddAccount(Agent),
     /// Launch the agent under a saved slot's profile home, in a new window.
     Launch(Agent, String),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RepairActionKind {
+    RunDoctor,
+    InstallPlugin,
+    StartDaemon,
+    AutostartOn,
+    ManualLegacyCleanup,
+    ManualCodexTrust,
+}
+
+impl RepairActionKind {
+    fn label_key(self) -> &'static str {
+        match self {
+            Self::RunDoctor => "integration.repair.run_doctor",
+            Self::InstallPlugin => "integration.repair.install_plugin",
+            Self::StartDaemon => "integration.repair.start_daemon",
+            Self::AutostartOn => "integration.repair.autostart_on",
+            Self::ManualLegacyCleanup => "integration.repair.disable_legacy",
+            Self::ManualCodexTrust => "integration.repair.open_trust_guide",
+        }
+    }
+
+    fn detail_key(self) -> &'static str {
+        match self {
+            Self::RunDoctor => "integration.repair_detail.run_doctor",
+            Self::InstallPlugin => "integration.repair_detail.install_plugin",
+            Self::StartDaemon => "integration.repair_detail.start_daemon",
+            Self::AutostartOn => "integration.repair_detail.autostart_on",
+            Self::ManualLegacyCleanup => "integration.repair_detail.disable_legacy",
+            Self::ManualCodexTrust => "integration.repair_detail.open_trust_guide",
+        }
+    }
+
+    fn requires_confirm(self) -> bool {
+        matches!(
+            self,
+            Self::InstallPlugin | Self::StartDaemon | Self::AutostartOn
+        )
+    }
+
+    fn is_manual(self) -> bool {
+        matches!(self, Self::ManualLegacyCleanup | Self::ManualCodexTrust)
+    }
 }
 
 /// An in-flight add: a login window is open and we poll its temp home for the
@@ -213,6 +417,13 @@ struct AccountData {
     claude: AgentAccount,
 }
 
+#[derive(Default)]
+struct OverviewAgentLimits {
+    five_hour: Option<RateWindow>,
+    weekly: Option<RateWindow>,
+    note: Option<String>,
+}
+
 impl AccountData {
     /// Scan the live system (rollout limits, auth identity, pool snapshots).
     fn load_live() -> Self {
@@ -245,7 +456,21 @@ pub struct App {
     usage: UsageView,
     settings: Vec<SettingRow>,
     settings_idx: usize,
+    settings_category_idx: usize,
+    settings_focus: SettingsFocus,
+    settings_search: Option<String>,
+    settings_search_editing: bool,
+    settings_edit_buf: Option<String>,
+    theme: TuiTheme,
     config_path: PathBuf,
+    usage_focus: UsageFocus,
+    usage_mode: UsageViewMode,
+    integration_focus: IntegrationFocus,
+    integration_page: IntegrationPage,
+    repair_sel: usize,
+    repair_confirm: bool,
+    integration_output: Vec<String>,
+    integration_logs: Vec<String>,
     // --- Account tab state ---
     account: AccountData,
     /// Whether focus is on the account tree or the detail pane.
@@ -293,6 +518,50 @@ const CAP_FIELDS: [capsule_ops::CapField; 5] = [
     capsule_ops::CapField::Risks,
 ];
 
+struct SettingCategory {
+    key: &'static str,
+    desc_key: &'static str,
+}
+
+const SETTING_CATEGORIES: [SettingCategory; 9] = [
+    SettingCategory {
+        key: "settings.category.all",
+        desc_key: "settings.category_desc.all",
+    },
+    SettingCategory {
+        key: "settings.category.automation",
+        desc_key: "settings.category_desc.automation",
+    },
+    SettingCategory {
+        key: "settings.category.triggers",
+        desc_key: "settings.category_desc.triggers",
+    },
+    SettingCategory {
+        key: "settings.category.capsule",
+        desc_key: "settings.category_desc.capsule",
+    },
+    SettingCategory {
+        key: "settings.category.paths",
+        desc_key: "settings.category_desc.paths",
+    },
+    SettingCategory {
+        key: "settings.category.display",
+        desc_key: "settings.category_desc.display",
+    },
+    SettingCategory {
+        key: "settings.category.security",
+        desc_key: "settings.category_desc.security",
+    },
+    SettingCategory {
+        key: "settings.category.agents",
+        desc_key: "settings.category_desc.agents",
+    },
+    SettingCategory {
+        key: "settings.category.advanced",
+        desc_key: "settings.category_desc.advanced",
+    },
+];
+
 impl App {
     /// Build the app by scanning the live system (logs, config, health).
     pub fn load() -> Self {
@@ -301,6 +570,7 @@ impl App {
         let cfg = ai_handoff_core::config::load();
         let config_path = ai_handoff_core::paths::config_path();
         let mut app = App::new(snapshot, usage, settings_rows(&cfg), config_path);
+        app.apply_theme_config(&cfg);
         app.account = AccountData::load_live();
         app
     }
@@ -322,7 +592,21 @@ impl App {
             usage,
             settings,
             settings_idx: 0,
+            settings_category_idx: 0,
+            settings_focus: SettingsFocus::Category,
+            settings_search: None,
+            settings_search_editing: false,
+            settings_edit_buf: None,
+            theme: TuiTheme::default(),
             config_path,
+            usage_focus: UsageFocus::Chart,
+            usage_mode: UsageViewMode::Summary,
+            integration_focus: IntegrationFocus::Status,
+            integration_page: IntegrationPage::Home,
+            repair_sel: 0,
+            repair_confirm: false,
+            integration_output: Vec::new(),
+            integration_logs: Vec::new(),
             account: AccountData::default(),
             acc_focus: AccFocus::Tree,
             acc_sel: 0,
@@ -351,9 +635,57 @@ impl App {
         self.should_quit
     }
 
+    fn apply_theme_config(&mut self, cfg: &Config) {
+        self.theme = TuiTheme::from_config(cfg);
+    }
+
+    fn refresh_theme_from_disk(&mut self) {
+        let cfg = config::load_from(&self.config_path);
+        self.apply_theme_config(&cfg);
+    }
+
+    fn selection_style(&self) -> Style {
+        Style::default()
+            .fg(self.theme.selection_fg)
+            .bg(self.theme.selection_bg)
+    }
+
+    fn focus_block(&self, title: impl Into<String>, focused: bool) -> Block<'static> {
+        focus_block_with_color(title, focused, self.theme.focus_border)
+    }
+
+    fn action_style(&self, focused: bool) -> Style {
+        if focused {
+            self.selection_style()
+        } else {
+            Style::default().fg(Color::Gray)
+        }
+    }
+
+    fn agent_color(&self, agent: Agent) -> Color {
+        match agent {
+            Agent::Codex => self.theme.codex,
+            Agent::Claude => self.theme.claude,
+        }
+    }
+
+    fn agent_label_color(&self, name: &str) -> Option<Color> {
+        let lower = name.to_ascii_lowercase();
+        if lower.contains("codex") {
+            Some(self.theme.codex)
+        } else if lower.contains("claude") {
+            Some(self.theme.claude)
+        } else {
+            None
+        }
+    }
+
     /// The event loop. Returns when the user quits.
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
         while !self.should_quit {
+            if self.tab == Tab::Overview {
+                self.ensure_overview_limit_usage();
+            }
             terminal.draw(|f| self.draw(f))?;
             if event::poll(Duration::from_millis(250))? {
                 if let Event::Key(key) = event::read()? {
@@ -438,6 +770,14 @@ impl App {
             self.cap_editing_key(key);
             return;
         }
+        if self.tab == Tab::Settings && self.settings_edit_buf.is_some() {
+            self.settings_editing_key(key);
+            return;
+        }
+        if self.tab == Tab::Settings && self.settings_search_editing {
+            self.settings_search_key(key);
+            return;
+        }
         // q/Esc backs out one level: content -> tab bar, then tab history, then
         // a quit confirmation at the root.
         if matches!(key.code, KeyCode::Char('q') | KeyCode::Esc) {
@@ -456,8 +796,10 @@ impl App {
             KeyCode::BackTab => return self.goto(self.tab.prev()),
             KeyCode::Char('1') => return self.goto(Tab::Overview),
             KeyCode::Char('2') => return self.goto(Tab::Capsule),
-            KeyCode::Char('3') => return self.goto(Tab::Account),
-            KeyCode::Char('4') => return self.goto(Tab::Settings),
+            KeyCode::Char('3') => return self.goto(Tab::Usage),
+            KeyCode::Char('4') => return self.goto(Tab::Account),
+            KeyCode::Char('5') => return self.goto(Tab::Integration),
+            KeyCode::Char('6') => return self.goto(Tab::Settings),
             _ => {}
         }
         if !self.focus_content {
@@ -474,7 +816,9 @@ impl App {
         match self.tab {
             Tab::Overview => {}
             Tab::Capsule => self.on_capsule_key(key),
+            Tab::Usage => self.on_usage_key(key),
             Tab::Account => self.on_account_key(key),
+            Tab::Integration => self.on_integration_key(key),
             Tab::Settings => self.on_settings_key(key),
         }
     }
@@ -498,19 +842,58 @@ impl App {
                 self.cap_load_content();
                 t!("hint.capsule_tree").into_owned()
             }
+            Tab::Usage => {
+                self.usage_focus = UsageFocus::Chart;
+                t!("hint.usage").into_owned()
+            }
             Tab::Account => {
                 self.acc_focus = AccFocus::Tree;
                 self.acc_confirm_delete = false;
                 t!("hint.account_tree").into_owned()
             }
-            Tab::Settings => setting_desc_or_hint(self.settings.first().map(|r| r.key)),
+            Tab::Integration => {
+                self.integration_focus = IntegrationFocus::Status;
+                self.integration_page = IntegrationPage::Home;
+                self.repair_confirm = false;
+                t!("hint.integration").into_owned()
+            }
+            Tab::Settings => {
+                self.settings_focus = SettingsFocus::Category;
+                self.settings_category_idx = 0;
+                t!("hint.settings").into_owned()
+            }
         };
     }
 
     /// q/Esc: inside a tab's content, just leave it (back to the tab bar). On a
     /// top tab, arm a quit confirmation; a second q/Esc actually quits.
     fn on_back(&mut self) {
+        if self.focus_content
+            && self.tab == Tab::Integration
+            && self.integration_page != IntegrationPage::Home
+        {
+            if self.integration_page == IntegrationPage::RepairCenter && self.repair_confirm {
+                self.repair_confirm = false;
+                self.status = t!("status.repair_cancelled").into_owned();
+                return;
+            }
+            self.integration_page = IntegrationPage::Home;
+            self.repair_confirm = false;
+            self.status = t!("hint.integration").into_owned();
+            return;
+        }
         if self.focus_content {
+            if self.tab == Tab::Settings {
+                if self.settings_edit_buf.take().is_some() {
+                    self.status = t!("status.settings_edit_cancelled").into_owned();
+                    return;
+                }
+                if self.settings_search.take().is_some() {
+                    self.settings_search_editing = false;
+                    self.status = t!("hint.settings").into_owned();
+                    return;
+                }
+            }
             self.focus_content = false;
             self.confirm_quit = false;
             self.status = default_hint();
@@ -524,27 +907,312 @@ impl App {
         }
     }
 
+    fn on_usage_key(&mut self, key: KeyEvent) {
+        if key.code == KeyCode::Char('g') {
+            self.usage_mode = self.usage_mode.next();
+            self.status = t!(
+                "status.usage_mode",
+                mode = t!(self.usage_mode.label_key()).into_owned()
+            )
+            .into_owned();
+            return;
+        }
+        match (self.usage_focus, key.code) {
+            (UsageFocus::Chart, KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ')) => {
+                self.usage_focus = UsageFocus::Details;
+            }
+            (UsageFocus::Details, KeyCode::Left) => {
+                self.usage_focus = UsageFocus::Chart;
+            }
+            _ => {}
+        }
+    }
+
+    fn on_integration_key(&mut self, key: KeyEvent) {
+        if self.integration_page != IntegrationPage::Home {
+            self.on_integration_page_key(key);
+            return;
+        }
+        match key.code {
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                self.integration_page = IntegrationPage::Detail;
+                self.status = t!("hint.integration_detail").into_owned();
+            }
+            KeyCode::Char('r') => {
+                self.integration_page = IntegrationPage::RepairCenter;
+                self.repair_sel = 0;
+                self.repair_confirm = false;
+                self.status = t!("hint.integration_repair").into_owned();
+            }
+            KeyCode::Char('d') => self.run_integration_doctor(),
+            KeyCode::Char('l') => self.open_integration_logs(),
+            KeyCode::Right if self.integration_focus == IntegrationFocus::Status => {
+                self.integration_focus = IntegrationFocus::Repair;
+            }
+            KeyCode::Left if self.integration_focus == IntegrationFocus::Repair => {
+                self.integration_focus = IntegrationFocus::Status;
+            }
+            KeyCode::Left => self.integration_focus = IntegrationFocus::Status,
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.integration_focus = match self.integration_focus {
+                    IntegrationFocus::Status | IntegrationFocus::Repair => IntegrationFocus::Hooks,
+                    IntegrationFocus::Hooks => IntegrationFocus::Diagnostics,
+                    IntegrationFocus::Diagnostics => IntegrationFocus::Diagnostics,
+                };
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.integration_focus = match self.integration_focus {
+                    IntegrationFocus::Diagnostics => IntegrationFocus::Hooks,
+                    IntegrationFocus::Hooks => IntegrationFocus::Status,
+                    IntegrationFocus::Status | IntegrationFocus::Repair => IntegrationFocus::Status,
+                };
+            }
+            _ => {}
+        }
+    }
+
+    fn on_integration_page_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('d') => self.run_integration_doctor(),
+            KeyCode::Char('l') => self.open_integration_logs(),
+            KeyCode::Char('r') => {
+                self.integration_page = IntegrationPage::RepairCenter;
+                self.repair_confirm = false;
+                self.status = t!("hint.integration_repair").into_owned();
+            }
+            KeyCode::Up | KeyCode::Char('k')
+                if self.integration_page == IntegrationPage::RepairCenter =>
+            {
+                if self.repair_sel > 0 {
+                    self.repair_sel -= 1;
+                }
+                self.repair_confirm = false;
+            }
+            KeyCode::Down | KeyCode::Char('j')
+                if self.integration_page == IntegrationPage::RepairCenter =>
+            {
+                let n = self.recommended_repair_actions().len();
+                if self.repair_sel + 1 < n {
+                    self.repair_sel += 1;
+                }
+                self.repair_confirm = false;
+            }
+            KeyCode::Enter | KeyCode::Char('y')
+                if self.integration_page == IntegrationPage::RepairCenter =>
+            {
+                self.activate_repair_selection();
+            }
+            KeyCode::Char('n') if self.integration_page == IntegrationPage::RepairCenter => {
+                self.repair_confirm = false;
+                self.status = t!("status.repair_cancelled").into_owned();
+            }
+            _ => {}
+        }
+    }
+
     fn on_settings_key(&mut self, key: KeyEvent) {
+        if key.code == KeyCode::Char('/') {
+            self.settings_search = Some(String::new());
+            self.settings_search_editing = true;
+            self.status = t!("status.settings_search").into_owned();
+            return;
+        }
+        match self.settings_focus {
+            SettingsFocus::Category => self.on_settings_category_key(key),
+            SettingsFocus::Detail => self.on_settings_detail_key(key),
+        }
+    }
+
+    fn on_settings_category_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
-                if self.settings_idx > 0 {
-                    self.settings_idx -= 1;
+                if self.settings_category_idx > 0 {
+                    self.settings_category_idx -= 1;
+                    self.select_first_setting_in_category();
                 }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if self.settings_category_idx + 1 < SETTING_CATEGORIES.len() {
+                    self.settings_category_idx += 1;
+                    self.select_first_setting_in_category();
+                }
+            }
+            KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ') => {
+                self.settings_focus = SettingsFocus::Detail;
+                self.select_first_setting_in_category();
+                self.show_setting_desc();
+            }
+            _ => {}
+        }
+    }
+
+    fn on_settings_detail_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Left => self.edit_current(EditAction::Prev),
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.move_setting_in_category(-1);
                 self.show_setting_desc();
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                if self.settings_idx + 1 < self.settings.len() {
-                    self.settings_idx += 1;
-                }
+                self.move_setting_in_category(1);
                 self.show_setting_desc();
             }
             KeyCode::Char(' ') => self.edit_current(EditAction::Toggle),
+            KeyCode::Enter if self.selected_setting_kind() == Some(KeyKind::Color) => {
+                self.settings_edit_buf = self
+                    .settings
+                    .get(self.settings_idx)
+                    .map(|row| row.value.clone());
+                self.status = t!("status.settings_editing_color").into_owned();
+            }
+            KeyCode::Enter => self.edit_current(EditAction::Toggle),
             KeyCode::Right | KeyCode::Char('+') | KeyCode::Char('=') => {
                 self.edit_current(EditAction::Next)
             }
-            KeyCode::Left | KeyCode::Char('-') => self.edit_current(EditAction::Prev),
+            KeyCode::Char('-') => self.edit_current(EditAction::Prev),
+            KeyCode::Char('r') => self.reset_current_setting(),
             _ => {}
         }
+    }
+
+    fn selected_setting_kind(&self) -> Option<KeyKind> {
+        self.settings.get(self.settings_idx).map(|row| row.kind)
+    }
+
+    fn select_first_setting_in_category(&mut self) {
+        let indices = self.setting_indices_in_active_category();
+        if let Some(first) = indices.first() {
+            self.settings_idx = *first;
+        }
+    }
+
+    fn settings_search_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Enter => {
+                self.settings_search_editing = false;
+                if self
+                    .settings_search
+                    .as_ref()
+                    .is_some_and(|query| query.trim().is_empty())
+                {
+                    self.settings_search = None;
+                }
+                self.status = t!("status.settings_search_done").into_owned();
+            }
+            KeyCode::Esc => {
+                self.settings_search = None;
+                self.settings_search_editing = false;
+                self.status = t!("hint.settings").into_owned();
+            }
+            KeyCode::Backspace => {
+                if let Some(buf) = self.settings_search.as_mut() {
+                    buf.pop();
+                }
+                self.select_first_setting_in_category();
+            }
+            KeyCode::Char(c) => {
+                if let Some(buf) = self.settings_search.as_mut() {
+                    buf.push(c);
+                }
+                self.select_first_setting_in_category();
+            }
+            _ => {}
+        }
+    }
+
+    fn settings_editing_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Enter => {
+                let Some(raw) = self.settings_edit_buf.take() else {
+                    return;
+                };
+                let Some(row) = self.settings.get(self.settings_idx).cloned() else {
+                    return;
+                };
+                self.commit_setting_value(&row, raw);
+            }
+            KeyCode::Esc => {
+                self.settings_edit_buf = None;
+                self.status = t!("status.settings_edit_cancelled").into_owned();
+            }
+            KeyCode::Backspace => {
+                if let Some(buf) = self.settings_edit_buf.as_mut() {
+                    buf.pop();
+                }
+            }
+            KeyCode::Char(c) => {
+                if let Some(buf) = self.settings_edit_buf.as_mut() {
+                    buf.push(c);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn reset_current_setting(&mut self) {
+        let Some(row) = self.settings.get(self.settings_idx).cloned() else {
+            return;
+        };
+        match config::default_value(row.key) {
+            Ok(raw) => self.commit_setting_value(&row, raw),
+            Err(e) => self.status = t!("status.field_error", key = row.key, err = e).into_owned(),
+        }
+    }
+
+    fn move_setting_in_category(&mut self, delta: isize) {
+        let indices = self.setting_indices_in_active_category();
+        if indices.is_empty() {
+            return;
+        }
+        let current_pos = indices
+            .iter()
+            .position(|idx| *idx == self.settings_idx)
+            .unwrap_or(0);
+        let next_pos = if delta < 0 {
+            current_pos.saturating_sub(1)
+        } else {
+            (current_pos + 1).min(indices.len() - 1)
+        };
+        self.settings_idx = indices[next_pos];
+    }
+
+    fn setting_indices_in_active_category(&self) -> Vec<usize> {
+        let search = self
+            .settings_search
+            .as_ref()
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty());
+        self.settings
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, row)| {
+                let in_category = self.settings_category_idx == 0
+                    || setting_category_index(row.key) == self.settings_category_idx;
+                let matches_search = search.as_ref().map_or(true, |needle| {
+                    row.key.to_ascii_lowercase().contains(needle)
+                        || row.value.to_ascii_lowercase().contains(needle)
+                        || setting_desc(row.key).to_ascii_lowercase().contains(needle)
+                });
+                if in_category && matches_search {
+                    Some(idx)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn visible_setting_indices(&self, active_indices: &[usize], table_height: u16) -> Vec<usize> {
+        if active_indices.is_empty() {
+            return Vec::new();
+        }
+        let visible = settings_table_row_capacity(table_height).min(active_indices.len());
+        let selected_pos = active_indices
+            .iter()
+            .position(|idx| *idx == self.settings_idx)
+            .unwrap_or(0);
+        let offset = selected_pos.saturating_add(1).saturating_sub(visible);
+        active_indices[offset..offset + visible].to_vec()
     }
 
     /// Put the selected setting's description in the status bar.
@@ -559,10 +1227,38 @@ impl App {
         let Some(row) = self.settings.get(self.settings_idx).cloned() else {
             return;
         };
-        let Some(raw) = edit::next_raw(row.kind, &row.value, action) else {
+        let Some(mut raw) = edit::next_raw(row.kind, &row.value, action) else {
             self.status = t!("status.cannot_edit", key = row.key).into_owned();
             return;
         };
+        if is_selection_color_key(row.key) {
+            let Some(valid) = self.next_valid_selection_color_raw(&row, action) else {
+                self.status = t!("status.cannot_edit", key = row.key).into_owned();
+                return;
+            };
+            raw = valid;
+        }
+        self.commit_setting_value(&row, raw);
+    }
+
+    fn next_valid_selection_color_raw(
+        &self,
+        row: &SettingRow,
+        action: EditAction,
+    ) -> Option<String> {
+        let existing = std::fs::read_to_string(&self.config_path).ok();
+        let mut current = row.value.clone();
+        for _ in 0..16 {
+            let candidate = edit::next_raw(row.kind, &current, action)?;
+            if config::set_value(existing.as_deref(), row.key, &candidate).is_ok() {
+                return Some(candidate);
+            }
+            current = candidate;
+        }
+        None
+    }
+
+    fn commit_setting_value(&mut self, row: &SettingRow, raw: String) {
         // Autostart is not just a config flag — it must register/remove the OS
         // logon entry. Delegate to `ai-handoff autostart on|off`, which writes
         // the config *and* applies the registry/scheduled-task change.
@@ -590,6 +1286,9 @@ impl App {
                     rust_i18n::set_locale(&raw);
                 }
                 self.settings[self.settings_idx].value = raw.clone();
+                if row.key.starts_with("theme.") {
+                    self.refresh_theme_from_disk();
+                }
                 self.status = t!("status.saved", key = row.key, value = raw).into_owned();
             }
             Err(e) => self.status = t!("status.field_error", key = row.key, err = e).into_owned(),
@@ -845,7 +1544,7 @@ impl App {
                     Some(e) => format!("(could not read {path}: {e})"),
                     None => res.text,
                 };
-                let parsed = serde_json::from_str(&raw).ok();
+                let parsed = ai_handoff_core::capsule_codec::read_capsule(Path::new(&path)).ok();
                 self.cap_detail = Some(CapDetail { path, parsed, raw });
             }
         } else {
@@ -915,16 +1614,17 @@ impl App {
         format!("{agent:?}:{label}")
     }
 
-    /// Kick off a background usage fetch for the selected Codex account (Claude
-    /// has no per-account usage endpoint). No-op if already cached unless `force`.
+    /// Kick off a background usage fetch for the selected account. No-op if
+    /// already cached unless `force`.
     fn acc_ensure_usage(&mut self, force: bool) {
         let Some((agent, i)) = self.acc_selected_slot() else {
             return;
         };
-        if agent != Agent::Codex {
-            return;
-        }
         let label = self.account.agent(agent).slots[i].meta.label.clone();
+        self.acc_ensure_slot_usage(agent, label, force);
+    }
+
+    fn acc_ensure_slot_usage(&mut self, agent: Agent, label: String, force: bool) {
         let key = Self::usage_key(agent, &label);
         if !force && self.acc_usage.contains_key(&key) {
             return;
@@ -935,6 +1635,23 @@ impl App {
             let res = crate::account_api::fetch_slot_usage(agent, &label);
             let _ = tx.send((key, res));
         });
+    }
+
+    fn ensure_overview_limit_usage(&mut self) {
+        let labels = [Agent::Claude, Agent::Codex]
+            .into_iter()
+            .filter_map(|agent| {
+                self.account
+                    .agent(agent)
+                    .slots
+                    .iter()
+                    .find(|slot| slot.active)
+                    .map(|slot| (agent, slot.meta.label.clone()))
+            })
+            .collect::<Vec<_>>();
+        for (agent, label) in labels {
+            self.acc_ensure_slot_usage(agent, label, false);
+        }
     }
 
     /// The flattened, visible rows of the account tree (both agents, always
@@ -1158,7 +1875,9 @@ impl App {
         match self.tab {
             Tab::Overview => self.draw_overview(f, chunks[1]),
             Tab::Capsule => self.draw_capsule(f, chunks[1]),
+            Tab::Usage => self.draw_usage(f, chunks[1]),
             Tab::Account => self.draw_account(f, chunks[1]),
+            Tab::Integration => self.draw_integration(f, chunks[1]),
             Tab::Settings => self.draw_settings(f, chunks[1]),
         }
         self.draw_status(f, chunks[2]);
@@ -1171,30 +1890,402 @@ impl App {
         let tabs = Tabs::new(titles)
             .select(self.tab.index())
             .block(Block::default().borders(Borders::ALL).title("AI Handoff"))
-            .highlight_style(
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            );
+            .highlight_style(self.selection_style().add_modifier(Modifier::BOLD));
         f.render_widget(tabs, area);
     }
 
     fn draw_overview(&self, f: &mut Frame, area: Rect) {
-        // Token usage sits on the left (donut + legend); health on the right.
-        let cols = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
-            .split(area);
+        if area.width >= 100 {
+            let rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(3),
+                    Constraint::Length(7),
+                    Constraint::Length(7),
+                    Constraint::Min(5),
+                ])
+                .split(area);
+            self.draw_health_strip(f, rows[0]);
 
-        // Left column: a donut split (top) over a colored legend (bottom).
-        let left = Layout::default()
+            let top = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+                .split(rows[1]);
+            self.draw_text_panel(
+                f,
+                top[0],
+                t!("overview.actions").into_owned(),
+                self.action_center_lines(),
+            );
+            self.draw_text_panel(
+                f,
+                top[1],
+                t!("overview.current_project").into_owned(),
+                self.current_project_lines(),
+            );
+
+            let middle = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+                .split(rows[2]);
+            self.draw_text_panel(
+                f,
+                middle[0],
+                t!("tab.capsule").into_owned(),
+                self.capsule_summary_lines(),
+            );
+            self.draw_text_panel(
+                f,
+                middle[1],
+                t!("overview.agent_limits").into_owned(),
+                self.overview_limit_lines(),
+            );
+            self.draw_text_panel(
+                f,
+                rows[3],
+                t!("overview.recent_activity").into_owned(),
+                self.recent_activity_lines(),
+            );
+        } else {
+            let rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(3),
+                    Constraint::Length(6),
+                    Constraint::Length(5),
+                    Constraint::Length(5),
+                    Constraint::Length(5),
+                    Constraint::Min(4),
+                ])
+                .split(area);
+            self.draw_health_strip(f, rows[0]);
+            self.draw_text_panel(
+                f,
+                rows[1],
+                t!("overview.actions").into_owned(),
+                self.action_center_lines(),
+            );
+            self.draw_text_panel(
+                f,
+                rows[2],
+                t!("overview.current_project").into_owned(),
+                self.current_project_lines(),
+            );
+            self.draw_text_panel(
+                f,
+                rows[3],
+                t!("tab.capsule").into_owned(),
+                self.capsule_summary_lines(),
+            );
+            self.draw_text_panel(
+                f,
+                rows[4],
+                t!("overview.agent_limits").into_owned(),
+                self.overview_limit_lines(),
+            );
+            self.draw_text_panel(
+                f,
+                rows[5],
+                t!("overview.recent_activity").into_owned(),
+                self.recent_activity_lines(),
+            );
+        }
+    }
+
+    fn draw_health_strip(&self, f: &mut Frame, area: Rect) {
+        let mut spans = Vec::new();
+        for check in &self.snapshot.checks {
+            let (sym, color) = status_style(&check.status);
+            spans.push(Span::styled(
+                format!(" {} {} ", check.label, sym),
+                Style::default().fg(color),
+            ));
+        }
+        let para = Paragraph::new(Line::from(spans)).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(t!("overview.health")),
+        );
+        f.render_widget(para, area);
+    }
+
+    fn draw_text_panel(
+        &self,
+        f: &mut Frame,
+        area: Rect,
+        title: impl Into<String>,
+        lines: Vec<String>,
+    ) {
+        self.draw_text_panel_with_focus(f, area, title, lines, false);
+    }
+
+    fn draw_text_panel_with_focus(
+        &self,
+        f: &mut Frame,
+        area: Rect,
+        title: impl Into<String>,
+        lines: Vec<String>,
+        focused: bool,
+    ) {
+        let lines = lines.into_iter().map(Line::from).collect::<Vec<_>>();
+        let para = Paragraph::new(lines)
+            .wrap(Wrap { trim: true })
+            .block(self.focus_block(title, focused));
+        f.render_widget(para, area);
+    }
+
+    fn draw_usage(&self, f: &mut Frame, area: Rect) {
+        let total = self.usage.total.tokens.total();
+        if total == 0 {
+            let para = Paragraph::new(t!("usage.no_logs").into_owned())
+                .wrap(Wrap { trim: true })
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(t!("tab.usage")),
+                );
+            f.render_widget(para, area);
+            return;
+        }
+
+        let cols = if area.width >= 100 {
+            Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+                .split(area)
+        } else {
+            Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(12), Constraint::Min(6)])
+                .split(area)
+        };
+        let chart = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(7), Constraint::Length(7)])
             .split(cols[0]);
-        self.draw_token_donut(f, left[0]);
-        self.draw_token_legend(f, left[1]);
+        let chart_focused = self.focus_content && self.usage_focus == UsageFocus::Chart;
+        let details_focused = self.focus_content && self.usage_focus == UsageFocus::Details;
+        self.draw_token_donut(f, chart[0], chart_focused);
+        self.draw_token_legend(f, chart[1], chart_focused);
 
+        let right = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(8), Constraint::Min(5)])
+            .split(cols[1]);
+        let summary = self
+            .usage_summary_lines()
+            .into_iter()
+            .map(Line::from)
+            .collect::<Vec<_>>();
+        f.render_widget(
+            Paragraph::new(summary)
+                .wrap(Wrap { trim: true })
+                .block(self.focus_block(t!("usage.summary"), details_focused)),
+            right[0],
+        );
+
+        let groups = match self.usage_mode.dimension() {
+            Some(dim) => self.usage.breakdown(dim),
+            None => self.usage.breakdown(Dimension::Project),
+        };
+        let rows = groups.iter().take(8).map(|g| {
+            let label = match self.usage_mode {
+                UsageViewMode::Summary | UsageViewMode::Project => project_label(&g.key),
+                UsageViewMode::Source => source_label(&g.key),
+                UsageViewMode::Day | UsageViewMode::Model => g.key.clone(),
+            };
+            Row::new([
+                Cell::from(label),
+                Cell::from(human_tokens(g.tokens.total())),
+                Cell::from(format!("{:.2}", g.cost_usd)),
+            ])
+        });
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Percentage(60),
+                Constraint::Length(12),
+                Constraint::Length(10),
+            ],
+        )
+        .header(
+            Row::new([
+                t!(self.usage_mode.label_key()).into_owned(),
+                t!("table.tokens").into_owned(),
+                t!("table.est_cost").into_owned(),
+            ])
+            .style(Style::default().add_modifier(Modifier::BOLD)),
+        )
+        .block(self.focus_block(
+            format!(
+                "{} — {}",
+                t!("usage.breakdown"),
+                t!(self.usage_mode.label_key())
+            ),
+            details_focused,
+        ));
+        f.render_widget(table, right[1]);
+    }
+
+    fn draw_integration(&self, f: &mut Frame, area: Rect) {
+        if self.integration_page != IntegrationPage::Home {
+            self.draw_integration_page(f, area);
+            return;
+        }
+        let rows = if area.width >= 100 {
+            Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(9),
+                    Constraint::Length(8),
+                    Constraint::Min(5),
+                ])
+                .split(area)
+        } else {
+            Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(10),
+                    Constraint::Length(7),
+                    Constraint::Min(5),
+                ])
+                .split(area)
+        };
+
+        let top = if area.width >= 100 {
+            Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
+                .split(rows[0])
+        } else {
+            Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(5), Constraint::Length(5)])
+                .split(rows[0])
+        };
+        self.draw_integration_status_table(
+            f,
+            top[0],
+            self.focus_content && self.integration_focus == IntegrationFocus::Status,
+        );
+        self.draw_text_panel_with_focus(
+            f,
+            top[1],
+            t!("integration.repair_actions").into_owned(),
+            self.repair_action_lines(),
+            self.focus_content && self.integration_focus == IntegrationFocus::Repair,
+        );
+        self.draw_hooks_table(
+            f,
+            rows[1],
+            self.focus_content && self.integration_focus == IntegrationFocus::Hooks,
+        );
+        self.draw_text_panel_with_focus(
+            f,
+            rows[2],
+            t!("integration.recent_diagnostics").into_owned(),
+            self.integration_status_lines(),
+            self.focus_content && self.integration_focus == IntegrationFocus::Diagnostics,
+        );
+    }
+
+    fn draw_integration_page(&self, f: &mut Frame, area: Rect) {
+        match self.integration_page {
+            IntegrationPage::Home => return,
+            IntegrationPage::Detail => self.draw_text_panel_with_focus(
+                f,
+                area,
+                t!("integration.detail_title").into_owned(),
+                self.integration_detail_lines(),
+                self.focus_content,
+            ),
+            IntegrationPage::DoctorRun => self.draw_text_panel_with_focus(
+                f,
+                area,
+                t!("integration.doctor_title").into_owned(),
+                self.integration_output.clone(),
+                self.focus_content,
+            ),
+            IntegrationPage::Logs => self.draw_text_panel_with_focus(
+                f,
+                area,
+                t!("integration.logs_title").into_owned(),
+                self.integration_logs.clone(),
+                self.focus_content,
+            ),
+            IntegrationPage::RepairCenter => self.draw_repair_center(f, area),
+        }
+    }
+
+    fn draw_repair_center(&self, f: &mut Frame, area: Rect) {
+        let cols = if area.width >= 100 {
+            Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
+                .split(area)
+        } else {
+            Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(10), Constraint::Min(6)])
+                .split(area)
+        };
+        let actions = self.recommended_repair_actions();
+        let lines = actions
+            .iter()
+            .enumerate()
+            .map(|(idx, kind)| {
+                let mut text = format!(
+                    "{} {}",
+                    if kind.requires_confirm() { "!" } else { " " },
+                    t!(kind.label_key())
+                );
+                if kind.is_manual() {
+                    text.push_str(" (manual)");
+                }
+                let style = if idx == self.repair_sel {
+                    self.selection_style()
+                } else {
+                    Style::default()
+                };
+                Line::from(Span::styled(text, style))
+            })
+            .collect::<Vec<_>>();
+        f.render_widget(
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: true })
+                .block(self.focus_block(
+                    t!("integration.repair_center").into_owned(),
+                    self.focus_content,
+                )),
+            cols[0],
+        );
+
+        let selected = self.selected_repair_action();
+        let mut detail = vec![
+            t!(selected.label_key()).into_owned(),
+            t!(selected.detail_key()).into_owned(),
+        ];
+        if selected.requires_confirm() {
+            detail.push(t!("integration.repair_requires_confirm").into_owned());
+            if self.repair_confirm {
+                detail.push(t!("integration.repair_confirm_armed").into_owned());
+            }
+        }
+        if !self.integration_output.is_empty() {
+            detail.push(String::new());
+            detail.push(t!("integration.latest_run").into_owned());
+            detail.extend(self.integration_output.iter().take(12).cloned());
+        }
+        self.draw_text_panel_with_focus(
+            f,
+            cols[1],
+            t!("integration.repair_detail").into_owned(),
+            detail,
+            self.focus_content,
+        );
+    }
+
+    fn draw_integration_status_table(&self, f: &mut Frame, area: Rect, focused: bool) {
         let rows = health_rows(&self.snapshot)
             .into_iter()
             .map(health_table_row);
@@ -1214,12 +2305,50 @@ impl App {
             ])
             .style(Style::default().add_modifier(Modifier::BOLD)),
         )
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(t!("overview.health").into_owned()),
+        .block(self.focus_block(t!("integration.status").into_owned(), focused));
+        f.render_widget(table, area);
+    }
+
+    fn draw_hooks_table(&self, f: &mut Frame, area: Rect, focused: bool) {
+        let (_, claude_color) = status_style(&self.snapshot.claude_settings.status);
+        let (_, codex_color) = status_style(&self.snapshot.codex_hooks.status);
+        let claude = format!(
+            "{} {}",
+            status_style(&self.snapshot.claude_settings.status).0,
+            self.snapshot.claude_settings.message
         );
-        f.render_widget(table, cols[1]);
+        let codex = format!(
+            "{} {}",
+            status_style(&self.snapshot.codex_hooks.status).0,
+            self.snapshot.codex_hooks.message
+        );
+        let rows = ["SessionStart", "UserPromptSubmit", "PostToolUse", "Stop"]
+            .into_iter()
+            .map(|event| {
+                Row::new([
+                    Cell::from(event),
+                    Cell::from(claude.clone()).style(Style::default().fg(claude_color)),
+                    Cell::from(codex.clone()).style(Style::default().fg(codex_color)),
+                ])
+            });
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Length(18),
+                Constraint::Percentage(41),
+                Constraint::Percentage(41),
+            ],
+        )
+        .header(
+            Row::new([
+                t!("integration.event").into_owned(),
+                "Claude".to_string(),
+                "Codex".to_string(),
+            ])
+            .style(Style::default().add_modifier(Modifier::BOLD)),
+        )
+        .block(self.focus_block(t!("integration.hooks").into_owned(), focused));
+        f.render_widget(table, area);
     }
 
     fn draw_capsule(&self, f: &mut Frame, area: Rect) {
@@ -1253,14 +2382,14 @@ impl App {
                 let text = format!("{}{}", " ".repeat(r.indent), r.label);
                 if i == self.cap_sel {
                     let style = if tree_focused {
-                        Style::default().fg(Color::Black).bg(Color::Cyan)
+                        self.selection_style()
                     } else {
                         Style::default().add_modifier(Modifier::REVERSED)
                     };
                     Line::from(Span::styled(text, style))
                 } else if let CapTarget::Agent(ai) = r.target {
                     // Brand-color the agent rows (Codex = purple, ClaudeCode = orange).
-                    match agent_label_color(&self.cap_tree[ai].agent) {
+                    match self.agent_label_color(&self.cap_tree[ai].agent) {
                         Some(c) => Line::from(Span::styled(
                             text,
                             Style::default().fg(c).add_modifier(Modifier::BOLD),
@@ -1272,7 +2401,8 @@ impl App {
                 }
             })
             .collect();
-        let list = Paragraph::new(lines).block(focus_block(t!("capsule.list_title"), tree_focused));
+        let list =
+            Paragraph::new(lines).block(self.focus_block(t!("capsule.list_title"), tree_focused));
         f.render_widget(list, cols[0]);
 
         // --- right: action bar (top) over the body (bottom) ---
@@ -1290,10 +2420,7 @@ impl App {
             .cap_detail
             .as_ref()
             .and_then(|d| d.parsed.as_ref())
-            .map(|c| match c.consumption.state {
-                ai_handoff_core::capsule::ConsumptionState::Pending => state_label("pending"),
-                ai_handoff_core::capsule::ConsumptionState::Consumed => state_label("consumed"),
-            })
+            .map(|c| state_label(c.consumption.state.as_str()))
             .unwrap_or_else(|| "—".to_string());
         let mut spans = vec![
             Span::raw(" "),
@@ -1304,7 +2431,7 @@ impl App {
             Span::raw("  "),
             Span::styled(
                 format!(" {} ", t!("capsule.btn_toggle")),
-                action_style(focused),
+                self.action_style(focused),
             ),
             Span::raw("  "),
         ];
@@ -1316,15 +2443,15 @@ impl App {
         } else {
             spans.push(Span::styled(
                 format!(" {} ", t!("capsule.btn_delete")),
-                action_style(focused),
+                self.action_style(focused),
             ));
         }
         spans.push(Span::raw("  "));
         spans.push(Span::styled(
             format!(" {} ", t!("capsule.btn_edit")),
-            action_style(focused),
+            self.action_style(focused),
         ));
-        let bar = Paragraph::new(Line::from(spans)).block(focus_block(
+        let bar = Paragraph::new(Line::from(spans)).block(self.focus_block(
             t!("capsule.actions"),
             focused && self.cap_focus == CapFocus::Detail,
         ));
@@ -1358,7 +2485,7 @@ impl App {
             ];
             let editor = Paragraph::new(lines)
                 .wrap(Wrap { trim: false })
-                .block(focus_block(t!("capsule.edit_title"), true));
+                .block(self.focus_block(t!("capsule.edit_title"), true));
             f.render_widget(editor, area);
             return;
         }
@@ -1375,7 +2502,7 @@ impl App {
         };
         let body = Paragraph::new(lines)
             .wrap(Wrap { trim: false })
-            .block(focus_block(title, detail_active));
+            .block(self.focus_block(title, detail_active));
         f.render_widget(body, area);
     }
 
@@ -1403,7 +2530,7 @@ impl App {
             };
             let text = format!("  {:<14} {shown}", format!("{}:", field_label(*field)));
             let style = if i == self.cap_field && detail_active {
-                Style::default().fg(Color::Black).bg(Color::Cyan)
+                self.selection_style()
             } else if i == self.cap_field {
                 Style::default().add_modifier(Modifier::REVERSED)
             } else {
@@ -1412,10 +2539,7 @@ impl App {
             lines.push(Line::from(Span::styled(text, style)));
         }
 
-        let state = match c.consumption.state {
-            ai_handoff_core::capsule::ConsumptionState::Pending => state_label("pending"),
-            ai_handoff_core::capsule::ConsumptionState::Consumed => state_label("consumed"),
-        };
+        let state = state_label(c.consumption.state.as_str());
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             t!("capsule.readonly_header").into_owned(),
@@ -1469,12 +2593,525 @@ impl App {
         (claude, codex)
     }
 
-    fn draw_token_donut(&self, f: &mut Frame, area: Rect) {
+    fn usage_summary_lines(&self) -> Vec<String> {
+        let (claude, codex) = self.source_split();
+        let total = self.usage.total.tokens.total();
+        let mut lines = vec![
+            t!("usage.total_tokens", tokens = human_tokens(total)).into_owned(),
+            t!(
+                "usage.estimate_line",
+                cost = format!("{:.2}", self.usage.total.cost_usd)
+            )
+            .into_owned(),
+            t!(
+                "usage.source_tokens",
+                source = "Claude",
+                tokens = human_tokens(claude)
+            )
+            .into_owned(),
+            t!(
+                "usage.source_tokens",
+                source = "Codex",
+                tokens = human_tokens(codex)
+            )
+            .into_owned(),
+        ];
+        if self.usage.total.unpriced_tokens > 0 {
+            lines.push(
+                t!(
+                    "usage.unpriced_tokens",
+                    tokens = human_tokens(self.usage.total.unpriced_tokens)
+                )
+                .into_owned(),
+            );
+        }
+        lines
+    }
+
+    fn action_center_lines(&self) -> Vec<String> {
+        let mut rows: Vec<(u8, String)> = self
+            .snapshot
+            .checks
+            .iter()
+            .filter_map(|check| {
+                let priority = match check.status {
+                    CheckStatus::Error | CheckStatus::Missing => 0,
+                    CheckStatus::Warning => 1,
+                    CheckStatus::Unknown => 2,
+                    CheckStatus::Ok => return None,
+                };
+                let (sym, _) = status_style(&check.status);
+                Some((
+                    priority,
+                    format!("{sym} {}: {}", check.label, check.message),
+                ))
+            })
+            .collect();
+        if self.snapshot.capsules.pending_count > 0 {
+            rows.push((
+                3,
+                format!(
+                    "info {}",
+                    t!(
+                        "overview.pending_capsules",
+                        count = self.snapshot.capsules.pending_count
+                    )
+                ),
+            ));
+        }
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut lines = rows.into_iter().map(|(_, line)| line).collect::<Vec<_>>();
+        if lines.is_empty() {
+            lines.push(format!("ok {}", t!("overview.all_integrations_normal")));
+            lines.push(format!("ok {}", t!("overview.no_pending_capsule")));
+            lines.push(format!("ok {}", t!("overview.automatic_handoff_standby")));
+        }
+        lines.truncate(4);
+        lines
+    }
+
+    fn current_project_lines(&self) -> Vec<String> {
+        let repo = std::env::current_dir()
+            .ok()
+            .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| "unknown".to_string());
+        let mut lines = vec![
+            t!("overview.repo_line", repo = repo).into_owned(),
+            t!(
+                "overview.pending_line",
+                count = self.snapshot.capsules.pending_count
+            )
+            .into_owned(),
+        ];
+        if let Some(cap) = self.snapshot.capsules.items.first() {
+            lines.push(
+                t!(
+                    "overview.last_flow_line",
+                    source = cap.source_agent.clone(),
+                    target = cap.target_agent.clone()
+                )
+                .into_owned(),
+            );
+            lines.push(
+                t!(
+                    "overview.last_capsule_line",
+                    when = cap.created_at.get(..10).unwrap_or(&cap.created_at)
+                )
+                .into_owned(),
+            );
+        } else {
+            lines.push(t!("overview.last_capsule_none").into_owned());
+        }
+        lines
+    }
+
+    fn capsule_summary_lines(&self) -> Vec<String> {
+        let total = self.snapshot.capsules.items.len();
+        let failed = self
+            .snapshot
+            .capsules
+            .items
+            .iter()
+            .filter(|cap| cap.state == "failed")
+            .count();
+        let mut lines = vec![
+            t!(
+                "overview.pending_count",
+                count = self.snapshot.capsules.pending_count
+            )
+            .into_owned(),
+            t!("overview.total_count", count = total).into_owned(),
+            t!("overview.failed_count", count = failed).into_owned(),
+        ];
+        for cap in self.snapshot.capsules.items.iter().take(3) {
+            lines.push(format!(
+                "{} {} -> {} {}",
+                project_label(&cap.project_id),
+                cap.source_agent,
+                cap.target_agent,
+                cap.created_at.get(..10).unwrap_or(&cap.created_at)
+            ));
+        }
+        lines
+    }
+
+    fn overview_limit_lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        for agent in [Agent::Claude, Agent::Codex] {
+            let limits = self.overview_agent_limits(agent);
+            lines.push(overview_limit_line(
+                &format!("{} 5h", agent_name(agent)),
+                limits.five_hour.as_ref(),
+                &limits.note,
+            ));
+            lines.push(overview_limit_line(
+                &format!("{} week", agent_name(agent)),
+                limits.weekly.as_ref(),
+                &limits.note,
+            ));
+        }
+        lines
+    }
+
+    fn overview_agent_limits(&self, agent: Agent) -> OverviewAgentLimits {
+        let data = self.account.agent(agent);
+        let active = data.slots.iter().find(|slot| slot.active);
+        let mut limits = OverviewAgentLimits::default();
+
+        if let Some(slot) = active {
+            match self
+                .acc_usage
+                .get(&Self::usage_key(agent, &slot.meta.label))
+            {
+                Some(UsageState::Loaded(usage)) => {
+                    limits.five_hour = usage.five_hour.clone();
+                    limits.weekly = usage.weekly.clone();
+                }
+                Some(UsageState::Loading) => {
+                    limits.note = Some(t!("overview.limit_loading").into_owned());
+                }
+                Some(UsageState::Error(err)) => {
+                    limits.note = Some(t!("overview.limit_error", err = err.clone()).into_owned());
+                }
+                None => {
+                    limits.note = Some(t!("overview.limit_loading").into_owned());
+                }
+            }
+        } else {
+            limits.note = Some(t!("overview.limit_no_account").into_owned());
+        }
+
+        if agent == Agent::Claude {
+            if let Some(status) = data.status.as_ref() {
+                if limits.five_hour.is_none() {
+                    limits.five_hour = status.five_hour.clone();
+                }
+                if limits.weekly.is_none() {
+                    limits.weekly = status.weekly.clone();
+                }
+            }
+        }
+
+        limits
+    }
+
+    fn recent_activity_lines(&self) -> Vec<String> {
+        if self.snapshot.capsules.items.is_empty() {
+            return vec![t!("overview.no_recent_activity").into_owned()];
+        }
+        self.snapshot
+            .capsules
+            .items
+            .iter()
+            .take(5)
+            .map(|cap| {
+                format!(
+                    "{} {} {}",
+                    cap.created_at.get(..16).unwrap_or(&cap.created_at),
+                    cap.source_agent,
+                    cap.state
+                )
+            })
+            .collect()
+    }
+
+    fn integration_status_lines(&self) -> Vec<String> {
+        self.snapshot
+            .checks
+            .iter()
+            .map(|check| {
+                let (sym, _) = status_style(&check.status);
+                format!("{sym} {}: {}", check.label, check.message)
+            })
+            .collect()
+    }
+
+    fn integration_detail_lines(&self) -> Vec<String> {
+        match self.integration_focus {
+            IntegrationFocus::Status => {
+                let mut lines = vec![t!("integration.detail_status").into_owned()];
+                for check in &self.snapshot.checks {
+                    let (sym, _) = status_style(&check.status);
+                    lines.push(format!("{sym} {}: {}", check.label, check.message));
+                    if let Some(path) = &check.path {
+                        lines.push(format!("  {path}"));
+                    }
+                }
+                lines
+            }
+            IntegrationFocus::Repair => {
+                let mut lines = vec![t!("integration.detail_repair").into_owned()];
+                lines.extend(self.repair_action_lines());
+                lines
+            }
+            IntegrationFocus::Hooks => vec![
+                t!("integration.detail_hooks").into_owned(),
+                format!("Claude: {}", self.snapshot.claude_settings.message),
+                format!("Codex: {}", self.snapshot.codex_hooks.message),
+                format!("Codex hooks: {}", self.snapshot.paths.codex_hooks),
+                format!("Codex config: {}", self.snapshot.paths.codex_config),
+                format!("Claude settings: {}", self.snapshot.paths.claude_settings),
+            ],
+            IntegrationFocus::Diagnostics => {
+                let mut lines = vec![t!("integration.detail_diagnostics").into_owned()];
+                lines.extend(self.integration_status_lines());
+                if self.snapshot.duplicates.is_empty() {
+                    lines.push(t!("integration.no_duplicates").into_owned());
+                } else {
+                    lines.push(t!("integration.duplicates").into_owned());
+                    for dup in &self.snapshot.duplicates {
+                        lines.push(format!("warn {}: {}", dup.label, dup.message));
+                    }
+                }
+                lines
+            }
+        }
+    }
+
+    fn repair_action_lines(&self) -> Vec<String> {
+        self.recommended_repair_actions()
+            .into_iter()
+            .map(|kind| t!(kind.label_key()).into_owned())
+            .collect()
+    }
+
+    fn recommended_repair_actions(&self) -> Vec<RepairActionKind> {
+        let mut actions = Vec::new();
+        let add = |actions: &mut Vec<RepairActionKind>, kind| {
+            if !actions.contains(&kind) {
+                actions.push(kind);
+            }
+        };
+        for check in &self.snapshot.checks {
+            if matches!(
+                check.status,
+                CheckStatus::Error | CheckStatus::Missing | CheckStatus::Warning
+            ) {
+                match check.id.as_str() {
+                    "codex-hooks" | "claude-settings" | "codex-config" | "ipc" | "store" => {
+                        add(&mut actions, RepairActionKind::InstallPlugin)
+                    }
+                    "daemon" => add(&mut actions, RepairActionKind::StartDaemon),
+                    "autostart" if self.snapshot.install_state.autostart != "missing" => {
+                        add(&mut actions, RepairActionKind::AutostartOn)
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if !self.snapshot.duplicates.is_empty() {
+            add(&mut actions, RepairActionKind::ManualLegacyCleanup);
+        }
+        if self
+            .snapshot
+            .codex_config
+            .message
+            .to_ascii_lowercase()
+            .contains("trust")
+        {
+            add(&mut actions, RepairActionKind::ManualCodexTrust);
+        }
+        if actions.is_empty() {
+            actions.push(RepairActionKind::RunDoctor);
+        } else {
+            add(&mut actions, RepairActionKind::RunDoctor);
+        }
+        actions
+    }
+
+    fn selected_repair_action(&self) -> RepairActionKind {
+        let actions = self.recommended_repair_actions();
+        actions
+            .get(self.repair_sel.min(actions.len().saturating_sub(1)))
+            .copied()
+            .unwrap_or(RepairActionKind::RunDoctor)
+    }
+
+    fn activate_repair_selection(&mut self) {
+        let kind = self.selected_repair_action();
+        if kind.is_manual() {
+            self.integration_output = vec![
+                t!(kind.label_key()).into_owned(),
+                t!(kind.detail_key()).into_owned(),
+            ];
+            self.repair_confirm = false;
+            self.status = t!("status.repair_manual").into_owned();
+            return;
+        }
+        if kind.requires_confirm() && !self.repair_confirm {
+            self.repair_confirm = true;
+            self.status = t!(
+                "status.repair_confirm",
+                action = t!(kind.label_key()).into_owned()
+            )
+            .into_owned();
+            return;
+        }
+        self.repair_confirm = false;
+        match kind {
+            RepairActionKind::RunDoctor => self.run_integration_doctor(),
+            RepairActionKind::InstallPlugin => {
+                self.run_repair_command(kind, &["install", "--yes"], false)
+            }
+            RepairActionKind::StartDaemon => {
+                self.run_repair_command(kind, &["daemon", "run"], true)
+            }
+            RepairActionKind::AutostartOn => {
+                self.run_repair_command(kind, &["autostart", "on"], false)
+            }
+            RepairActionKind::ManualLegacyCleanup | RepairActionKind::ManualCodexTrust => {}
+        }
+    }
+
+    fn run_repair_command(&mut self, kind: RepairActionKind, args: &[&str], spawn: bool) {
+        let started = Instant::now();
+        let exe = match std::env::current_exe() {
+            Ok(exe) => exe,
+            Err(error) => {
+                self.integration_output = vec![format!("current_exe failed: {error}")];
+                self.status = t!("status.repair_failed", err = error.to_string()).into_owned();
+                return;
+            }
+        };
+        let command_line = format!("{} {}", exe.to_string_lossy(), args.join(" "));
+        let result = if spawn {
+            Command::new(&exe)
+                .args(args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .map(|child| (0, format!("spawned pid {}", child.id())))
+                .map_err(|error| error.to_string())
+        } else {
+            Command::new(&exe)
+                .args(args)
+                .output()
+                .map(|output| {
+                    let code = output.status.code().unwrap_or(-1);
+                    let mut text = String::new();
+                    text.push_str(&String::from_utf8_lossy(&output.stdout));
+                    text.push_str(&String::from_utf8_lossy(&output.stderr));
+                    (code, text)
+                })
+                .map_err(|error| error.to_string())
+        };
+
+        match result {
+            Ok((code, text)) => {
+                let elapsed = started.elapsed().as_millis();
+                self.integration_output = vec![
+                    format!("$ {command_line}"),
+                    format!(
+                        "{}: {}",
+                        t!(kind.label_key()),
+                        t!("integration.exit_code", code = code)
+                    ),
+                    format!("{}: {elapsed}ms", t!("integration.elapsed")),
+                ];
+                self.integration_output.extend(nonempty_lines(&text, 20));
+                self.snapshot = ai_handoff_core::dashboard::dashboard_snapshot();
+                self.integration_logs = self.integration_log_lines();
+                self.status = if code == 0 {
+                    t!("status.repair_done").into_owned()
+                } else {
+                    t!("status.repair_failed", err = format!("exit {code}")).into_owned()
+                };
+            }
+            Err(error) => {
+                self.integration_output = vec![format!("$ {command_line}"), error.clone()];
+                self.status = t!("status.repair_failed", err = error).into_owned();
+            }
+        }
+    }
+
+    fn run_integration_doctor(&mut self) {
+        let started = Instant::now();
+        self.snapshot = ai_handoff_core::dashboard::dashboard_snapshot();
+        let account = AccountData::load_live();
+        let elapsed = started.elapsed().as_millis();
+        let mut ok = 0;
+        let mut warn = 0;
+        let mut fail = 0;
+        for check in &self.snapshot.checks {
+            match check.status {
+                CheckStatus::Ok => ok += 1,
+                CheckStatus::Warning | CheckStatus::Unknown => warn += 1,
+                CheckStatus::Error | CheckStatus::Missing => fail += 1,
+            }
+        }
+        self.integration_output = vec![
+            t!("integration.doctor_completed", ms = elapsed).into_owned(),
+            t!(
+                "integration.doctor_counts",
+                ok = ok,
+                warn = warn,
+                fail = fail
+            )
+            .into_owned(),
+            t!(
+                "integration.account_summary",
+                codex = account.codex.slots.len(),
+                claude = account.claude.slots.len()
+            )
+            .into_owned(),
+        ];
+        self.integration_output
+            .extend(self.integration_status_lines());
+        self.integration_output
+            .push(t!("integration.recommended_repairs").into_owned());
+        self.integration_output.extend(
+            self.recommended_repair_actions()
+                .into_iter()
+                .map(|kind| format!("- {}", t!(kind.label_key()))),
+        );
+        self.integration_page = IntegrationPage::DoctorRun;
+        self.status = t!("status.doctor_done", ms = elapsed).into_owned();
+    }
+
+    fn open_integration_logs(&mut self) {
+        self.integration_logs = self.integration_log_lines();
+        self.integration_page = IntegrationPage::Logs;
+        self.status = t!("hint.integration_logs").into_owned();
+    }
+
+    fn integration_log_lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        if !self.integration_output.is_empty() {
+            lines.push(t!("integration.latest_run").into_owned());
+            lines.extend(self.integration_output.iter().take(30).cloned());
+            lines.push(String::new());
+        }
+        for log in ai_handoff_core::dashboard::read_logs(32 * 1024) {
+            lines.push(format!("== {} ==", log.name));
+            if let Some(error) = log.result.error {
+                lines.push(format!("{}: {error}", t!("integration.log_error")));
+            } else if log.result.text.trim().is_empty() {
+                lines.push(t!("integration.log_empty").into_owned());
+            } else {
+                lines.extend(nonempty_lines(&log.result.text, 40));
+                if log.result.truncated {
+                    lines.push(t!("integration.log_truncated").into_owned());
+                }
+            }
+            lines.push(String::new());
+        }
+        if lines.is_empty() {
+            lines.push(t!("integration.log_empty").into_owned());
+        }
+        lines
+    }
+
+    fn active_setting_category(&self) -> &'static SettingCategory {
+        SETTING_CATEGORIES
+            .get(self.settings_category_idx)
+            .unwrap_or(&SETTING_CATEGORIES[0])
+    }
+
+    fn draw_token_donut(&self, f: &mut Frame, area: Rect, focused: bool) {
         let (claude, codex) = self.source_split();
         let total = claude + codex;
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(t!("overview.token_split").into_owned());
+        let block = self.focus_block(t!("overview.token_split").into_owned(), focused);
         if total == 0 {
             f.render_widget(
                 Paragraph::new(t!("overview.no_usage").into_owned()).block(block),
@@ -1483,6 +3120,8 @@ impl App {
             return;
         }
         let claude_frac = claude as f64 / total as f64;
+        let claude_color = self.theme.claude;
+        let codex_color = self.theme.codex;
         let canvas = Canvas::default()
             .block(block)
             .marker(Marker::Braille)
@@ -1511,17 +3150,17 @@ impl App {
                 }
                 ctx.draw(&Points {
                     coords: &claude_pts,
-                    color: CLAUDE_COLOR,
+                    color: claude_color,
                 });
                 ctx.draw(&Points {
                     coords: &codex_pts,
-                    color: CODEX_COLOR,
+                    color: codex_color,
                 });
             });
         f.render_widget(canvas, area);
     }
 
-    fn draw_token_legend(&self, f: &mut Frame, area: Rect) {
+    fn draw_token_legend(&self, f: &mut Frame, area: Rect, focused: bool) {
         let (claude, codex) = self.source_split();
         let total = claude + codex;
         let pct = |n: u64| {
@@ -1539,7 +3178,7 @@ impl App {
         let lines = vec![
             Line::from(total_line.into_owned()),
             Line::from(vec![
-                Span::styled("● claude  ", Style::default().fg(CLAUDE_COLOR)),
+                Span::styled("● claude  ", Style::default().fg(self.theme.claude)),
                 Span::raw(format!(
                     "{:>7}  {:>4.0}%",
                     human_tokens(claude),
@@ -1547,13 +3186,13 @@ impl App {
                 )),
             ]),
             Line::from(vec![
-                Span::styled("● codex   ", Style::default().fg(CODEX_COLOR)),
+                Span::styled("● codex   ", Style::default().fg(self.theme.codex)),
                 Span::raw(format!("{:>7}  {:>4.0}%", human_tokens(codex), pct(codex))),
             ]),
             Line::from(t!("overview.estimate").into_owned()).italic(),
         ];
         f.render_widget(
-            Paragraph::new(lines).block(Block::default().borders(Borders::ALL)),
+            Paragraph::new(lines).block(self.focus_block("", focused)),
             area,
         );
     }
@@ -1578,7 +3217,7 @@ impl App {
                 let text = format!("{}{}", " ".repeat(r.indent), r.label);
                 if i == self.acc_sel {
                     let style = if tree_focused {
-                        Style::default().fg(Color::Black).bg(Color::Cyan)
+                        self.selection_style()
                     } else {
                         Style::default().add_modifier(Modifier::REVERSED)
                     };
@@ -1587,7 +3226,7 @@ impl App {
                     Line::from(Span::styled(
                         text,
                         Style::default()
-                            .fg(agent_color(agent))
+                            .fg(self.agent_color(agent))
                             .add_modifier(Modifier::BOLD),
                     ))
                 } else {
@@ -1595,7 +3234,8 @@ impl App {
                 }
             })
             .collect();
-        let list = Paragraph::new(lines).block(focus_block(t!("account.list_title"), tree_focused));
+        let list =
+            Paragraph::new(lines).block(self.focus_block(t!("account.list_title"), tree_focused));
         f.render_widget(list, cols[0]);
 
         // --- right: action bar (top) over the status pane (bottom) ---
@@ -1614,12 +3254,12 @@ impl App {
             Span::raw(" "),
             Span::styled(
                 format!(" {} ", t!("account.btn_switch")),
-                action_style(focused && has_slot),
+                self.action_style(focused && has_slot),
             ),
             Span::raw("  "),
             Span::styled(
                 format!(" {} ", t!("account.btn_launch")),
-                action_style(focused && has_slot),
+                self.action_style(focused && has_slot),
             ),
             Span::raw("  "),
         ];
@@ -1631,11 +3271,11 @@ impl App {
         } else {
             spans.push(Span::styled(
                 format!(" {} ", t!("account.btn_delete")),
-                action_style(focused && has_slot),
+                self.action_style(focused && has_slot),
             ));
         }
-        let bar =
-            Paragraph::new(Line::from(spans)).block(focus_block(t!("account.actions"), focused));
+        let bar = Paragraph::new(Line::from(spans))
+            .block(self.focus_block(t!("account.actions"), focused));
         f.render_widget(bar, area);
     }
 
@@ -1656,7 +3296,7 @@ impl App {
         let Some(slot) = data.slots.get(i) else {
             return self.draw_agent_summary(f, area, focused, agent);
         };
-        let block = focus_block(agent_name(agent).to_string(), focused);
+        let block = self.focus_block(agent_name(agent).to_string(), focused);
         let inner = block.inner(area);
         f.render_widget(block, area);
         let sections = Layout::default()
@@ -1669,9 +3309,9 @@ impl App {
             ])
             .split(inner);
 
-        // Resolve this account's own usage. Codex: fetched per-account from the
-        // backend (so each slot shows its own numbers, not the active one's).
-        // Claude: only the active account exposes local usage.
+        // Resolve this account's own usage. Codex uses ChatGPT backend usage;
+        // Claude uses the saved slot's OAuth usage endpoint. If Claude has no
+        // fetched slot data yet, fall back to the active statusline sample.
         let mut plan = slot.meta.plan_hint.clone();
         let mut five: Option<RateWindow> = None;
         let mut weekly: Option<RateWindow> = None;
@@ -1709,18 +3349,42 @@ impl App {
                     )
                 }
             },
-            Agent::Claude => {
-                if slot.active {
-                    if let Some(s) = data.status.as_ref() {
-                        five = s.five_hour.clone();
-                        weekly = s.weekly.clone();
+            Agent::Claude => match self
+                .acc_usage
+                .get(&Self::usage_key(agent, &slot.meta.label))
+            {
+                Some(UsageState::Loaded(u)) => {
+                    if u.plan.is_some() {
+                        plan = u.plan.clone();
                     }
-                } else {
-                    note = Some(
-                        Line::from(t!("account.claude_inactive").into_owned()).fg(Color::DarkGray),
-                    );
+                    five = u.five_hour.clone();
+                    weekly = u.weekly.clone();
                 }
-            }
+                Some(UsageState::Loading) => {
+                    note = Some(
+                        Line::from(t!("account.usage_loading").into_owned()).fg(Color::DarkGray),
+                    )
+                }
+                Some(UsageState::Error(e)) => {
+                    note = Some(
+                        Line::from(t!("account.usage_error", err = e.clone()).into_owned())
+                            .fg(Color::Red),
+                    )
+                }
+                None => {
+                    if slot.active {
+                        if let Some(s) = data.status.as_ref() {
+                            five = s.five_hour.clone();
+                            weekly = s.weekly.clone();
+                        }
+                    } else {
+                        note = Some(
+                            Line::from(t!("account.usage_press_r").into_owned())
+                                .fg(Color::DarkGray),
+                        );
+                    }
+                }
+            },
         }
 
         // Header: account email (+ active mark) + plan.
@@ -1785,7 +3449,7 @@ impl App {
     /// un-added agent never looks "signed in").
     fn draw_agent_summary(&self, f: &mut Frame, area: Rect, focused: bool, agent: Agent) {
         let data = self.account.agent(agent);
-        let block = focus_block(agent_name(agent).to_string(), focused);
+        let block = self.focus_block(agent_name(agent).to_string(), focused);
         let inner = block.inner(area);
         f.render_widget(block, area);
 
@@ -1835,14 +3499,95 @@ impl App {
     }
 
     fn draw_settings(&self, f: &mut Frame, area: Rect) {
-        let rows = self.settings.iter().enumerate().map(|(i, r)| {
-            let style = if i == self.settings_idx {
-                Style::default().fg(Color::Black).bg(Color::Cyan)
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
+            .split(area);
+        let active_category = self.active_setting_category();
+        let category_focused = self.focus_content && self.settings_focus == SettingsFocus::Category;
+        let detail_focused = self.focus_content && self.settings_focus == SettingsFocus::Detail;
+        let category_lines = SETTING_CATEGORIES
+            .iter()
+            .enumerate()
+            .map(|(idx, category)| {
+                let count = if idx == 0 {
+                    self.settings.len()
+                } else {
+                    self.settings
+                        .iter()
+                        .filter(|row| setting_category_index(row.key) == idx)
+                        .count()
+                };
+                let text = t!(
+                    "settings.category_line",
+                    name = t!(category.key).into_owned(),
+                    count = count
+                )
+                .into_owned();
+                let style = if idx == self.settings_category_idx {
+                    self.selection_style()
+                } else {
+                    Style::default()
+                };
+                Line::from(Span::styled(text, style))
+            })
+            .collect::<Vec<_>>();
+        f.render_widget(
+            Paragraph::new(category_lines)
+                .block(self.focus_block(t!("settings.categories").into_owned(), category_focused)),
+            cols[0],
+        );
+
+        let active_indices = self.setting_indices_in_active_category();
+        if active_indices.is_empty() {
+            f.render_widget(
+                Paragraph::new(t!("settings.empty_category").into_owned())
+                    .wrap(Wrap { trim: true })
+                    .block(self.focus_block(
+                        format!(
+                            "{} — {}",
+                            t!(active_category.key),
+                            t!(active_category.desc_key)
+                        ),
+                        detail_focused,
+                    )),
+                cols[1],
+            );
+            return;
+        }
+
+        let right = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(8), Constraint::Length(9)])
+            .split(cols[1]);
+        let visible_indices = self.visible_setting_indices(&active_indices, right[0].height);
+        let rows = visible_indices.iter().map(|i| {
+            let r = &self.settings[*i];
+            let style = if *i == self.settings_idx {
+                self.selection_style()
             } else {
                 Style::default()
             };
             Row::new([Cell::from(r.key), Cell::from(r.value.clone())]).style(style)
         });
+        let title = format!(
+            "{} — {}",
+            t!(active_category.key),
+            t!(active_category.desc_key)
+        );
+        let title = if let Some(query) = self.settings_search.as_ref() {
+            format!("{title} / {query}")
+        } else if visible_indices.len() < active_indices.len() {
+            let first = visible_indices
+                .first()
+                .and_then(|idx| active_indices.iter().position(|i| i == idx))
+                .unwrap_or(0)
+                + 1;
+            let last = first + visible_indices.len().saturating_sub(1);
+            format!("{title} {first}-{last}/{}", active_indices.len())
+        } else {
+            title
+        };
         let table = Table::new(rows, [Constraint::Min(36), Constraint::Length(14)])
             .header(
                 Row::new([
@@ -1851,12 +3596,73 @@ impl App {
                 ])
                 .style(Style::default().add_modifier(Modifier::BOLD)),
             )
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(t!("settings.title").into_owned()),
-            );
-        f.render_widget(table, area);
+            .block(self.focus_block(title, detail_focused));
+        f.render_widget(table, right[0]);
+
+        let detail = Paragraph::new(self.settings_detail_lines())
+            .wrap(Wrap { trim: false })
+            .block(self.focus_block(t!("settings.detail_title"), detail_focused));
+        f.render_widget(detail, right[1]);
+    }
+
+    fn settings_detail_lines(&self) -> Vec<Line<'static>> {
+        let Some(row) = self.settings.get(self.settings_idx) else {
+            return vec![Line::from(t!("settings.empty_category").into_owned())];
+        };
+        let default = config::default_value(row.key).unwrap_or_else(|_| "-".to_string());
+        let mut lines = vec![
+            Line::from(vec![
+                Span::styled(
+                    t!("settings.detail_key").into_owned(),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(format!(" {}", row.key)),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    t!("settings.detail_value").into_owned(),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(format!(" {}", row.value)),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    t!("settings.detail_default").into_owned(),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(format!(" {default}")),
+            ]),
+            Line::from(setting_desc(row.key)),
+            Line::from(t!("settings.detail_help").into_owned()).fg(Color::DarkGray),
+        ];
+        if let Some(buf) = self.settings_edit_buf.as_ref() {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    t!("settings.detail_editing").into_owned(),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(format!(" {buf}")),
+            ]));
+        }
+        if row.key.starts_with("theme.") {
+            lines.push(self.theme_preview_line());
+        }
+        lines
+    }
+
+    fn theme_preview_line(&self) -> Line<'static> {
+        Line::from(vec![
+            Span::styled(
+                format!(" {} ", t!("settings.detail_preview")),
+                self.selection_style(),
+            ),
+            Span::raw("  "),
+            Span::styled("Codex", Style::default().fg(self.theme.codex)),
+            Span::raw(" / "),
+            Span::styled("Claude", Style::default().fg(self.theme.claude)),
+            Span::raw("  "),
+            Span::styled("focus", Style::default().fg(self.theme.focus_border)),
+        ])
     }
 
     fn draw_status(&self, f: &mut Frame, area: Rect) {
@@ -1883,25 +3689,27 @@ fn agent_name(agent: Agent) -> &'static str {
     }
 }
 
-/// Brand color for an agent (Codex = light purple, Claude = orange).
-fn agent_color(agent: Agent) -> Color {
-    match agent {
-        Agent::Codex => CODEX_LABEL_COLOR,
-        Agent::Claude => CLAUDE_COLOR,
+fn overview_limit_line(label: &str, window: Option<&RateWindow>, note: &Option<String>) -> String {
+    let label = format!("{label:<11}");
+    if let Some(window) = window {
+        let left = window.remaining_percent().round().clamp(0.0, 100.0) as u64;
+        format!(
+            "{label} {} {}",
+            overview_limit_bar(left, 12),
+            t!("overview.limit_left", pct = left).into_owned()
+        )
+    } else {
+        let note = note
+            .clone()
+            .unwrap_or_else(|| t!("overview.limit_no_account").into_owned());
+        format!("{label} {note}")
     }
 }
 
-/// Brand color for a capsule-tree agent string ("Codex" / "ClaudeCode"), or
-/// `None` for an unrecognised agent.
-fn agent_label_color(name: &str) -> Option<Color> {
-    let lower = name.to_ascii_lowercase();
-    if lower.contains("codex") {
-        Some(CODEX_LABEL_COLOR)
-    } else if lower.contains("claude") {
-        Some(CLAUDE_COLOR)
-    } else {
-        None
-    }
+fn overview_limit_bar(left_percent: u64, width: usize) -> String {
+    let filled = ((left_percent.min(100) as f64 / 100.0) * width as f64).round() as usize;
+    let filled = filled.min(width);
+    format!("{}{}", "█".repeat(filled), "░".repeat(width - filled))
 }
 
 /// Gauge color by how used a window is: green < 70% < yellow < 90% < red.
@@ -1982,11 +3790,15 @@ fn field_label(field: capsule_ops::CapField) -> String {
     t!(key).into_owned()
 }
 
-/// Translated consumption-state word ("pending" / "consumed").
+/// Translated consumption-state word.
 fn state_label(state: &str) -> String {
     match state {
         "pending" => t!("state.pending").into_owned(),
+        "in_progress" => t!("state.in_progress").into_owned(),
+        "blocked" => t!("state.blocked").into_owned(),
+        "needs_review" => t!("state.needs_review").into_owned(),
         "consumed" => t!("state.consumed").into_owned(),
+        "archived" => t!("state.archived").into_owned(),
         other => other.to_string(),
     }
 }
@@ -2000,9 +3812,13 @@ fn toggle<T: Eq + std::hash::Hash>(set: &mut HashSet<T>, key: T) {
 
 /// A bordered block whose outline is highlighted (thick + yellow) when focused —
 /// this is the "외곽선" that shows which pane the user is in.
-fn focus_block(title: impl Into<String>, focused: bool) -> Block<'static> {
+fn focus_block_with_color(
+    title: impl Into<String>,
+    focused: bool,
+    focus_color: Color,
+) -> Block<'static> {
     let (border_type, style) = if focused {
-        (BorderType::Thick, Style::default().fg(Color::Yellow))
+        (BorderType::Thick, Style::default().fg(focus_color))
     } else {
         (BorderType::Plain, Style::default().fg(Color::DarkGray))
     };
@@ -2011,15 +3827,6 @@ fn focus_block(title: impl Into<String>, focused: bool) -> Block<'static> {
         .border_type(border_type)
         .border_style(style)
         .title(title.into())
-}
-
-/// Style for an action-bar button: emphasised when its pane has focus.
-fn action_style(focused: bool) -> Style {
-    if focused {
-        Style::default().fg(Color::Black).bg(Color::Cyan)
-    } else {
-        Style::default().fg(Color::Gray)
-    }
 }
 
 /// Basename of a project id/path, truncated to fit the tree column.
@@ -2032,6 +3839,14 @@ fn project_label(id: &str) -> String {
     truncate(base, 26)
 }
 
+fn source_label(id: &str) -> String {
+    match id {
+        "claude" => "Claude".to_string(),
+        "codex" => "Codex".to_string(),
+        other => other.to_string(),
+    }
+}
+
 /// One-line capsule label: date + state + a short summary preview.
 fn capsule_label(cap: &ai_handoff_core::dashboard::CapsuleSummary) -> String {
     let when = cap.created_at.get(..10).unwrap_or(&cap.created_at);
@@ -2040,7 +3855,11 @@ fn capsule_label(cap: &ai_handoff_core::dashboard::CapsuleSummary) -> String {
     } else {
         cap.summary_preview.as_str()
     };
-    format!("{when} [{}] {}", cap.state, truncate(preview, 30))
+    format!(
+        "{when} [{}] {}",
+        state_label(&cap.state),
+        truncate(preview, 30)
+    )
 }
 
 /// Truncate to `max` chars, appending '…' when shortened.
@@ -2053,6 +3872,19 @@ fn truncate(s: &str, max: usize) -> String {
     t
 }
 
+fn nonempty_lines(text: &str, max: usize) -> Vec<String> {
+    let mut lines = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .take(max)
+        .map(|line| truncate(line, 160))
+        .collect::<Vec<_>>();
+    if lines.is_empty() && !text.trim().is_empty() {
+        lines.push(truncate(text.trim(), 160));
+    }
+    lines
+}
+
 fn status_style(status: &CheckStatus) -> (&'static str, Color) {
     match status {
         CheckStatus::Ok => ("ok", Color::Green),
@@ -2061,6 +3893,34 @@ fn status_style(status: &CheckStatus) -> (&'static str, Color) {
         CheckStatus::Missing => ("missing", Color::DarkGray),
         CheckStatus::Unknown => ("?", Color::DarkGray),
     }
+}
+
+fn setting_category_index(key: &str) -> usize {
+    if key.starts_with("triggers.") {
+        2
+    } else if key.starts_with("capsule.") {
+        3
+    } else if key.starts_with("paths.") {
+        4
+    } else if key.starts_with("theme.") || matches!(key, "language" | "statusline.show") {
+        5
+    } else if key.starts_with("security.") {
+        6
+    } else if key.starts_with("agents.") {
+        7
+    } else if key.starts_with("autostart.") {
+        1
+    } else {
+        8
+    }
+}
+
+fn is_selection_color_key(key: &str) -> bool {
+    matches!(key, "theme.selection_bg_color" | "theme.selection_fg_color")
+}
+
+fn settings_table_row_capacity(table_height: u16) -> usize {
+    table_height.saturating_sub(3).max(1) as usize
 }
 
 /// Compact token count with a K/M/B unit, e.g. 1_021_205_181 -> "1.02B".
@@ -2110,7 +3970,7 @@ mod tests {
     fn top_tab_q_arms_quit_not_back() {
         let mut app = test_app();
         app.on_key(key(KeyCode::Char('2'))); // Overview -> Capsule
-        app.on_key(key(KeyCode::Char('4'))); // Capsule -> Settings
+        app.on_key(key(KeyCode::Char('6'))); // Capsule -> Settings
         assert_eq!(app.tab, Tab::Settings);
 
         // On a top tab, q does NOT go back to a previous tab — it arms a quit.
@@ -2126,7 +3986,7 @@ mod tests {
     #[test]
     fn q_in_content_returns_to_tab_bar_then_arms_quit() {
         let mut app = test_app();
-        app.on_key(key(KeyCode::Char('4'))); // Settings tab bar
+        app.on_key(key(KeyCode::Char('6'))); // Settings tab bar
         app.on_key(key(KeyCode::Down)); // descend into content
         assert!(app.focus_content);
 
@@ -2263,7 +4123,7 @@ mod tests {
     #[test]
     fn account_nav_enters_detail_on_a_slot_and_back() {
         let mut app = account_app();
-        app.on_key(key(KeyCode::Char('3'))); // -> Account tab bar
+        app.on_key(key(KeyCode::Char('4'))); // -> Account tab bar
         assert_eq!(app.tab, Tab::Account);
         assert!(!app.focus_content);
         app.on_key(key(KeyCode::Down)); // descend into the tree
@@ -2380,8 +4240,264 @@ mod tests {
     }
 
     #[test]
+    fn usage_summary_lines_show_total_and_source_split() {
+        use ai_handoff_usage::model::{Source, Tokens, UsageEvent};
+        let events = vec![
+            UsageEvent {
+                source: Source::Claude,
+                project: "p".into(),
+                session: "s".into(),
+                model: "claude-opus-4-8".into(),
+                day: "2026-06-17".into(),
+                tokens: Tokens {
+                    input: 10,
+                    ..Default::default()
+                },
+            },
+            UsageEvent {
+                source: Source::Codex,
+                project: "p".into(),
+                session: "s".into(),
+                model: "gpt-5.5".into(),
+                day: "2026-06-17".into(),
+                tokens: Tokens {
+                    input: 4,
+                    ..Default::default()
+                },
+            },
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot = ai_handoff_core::dashboard::dashboard_snapshot_for(dir.path(), dir.path());
+        let app = App::new(
+            snapshot,
+            UsageView::from_events(&events),
+            vec![],
+            dir.path().join("config.toml"),
+        );
+
+        let lines = app.usage_summary_lines();
+
+        assert!(lines.iter().any(|line| line == "Total 14 tokens"));
+        assert!(lines.iter().any(|line| line == "Claude 10 tokens"));
+        assert!(lines.iter().any(|line| line == "Codex 4 tokens"));
+    }
+
+    #[test]
+    fn overview_limit_lines_show_active_agent_windows() {
+        let mut app = test_app();
+        app.account.claude = AgentAccount {
+            status: None,
+            slots: vec![account::AccountSlot {
+                meta: account::AccountMeta {
+                    schema_version: 1,
+                    agent: "claude".into(),
+                    label: "claude-active".into(),
+                    email: Some("claude@example.com".into()),
+                    plan_hint: Some("pro".into()),
+                    account_id: None,
+                    workspace_id: None,
+                    created_at: None,
+                    last_verified_at: None,
+                    source: None,
+                },
+                dir: std::path::PathBuf::from("/p/claude-active"),
+                active: true,
+            }],
+        };
+        app.account.codex = AgentAccount {
+            status: None,
+            slots: vec![account::AccountSlot {
+                meta: account::AccountMeta {
+                    schema_version: 1,
+                    agent: "codex".into(),
+                    label: "codex-active".into(),
+                    email: Some("codex@example.com".into()),
+                    plan_hint: Some("team".into()),
+                    account_id: None,
+                    workspace_id: None,
+                    created_at: None,
+                    last_verified_at: None,
+                    source: None,
+                },
+                dir: std::path::PathBuf::from("/p/codex-active"),
+                active: true,
+            }],
+        };
+        app.acc_usage.insert(
+            App::usage_key(Agent::Claude, "claude-active"),
+            UsageState::Loaded(crate::account_api::UsageData {
+                five_hour: Some(RateWindow {
+                    used_percent: 78.0,
+                    window_minutes: 300,
+                    resets_at: None,
+                }),
+                weekly: Some(RateWindow {
+                    used_percent: 54.0,
+                    window_minutes: 10080,
+                    resets_at: None,
+                }),
+                ..Default::default()
+            }),
+        );
+        app.acc_usage.insert(
+            App::usage_key(Agent::Codex, "codex-active"),
+            UsageState::Loaded(crate::account_api::UsageData {
+                five_hour: Some(RateWindow {
+                    used_percent: 90.0,
+                    window_minutes: 300,
+                    resets_at: None,
+                }),
+                weekly: Some(RateWindow {
+                    used_percent: 30.0,
+                    window_minutes: 10080,
+                    resets_at: None,
+                }),
+                ..Default::default()
+            }),
+        );
+
+        let lines = app.overview_limit_lines();
+
+        assert_eq!(lines.len(), 4);
+        assert!(lines[0].starts_with("Claude 5h"));
+        assert!(lines[0].contains("22% left"));
+        assert!(lines[1].starts_with("Claude week"));
+        assert!(lines[1].contains("46% left"));
+        assert!(lines[2].starts_with("Codex 5h"));
+        assert!(lines[2].contains("10% left"));
+        assert!(lines[3].starts_with("Codex week"));
+        assert!(lines[3].contains("70% left"));
+    }
+
+    #[test]
+    fn action_center_lines_show_positive_empty_state() {
+        let mut app = test_app();
+        for check in &mut app.snapshot.checks {
+            check.status = CheckStatus::Ok;
+            check.message = "ok".into();
+        }
+        app.snapshot.capsules.items.clear();
+        app.snapshot.capsules.pending_count = 0;
+
+        let lines = app.action_center_lines();
+
+        assert_eq!(
+            lines,
+            vec![
+                "ok All integrations normal".to_string(),
+                "ok No pending capsule".to_string(),
+                "ok Automatic handoff standing by".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn integration_status_lines_include_check_status_and_detail() {
+        let app = test_app();
+
+        let lines = app.integration_status_lines();
+
+        assert!(lines.iter().any(|line| line.contains("Daemon")));
+        assert!(lines.iter().any(|line| line.contains("Codex hooks")));
+        assert!(lines.iter().any(|line| line.contains(":")));
+    }
+
+    #[test]
+    fn overview_usage_integration_and_settings_labels_translate() {
+        for locale in ["en", "ko", "ja", "zh"] {
+            for key in [
+                "overview.actions",
+                "overview.current_project",
+                "overview.recent_activity",
+                "overview.agent_limits",
+                "overview.limit_left",
+                "overview.limit_loading",
+                "overview.limit_no_account",
+                "overview.limit_error",
+                "overview.all_integrations_normal",
+                "usage.total_tokens",
+                "usage.estimate_line",
+                "integration.repair_actions",
+                "integration.recent_diagnostics",
+                "integration.hooks",
+                "integration.repair_center",
+                "integration.doctor_title",
+                "integration.logs_title",
+                "settings.category.all",
+                "settings.category.automation",
+                "settings.category.triggers",
+                "settings.category.capsule",
+                "settings.category.paths",
+                "settings.category.display",
+                "settings.category.security",
+                "settings.category.agents",
+                "settings.category.advanced",
+                "settings.detail_title",
+                "settings.detail_key",
+                "settings.detail_value",
+                "settings.detail_default",
+                "settings.detail_help",
+                "settings.detail_editing",
+                "settings.detail_preview",
+                "setting.capsule_format",
+                "setting.capsule_next_prompt_max_items",
+                "setting.capsule_remaining_max_items",
+                "setting.capsule_done_max_items",
+                "setting.capsule_risks_max_items",
+                "setting.theme_preset",
+                "setting.theme_codex_color",
+                "setting.theme_claude_color",
+                "setting.theme_focus_border_color",
+                "setting.theme_selection_bg_color",
+                "setting.theme_selection_fg_color",
+                "status.settings_search",
+                "status.settings_search_done",
+                "status.settings_editing_color",
+                "status.settings_edit_cancelled",
+                "state.in_progress",
+                "state.blocked",
+                "state.needs_review",
+                "state.archived",
+            ] {
+                let value = t!(
+                    key,
+                    locale = locale,
+                    tokens = "1",
+                    cost = "1.00",
+                    pct = "1",
+                    err = "x"
+                )
+                .into_owned();
+                assert!(!value.is_empty(), "{locale}:{key}");
+                assert!(!value.starts_with("translation missing"), "{locale}:{key}");
+            }
+        }
+    }
+
+    #[test]
+    fn settings_categories_follow_design_doc_order() {
+        let keys: Vec<&str> = SETTING_CATEGORIES.iter().map(|c| c.key).collect();
+        assert_eq!(
+            keys,
+            vec![
+                "settings.category.all",
+                "settings.category.automation",
+                "settings.category.triggers",
+                "settings.category.capsule",
+                "settings.category.paths",
+                "settings.category.display",
+                "settings.category.security",
+                "settings.category.agents",
+                "settings.category.advanced",
+            ]
+        );
+    }
+
+    #[test]
     fn tab_titles_translate_with_locale() {
         assert_eq!(t!("tab.overview", locale = "ko"), "개요");
+        assert_eq!(t!("tab.usage", locale = "ko"), "사용량");
+        assert_eq!(t!("tab.integration", locale = "ko"), "연동");
         assert_eq!(t!("tab.account", locale = "ja"), "アカウント");
         assert_eq!(t!("tab.settings", locale = "zh"), "设置");
         assert_eq!(t!("tab.capsule", locale = "en"), "Capsule");
@@ -2393,7 +4509,11 @@ mod tests {
         assert_eq!(app.tab, Tab::Overview);
         app.on_key(key(KeyCode::Tab));
         assert_eq!(app.tab, Tab::Capsule);
-        app.on_key(key(KeyCode::Char('4')));
+        app.on_key(key(KeyCode::Tab));
+        assert_eq!(app.tab, Tab::Usage);
+        app.on_key(key(KeyCode::Char('5')));
+        assert_eq!(app.tab, Tab::Integration);
+        app.on_key(key(KeyCode::Char('6')));
         assert_eq!(app.tab, Tab::Settings);
         app.on_key(key(KeyCode::Char('1')));
         assert_eq!(app.tab, Tab::Overview);
@@ -2402,14 +4522,19 @@ mod tests {
     #[test]
     fn entering_a_tab_does_not_auto_activate_its_content() {
         let mut app = test_app();
-        app.on_key(key(KeyCode::Char('4'))); // -> Settings, on the tab bar
+        app.on_key(key(KeyCode::Char('6'))); // -> Settings, on the tab bar
         assert_eq!(app.tab, Tab::Settings);
         assert!(!app.focus_content, "Settings must not auto-enter edit mode");
         // Space at the tab-bar level descends but must not edit the first row.
         app.on_key(key(KeyCode::Char(' ')));
         assert!(app.focus_content);
         assert_eq!(app.settings[0].value, "true", "descend must not toggle");
-        // Now a second Space actually edits.
+        assert_eq!(app.settings_focus, SettingsFocus::Category);
+        // A second Space enters the right detail pane; it still must not edit.
+        app.on_key(key(KeyCode::Char(' ')));
+        assert_eq!(app.settings_focus, SettingsFocus::Detail);
+        assert_eq!(app.settings[0].value, "true");
+        // Now Space in the detail pane actually edits.
         app.on_key(key(KeyCode::Char(' ')));
         assert_eq!(app.settings[0].value, "false");
     }
@@ -2417,7 +4542,7 @@ mod tests {
     #[test]
     fn down_enters_content_without_moving_selection() {
         let mut app = test_app();
-        app.on_key(key(KeyCode::Char('4'))); // -> Settings tab bar
+        app.on_key(key(KeyCode::Char('6'))); // -> Settings tab bar
         app.on_key(key(KeyCode::Down)); // descend
         assert!(app.focus_content);
         assert_eq!(
@@ -2431,6 +4556,7 @@ mod tests {
         let mut app = test_app();
         app.tab = Tab::Settings;
         app.focus_content = true;
+        app.settings_focus = SettingsFocus::Detail;
         // first row is triggers.five_hour.enabled (bool, default true)
         let first_key = app.settings[0].key;
         app.on_key(key(KeyCode::Char(' ')));
@@ -2446,10 +4572,13 @@ mod tests {
     #[test]
     fn settings_status_shows_selected_description() {
         let mut app = test_app();
-        app.on_key(key(KeyCode::Char('4'))); // -> Settings tab bar
+        app.on_key(key(KeyCode::Char('6'))); // -> Settings tab bar
         app.on_key(key(KeyCode::Down)); // descend; status = desc of row 0
         assert!(app.focus_content);
         assert_eq!(app.settings_idx, 0);
+        assert_eq!(app.settings_focus, SettingsFocus::Category);
+        app.on_key(key(KeyCode::Right)); // enter detail; status = desc of row 0
+        assert_eq!(app.settings_focus, SettingsFocus::Detail);
         assert_eq!(app.status, setting_desc(app.settings[0].key));
         assert!(!app.status.is_empty());
         app.on_key(key(KeyCode::Down)); // move to row 1; description updates
@@ -2462,10 +4591,314 @@ mod tests {
         let mut app = test_app();
         app.tab = Tab::Settings;
         app.focus_content = true;
+        app.settings_focus = SettingsFocus::Detail;
         app.on_key(key(KeyCode::Down));
         assert_eq!(app.settings_idx, 1);
         app.on_key(key(KeyCode::Up));
         assert_eq!(app.settings_idx, 0);
+    }
+
+    #[test]
+    fn settings_enters_detail_and_esc_leaves_settings_content() {
+        let mut app = test_app();
+        app.tab = Tab::Settings;
+        app.focus_content = true;
+        app.settings_focus = SettingsFocus::Category;
+        app.settings_category_idx = 0;
+
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.settings_category_idx, 1);
+        assert_eq!(app.settings_focus, SettingsFocus::Category);
+
+        app.on_key(key(KeyCode::Right));
+        assert_eq!(app.settings_focus, SettingsFocus::Detail);
+        assert!(app.settings[app.settings_idx].key.starts_with("autostart."));
+
+        app.on_key(key(KeyCode::Esc));
+        assert!(!app.focus_content);
+        assert_eq!(app.settings_focus, SettingsFocus::Detail);
+    }
+
+    #[test]
+    fn usage_and_integration_focus_moves_between_subpanes() {
+        let mut app = test_app();
+        app.tab = Tab::Usage;
+        app.focus_content = true;
+        app.usage_focus = UsageFocus::Chart;
+        app.on_key(key(KeyCode::Right));
+        assert_eq!(app.usage_focus, UsageFocus::Details);
+        app.on_key(key(KeyCode::Left));
+        assert_eq!(app.usage_focus, UsageFocus::Chart);
+
+        app.tab = Tab::Integration;
+        app.integration_focus = IntegrationFocus::Status;
+        app.on_key(key(KeyCode::Right));
+        assert_eq!(app.integration_focus, IntegrationFocus::Repair);
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.integration_focus, IntegrationFocus::Hooks);
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.integration_focus, IntegrationFocus::Diagnostics);
+    }
+
+    #[test]
+    fn usage_g_cycles_breakdown_modes() {
+        let mut app = test_app();
+        app.tab = Tab::Usage;
+        app.focus_content = true;
+
+        assert_eq!(app.usage_mode, UsageViewMode::Summary);
+        app.on_key(key(KeyCode::Char('g')));
+        assert_eq!(app.usage_mode, UsageViewMode::Day);
+        app.on_key(key(KeyCode::Char('g')));
+        assert_eq!(app.usage_mode, UsageViewMode::Project);
+        app.on_key(key(KeyCode::Char('g')));
+        assert_eq!(app.usage_mode, UsageViewMode::Model);
+        app.on_key(key(KeyCode::Char('g')));
+        assert_eq!(app.usage_mode, UsageViewMode::Source);
+        app.on_key(key(KeyCode::Char('g')));
+        assert_eq!(app.usage_mode, UsageViewMode::Summary);
+    }
+
+    #[test]
+    fn integration_keys_open_pages_and_back_returns_home_first() {
+        let mut app = test_app();
+        app.tab = Tab::Integration;
+        app.focus_content = true;
+
+        app.on_key(key(KeyCode::Char('d')));
+        assert_eq!(app.integration_page, IntegrationPage::DoctorRun);
+        assert!(app
+            .integration_output
+            .iter()
+            .any(|line| line.contains("doctor")));
+
+        app.on_key(key(KeyCode::Char('q')));
+        assert!(app.focus_content);
+        assert_eq!(app.integration_page, IntegrationPage::Home);
+
+        app.on_key(key(KeyCode::Char('r')));
+        assert_eq!(app.integration_page, IntegrationPage::RepairCenter);
+
+        app.on_key(key(KeyCode::Char('q')));
+        app.on_key(key(KeyCode::Char('l')));
+        assert_eq!(app.integration_page, IntegrationPage::Logs);
+    }
+
+    #[test]
+    fn repair_center_requires_confirmation_before_mutating_action() {
+        let mut app = test_app();
+        app.tab = Tab::Integration;
+        app.focus_content = true;
+        app.snapshot.codex_config.status = CheckStatus::Warning;
+        app.snapshot.codex_config.message = "writable_roots=false, AI_HANDOFF_HOME=false".into();
+
+        app.on_key(key(KeyCode::Char('r')));
+        assert_eq!(app.integration_page, IntegrationPage::RepairCenter);
+        assert!(!app.repair_confirm);
+
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.repair_confirm);
+        assert!(
+            app.integration_output.is_empty(),
+            "first Enter must arm confirmation, not execute"
+        );
+    }
+
+    #[test]
+    fn settings_all_category_contains_every_setting() {
+        let mut app = test_app();
+        app.tab = Tab::Settings;
+        app.focus_content = true;
+        app.settings_category_idx = 0;
+
+        assert_eq!(SETTING_CATEGORIES[0].key, "settings.category.all");
+        assert_eq!(
+            app.setting_indices_in_active_category().len(),
+            app.settings.len()
+        );
+
+        app.settings_focus = SettingsFocus::Detail;
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.settings_idx, 1);
+    }
+
+    #[test]
+    fn settings_table_viewport_keeps_selected_row_visible() {
+        let mut app = test_app();
+        app.tab = Tab::Settings;
+        app.focus_content = true;
+        app.settings_focus = SettingsFocus::Detail;
+        app.settings_category_idx = 0;
+        app.settings_idx = app.settings.len() - 1;
+
+        let all = app.setting_indices_in_active_category();
+        let visible = app.visible_setting_indices(&all, 8);
+
+        assert!(visible.contains(&app.settings_idx));
+        assert!(!visible.contains(&0));
+    }
+
+    #[test]
+    fn settings_left_edits_previous_value_without_leaving_detail() {
+        let mut app = test_app();
+        app.tab = Tab::Settings;
+        app.focus_content = true;
+        app.settings_focus = SettingsFocus::Detail;
+        let before = app.settings[app.settings_idx].value.clone();
+
+        app.on_key(key(KeyCode::Left));
+
+        assert_eq!(app.settings_focus, SettingsFocus::Detail);
+        assert!(app.focus_content);
+        assert_ne!(app.settings[app.settings_idx].value, before);
+    }
+
+    #[test]
+    fn selection_color_cycle_skips_low_contrast_pairings() {
+        let mut app = test_app();
+        app.tab = Tab::Settings;
+        app.focus_content = true;
+        app.settings_focus = SettingsFocus::Detail;
+        app.settings_idx = app
+            .settings
+            .iter()
+            .position(|row| row.key == "theme.selection_fg_color")
+            .unwrap();
+
+        app.on_key(key(KeyCode::Char(' ')));
+
+        assert!(!app.status.contains("contrast"), "{}", app.status);
+        assert_ne!(app.settings[app.settings_idx].value, "black");
+        assert_ne!(app.theme.selection_fg, Color::Rgb(0, 0, 0));
+    }
+
+    #[test]
+    fn selection_text_color_cycle_offers_more_than_blue_and_black() {
+        let mut app = test_app();
+        app.tab = Tab::Settings;
+        app.focus_content = true;
+        app.settings_focus = SettingsFocus::Detail;
+
+        let bg_idx = app
+            .settings
+            .iter()
+            .position(|row| row.key == "theme.selection_bg_color")
+            .unwrap();
+        app.settings_idx = bg_idx;
+        app.commit_setting_value(&app.settings[bg_idx].clone(), "white".to_string());
+
+        let fg_idx = app
+            .settings
+            .iter()
+            .position(|row| row.key == "theme.selection_fg_color")
+            .unwrap();
+        app.settings_idx = fg_idx;
+        app.commit_setting_value(&app.settings[fg_idx].clone(), "blue".to_string());
+
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..5 {
+            app.on_key(key(KeyCode::Right));
+            seen.insert(app.settings[fg_idx].value.clone());
+        }
+
+        assert!(seen.contains("magenta"), "{seen:?}");
+        assert!(seen.contains("red"), "{seen:?}");
+        assert!(seen.contains("green"), "{seen:?}");
+    }
+
+    #[test]
+    fn settings_search_filters_and_keeps_filter_after_enter() {
+        let mut app = test_app();
+        app.tab = Tab::Settings;
+        app.focus_content = true;
+        app.settings_focus = SettingsFocus::Detail;
+
+        app.on_key(key(KeyCode::Char('/')));
+        for c in "theme".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+
+        let keys = app
+            .setting_indices_in_active_category()
+            .into_iter()
+            .map(|idx| app.settings[idx].key)
+            .collect::<Vec<_>>();
+        assert!(!keys.is_empty());
+        assert!(keys.iter().all(|key| key.starts_with("theme.")));
+
+        app.on_key(key(KeyCode::Enter));
+        assert!(!app.settings_search_editing);
+        assert_eq!(app.settings_search.as_deref(), Some("theme"));
+        assert!(app.focus_content);
+    }
+
+    #[test]
+    fn settings_reset_restores_default_value() {
+        let mut app = test_app();
+        app.tab = Tab::Settings;
+        app.focus_content = true;
+        app.settings_focus = SettingsFocus::Detail;
+        app.settings_idx = app
+            .settings
+            .iter()
+            .position(|row| row.key == "theme.focus_border_color")
+            .unwrap();
+
+        app.commit_setting_value(&app.settings[app.settings_idx].clone(), "red".to_string());
+        assert_eq!(app.settings[app.settings_idx].value, "red");
+
+        app.on_key(key(KeyCode::Char('r')));
+        assert_eq!(app.settings[app.settings_idx].value, "#FFA500");
+        assert_eq!(app.theme.focus_border, Color::Rgb(255, 165, 0));
+    }
+
+    #[test]
+    fn theme_settings_apply_to_selection_focus_and_agent_colors() {
+        let mut app = test_app();
+        app.tab = Tab::Settings;
+        app.focus_content = true;
+        app.settings_focus = SettingsFocus::Detail;
+        for (key_name, raw) in [
+            ("theme.codex_color", "#112233"),
+            ("theme.claude_color", "#445566"),
+            ("theme.focus_border_color", "#778899"),
+            ("theme.selection_bg_color", "white"),
+            ("theme.selection_fg_color", "black"),
+        ] {
+            app.settings_idx = app
+                .settings
+                .iter()
+                .position(|row| row.key == key_name)
+                .unwrap();
+            app.commit_setting_value(&app.settings[app.settings_idx].clone(), raw.to_string());
+        }
+
+        assert_eq!(app.agent_color(Agent::Codex), Color::Rgb(0x11, 0x22, 0x33));
+        assert_eq!(app.agent_color(Agent::Claude), Color::Rgb(0x44, 0x55, 0x66));
+        assert_eq!(app.theme.focus_border, Color::Rgb(0x77, 0x88, 0x99));
+        assert_eq!(
+            app.selection_style(),
+            Style::default()
+                .fg(Color::Rgb(0, 0, 0))
+                .bg(Color::Rgb(255, 255, 255))
+        );
+    }
+
+    #[test]
+    fn theme_preset_without_overrides_changes_tui_theme() {
+        let cfg = config::parse("[theme]\npreset = \"mono\"\n").unwrap();
+        let theme = TuiTheme::from_config(&cfg);
+
+        assert_eq!(theme.codex, Color::Rgb(255, 255, 255));
+        assert_eq!(theme.claude, Color::Rgb(128, 128, 128));
+        assert_eq!(theme.focus_border, Color::Rgb(255, 255, 255));
+        assert_eq!(theme.selection_bg, Color::Rgb(255, 255, 255));
+        assert_eq!(theme.selection_fg, Color::Rgb(0, 0, 0));
+    }
+
+    #[test]
+    fn focused_panel_border_is_orange() {
+        assert_eq!(TuiTheme::default().focus_border, Color::Rgb(255, 165, 0));
     }
 
     #[test]
@@ -2591,11 +5024,11 @@ mod tests {
         app.on_key(key(KeyCode::Right)); // capsule -> detail pane
         assert_eq!(app.cap_focus, CapFocus::Detail);
 
-        // Toggle state: disk + in-memory both become consumed.
+        // Toggle state: disk + in-memory both advance to the next state.
         app.on_key(key(KeyCode::Char('s')));
-        assert_eq!(app.cap_tree[0].projects[0].capsules[0].state, "consumed");
+        assert_eq!(app.cap_tree[0].projects[0].capsules[0].state, "in_progress");
         let on_disk: Capsule = serde_json::from_slice(&std::fs::read(&cap_path).unwrap()).unwrap();
-        assert_eq!(on_disk.consumption.state, ConsumptionState::Consumed);
+        assert_eq!(on_disk.consumption.state, ConsumptionState::InProgress);
 
         // Edit the goal: 'e' loads it, type, Enter saves.
         app.on_key(key(KeyCode::Char('e')));

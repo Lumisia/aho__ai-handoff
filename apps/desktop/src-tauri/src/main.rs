@@ -1,8 +1,6 @@
 use std::path::PathBuf;
 
-use ai_handoff_core::dashboard::{
-    self, CapsuleList, DashboardSnapshot, LogFile, ReadTextResult,
-};
+use ai_handoff_core::dashboard::{self, CapsuleList, DashboardSnapshot, LogFile, ReadTextResult};
 
 const TEXT_LIMIT: u64 = 512 * 1024;
 

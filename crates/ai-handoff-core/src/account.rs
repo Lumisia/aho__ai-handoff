@@ -302,6 +302,10 @@ pub fn slot_request_auth(agent: Agent, label: &str) -> Option<(String, Option<St
     request_auth_from_path(&slot_dir(agent, label).join(cred_filename(agent)))
 }
 
+pub fn claude_slot_oauth(label: &str) -> Option<(String, Option<String>)> {
+    claude_oauth_from_path(&slot_dir(Agent::Claude, label).join(cred_filename(Agent::Claude)))
+}
+
 /// Read `(access_token, account_id)` from a Codex `auth.json` at `path`.
 fn request_auth_from_path(path: &Path) -> Option<(String, Option<String>)> {
     let value: Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
@@ -312,6 +316,23 @@ fn request_auth_from_path(path: &Path) -> Option<(String, Option<String>)> {
         .to_string();
     let account_id = identity_from_auth(&value).and_then(|i| i.account_id);
     Some((access_token, account_id))
+}
+
+fn claude_oauth_from_path(path: &Path) -> Option<(String, Option<String>)> {
+    let value: Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    let oauth = value.get("claudeAiOauth").or_else(|| value.get("oauth"))?;
+    let access_token = oauth
+        .get("accessToken")
+        .or_else(|| oauth.get("access_token"))
+        .or_else(|| oauth.get("oauth_access_token"))?
+        .as_str()?
+        .to_string();
+    let plan = oauth
+        .get("subscriptionType")
+        .or_else(|| oauth.get("subscription_type"))
+        .and_then(Value::as_str)
+        .map(String::from);
+    Some((access_token, plan))
 }
 
 fn default_organization_id(auth: &Value) -> Option<String> {
@@ -576,7 +597,9 @@ pub fn login_complete(agent: Agent, profile_home: &Path) -> bool {
                     .map(|s| !s.is_empty())
             })
             .unwrap_or(false),
-        Agent::Claude => true,
+        Agent::Claude => claude_oauth_from_path(&profile_home.join(cred_filename(agent)))
+            .map(|(token, _)| !token.is_empty())
+            .unwrap_or(false),
     }
 }
 
@@ -821,6 +844,46 @@ mod tests {
         assert_eq!(weekly.resets_at, Some(1_900_000_000));
 
         std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn claude_slot_oauth_reads_saved_access_token_and_plan() {
+        let _guard = crate::test_support::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+
+        let dir = slot_dir(Agent::Claude, "dev@example.com");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(".credentials.json"),
+            br#"{"claudeAiOauth":{"accessToken":"secret-token","subscriptionType":"pro"}}"#,
+        )
+        .unwrap();
+
+        let (token, plan) = claude_slot_oauth("dev@example.com").expect("oauth token");
+
+        assert_eq!(token, "secret-token");
+        assert_eq!(plan.as_deref(), Some("pro"));
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn claude_login_complete_requires_usable_oauth_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let cred = dir.path().join(".credentials.json");
+
+        std::fs::write(&cred, b"{}").unwrap();
+        assert!(
+            !login_complete(Agent::Claude, dir.path()),
+            "empty Claude credentials must not be captured"
+        );
+
+        std::fs::write(
+            &cred,
+            br#"{"claudeAiOauth":{"accessToken":"secret-token","subscriptionType":"pro"}}"#,
+        )
+        .unwrap();
+        assert!(login_complete(Agent::Claude, dir.path()));
     }
 
     #[test]

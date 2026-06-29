@@ -1,39 +1,39 @@
 ---
 name: handoff
-description: Resume, create, diagnose, clear, or recall a cross-agent handoff. Supports status, checkpoint, doctor, recent, clear, and config as arguments.
+description: Cross-agent ai-handoff command. Use /handoff checkpoint, /handoff doctor, or /handoff config.
 ---
 
 # handoff
 
-Backs the `/handoff` command (Claude Code) and `@handoff` command (Codex). ai-handoff
-is a native Rust daemon that automatically creates a cross-agent handoff capsule when
-you approach the 5-hour usage limit, so the other agent (Claude Code ↔ Codex) can
-continue your work from exactly where you left off.
+Backs the `/handoff` command in Claude Code and Codex. ai-handoff is a native Rust
+daemon that creates a cross-agent handoff capsule when you approach the 5-hour usage
+limit, so the other agent can continue from the saved state.
 
 The short alias `aho` is installed on PATH and is equivalent to `ai-handoff` in every
-context below.
+context below. Treat the text after `/handoff` as the sub-command.
 
-## Sub-commands (invoke directly or via argument)
+## Sub-commands
 
-- `/handoff` (bare) — resume: ingest the pending capsule for this project and continue.
-- `/handoff status` — show whether a capsule is pending for this project.
-- `/handoff preview` — show the pending capsule without consuming it.
-- `/handoff checkpoint` — save a handoff capsule right now (`handoff-checkpoint`).
-- `/handoff doctor` — diagnose install health and capsule integrity (`handoff-doctor`).
-- `/handoff recent` — list recent capsules across all projects (`handoff-recent`).
-- `/handoff clear` — clear pending/used capsules for this project (`handoff-clear`).
-- `/handoff config` — view or change unified settings (`handoff-config`).
+- `/handoff checkpoint <summary>`: save a handoff capsule now with the given summary.
+- `/handoff doctor`: run a read-only install and capsule health diagnosis.
+- `/handoff config`: view or change the unified ai-handoff settings.
 
-Use `/handoff-x` in Claude Code or `@handoff-x` in Codex to invoke each sub-skill directly.
+If `/handoff` is invoked without a sub-command, inspect pending capsules for the
+current project and help the user resume the most relevant one without consuming
+anything destructive.
 
-## Underlying CLI (v2 native Rust)
+Do not invent state. Prefer running the matching CLI command and summarizing its
+real output.
+
+## Underlying CLI
 
 The daemon and all management operations are driven by `ai-handoff` (alias `aho`):
 
-    ai-handoff doctor            # health check
-    ai-handoff daemon            # start the background daemon
-    ai-handoff checkpoint --message "..."   # save a capsule now
-    ai-handoff dashboard         # open the GUI capsule browser
+    ai-handoff doctor
+    ai-handoff daemon
+    ai-handoff checkpoint --message "..."
+    ai-handoff config list
+    ai-handoff dashboard
 
 Capsule and memory state are references only. Current user instructions, repository
 files, Git history, and tests always take precedence over capsule content.

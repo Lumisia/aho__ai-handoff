@@ -1,6 +1,8 @@
 ---
 name: handoff-config
-description: View or change ai-handoff settings. Both Claude Code and Codex read the same unified config file.
+description: Use /handoff config to view or change ai-handoff settings shared by Claude Code and Codex.
+argument-hint: "[get|set|list] [key] [value]"
+disable-model-invocation: true
 ---
 
 # handoff-config
@@ -9,40 +11,24 @@ ai-handoff uses a single unified config file shared by both agents:
 
     ~/.ai-handoff/config.toml
 
-Any setting changed here applies to both Claude Code and Codex — there is no per-agent
-config split.
+Invoke from the skill list as the handoff config entry. The user-facing command is
+`/handoff config`; to read, run `ai-handoff config get <key>` or `ai-handoff config list`.
+To change a value, run `ai-handoff config set <key> <value>` and report the confirmation
+line or surface any `error:` output verbatim.
 
-## Editable keys
+## Common keys
 
-| Key | Values | Default | Effect |
-|-----|--------|---------|--------|
-| `triggers.five_hour.enabled` | bool | true | Master switch for the 5-hour-limit handoff trigger |
-| `triggers.five_hour.threshold_percent` | 0–100 | 80 | Trigger handoff at this % of the 5-hour limit |
-| `triggers.five_hour.mode` | `off` / `ask` / `auto` | `ask` | How automatic handoff behaves |
-| `triggers.five_hour.burn_rate.enabled` | bool | false | Enable burn-rate early-warning estimate |
-| `triggers.five_hour.burn_rate.runway_minutes` | number > 0 | 30 | Runway used by the burn-rate estimate |
-| `autostart.enabled` | bool | false | Start the daemon at logon |
-| `statusline.show` | bool | true | Show the usage indicator in the agent statusline |
-
-## Commands
-
-    ai-handoff config list                                   # every key + effective value
-    ai-handoff config get triggers.five_hour.threshold_percent
-    ai-handoff config set triggers.five_hour.threshold_percent 75
-    ai-handoff config set triggers.five_hour.mode auto
-    aho config set statusline.show false
-
-`set` is never-clobber: it edits exactly the one key and preserves every other line,
-comment and section. Unknown keys and out-of-range values are rejected with a non-zero
-exit and an `error:` message; nothing is written. The daemon picks up changes on its
-next check cycle — no restart required.
-
-You can still edit `~/.ai-handoff/config.toml` by hand; the `config` commands are just a
-validated front end to the same file.
-
-## In Claude Code / Codex
-
-Invoke as `/handoff-config` in Claude Code or `@handoff-config` in Codex. To read, run
-`ai-handoff config get <key>` (or `config list`); to change a value, run
-`ai-handoff config set <key> <value>` and report the confirmation line or surface any
-`error:` output verbatim.
+- `triggers.five_hour.enabled`
+- `triggers.five_hour.threshold_percent`
+- `triggers.five_hour.mode`
+- `capsule.format`
+- `capsule.next_prompt_max_items`
+- `capsule.remaining_max_items`
+- `capsule.done_max_items`
+- `capsule.risks_max_items`
+- `theme.preset`
+- `theme.codex_color`
+- `theme.claude_color`
+- `theme.focus_border_color`
+- `theme.selection_bg_color`
+- `theme.selection_fg_color`

@@ -5,12 +5,16 @@
 
 use std::path::Path;
 
-use ai_handoff_core::capsule::{Capsule, ConsumptionState};
+use ai_handoff_core::{
+    capsule::{Capsule, ConsumptionState},
+    capsule_codec::{self, CapsuleCodecError},
+    config::CapsuleFormat,
+};
 
 #[derive(Debug)]
 pub enum CapsuleOpError {
     Io(std::io::Error),
-    Parse(serde_json::Error),
+    Parse(String),
 }
 
 impl std::fmt::Display for CapsuleOpError {
@@ -23,46 +27,42 @@ impl std::fmt::Display for CapsuleOpError {
 }
 
 fn load(path: &Path) -> Result<Capsule, CapsuleOpError> {
-    let bytes = std::fs::read(path).map_err(CapsuleOpError::Io)?;
-    serde_json::from_slice(&bytes).map_err(CapsuleOpError::Parse)
+    capsule_codec::read_capsule(path).map_err(map_codec_error)
 }
 
 fn store(path: &Path, capsule: &Capsule) -> Result<(), CapsuleOpError> {
-    let bytes = serde_json::to_vec_pretty(capsule).map_err(CapsuleOpError::Parse)?;
-    write_atomic(path, &bytes).map_err(CapsuleOpError::Io)
+    capsule_codec::write_capsule(path, capsule, format_for_path(path)).map_err(map_codec_error)
 }
 
-/// Write bytes to `path` atomically: a sibling `.tmp` then rename over target.
-fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, bytes)?;
-    if std::fs::rename(&tmp, path).is_err() {
-        let _ = std::fs::remove_file(path);
-        std::fs::rename(&tmp, path)?;
+fn map_codec_error(err: CapsuleCodecError) -> CapsuleOpError {
+    match err {
+        CapsuleCodecError::Io(e) => CapsuleOpError::Io(e),
+        other => CapsuleOpError::Parse(other.to_string()),
     }
-    Ok(())
 }
 
-/// Flip Pending <-> Consumed. Returns the new state ("pending" / "consumed").
+fn format_for_path(path: &Path) -> CapsuleFormat {
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some(ext) if ext.eq_ignore_ascii_case("md") => CapsuleFormat::Md,
+        _ => CapsuleFormat::Json,
+    }
+}
+
+/// Cycle through the supported manual states. Returns the new snake_case state.
 pub fn toggle_state(path: &Path) -> Result<String, CapsuleOpError> {
     let mut capsule = load(path)?;
-    let new = match capsule.consumption.state {
-        ConsumptionState::Pending => {
-            capsule.consumption.state = ConsumptionState::Consumed;
-            capsule.consumption.consumed_by = Some("ai-handoff-tui".to_string());
-            capsule.consumption.consumed_at =
-                Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
-            "consumed"
-        }
-        ConsumptionState::Consumed => {
-            capsule.consumption.state = ConsumptionState::Pending;
-            capsule.consumption.consumed_by = None;
-            capsule.consumption.consumed_at = None;
-            "pending"
-        }
-    };
+    let new = capsule.consumption.state.next();
+    capsule.consumption.state = new;
+    if new == ConsumptionState::Consumed {
+        capsule.consumption.consumed_by = Some("ai-handoff-tui".to_string());
+        capsule.consumption.consumed_at =
+            Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+    } else {
+        capsule.consumption.consumed_by = None;
+        capsule.consumption.consumed_at = None;
+    }
     store(path, &capsule)?;
-    Ok(new.to_string())
+    Ok(new.as_str().to_string())
 }
 
 /// A capsule field the user can edit from the detail pane. These are the parts
@@ -184,15 +184,23 @@ mod tests {
     }
 
     #[test]
-    fn toggle_state_round_trips_pending_and_consumed() {
+    fn toggle_state_cycles_all_supported_states() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_sample(dir.path());
 
+        assert_eq!(toggle_state(&path).unwrap(), "in_progress");
+        let c: Capsule = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(c.consumption.state, ConsumptionState::InProgress);
+        assert!(c.consumption.consumed_at.is_none());
+
+        assert_eq!(toggle_state(&path).unwrap(), "blocked");
+        assert_eq!(toggle_state(&path).unwrap(), "needs_review");
         assert_eq!(toggle_state(&path).unwrap(), "consumed");
         let c: Capsule = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(c.consumption.state, ConsumptionState::Consumed);
         assert!(c.consumption.consumed_at.is_some());
 
+        assert_eq!(toggle_state(&path).unwrap(), "archived");
         assert_eq!(toggle_state(&path).unwrap(), "pending");
         let c: Capsule = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(c.consumption.state, ConsumptionState::Pending);
@@ -213,7 +221,12 @@ mod tests {
     fn set_field_list_splits_on_pipe_and_round_trips() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_sample(dir.path());
-        set_field(&path, CapField::Remaining, "wire rotation | add rate limit |  ").unwrap();
+        set_field(
+            &path,
+            CapField::Remaining,
+            "wire rotation | add rate limit |  ",
+        )
+        .unwrap();
         let c: Capsule = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(c.summary.remaining, vec!["wire rotation", "add rate limit"]);
         // and field_text re-joins them for editing
@@ -249,5 +262,27 @@ mod tests {
         let path = dir.path().join("bad.json");
         std::fs::write(&path, "{\"nope\":1}").unwrap();
         assert!(matches!(toggle_state(&path), Err(CapsuleOpError::Parse(_))));
+    }
+
+    #[test]
+    fn md_capsule_edit_and_toggle_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cap_1.md");
+        ai_handoff_core::capsule_codec::write_capsule(
+            &path,
+            &sample(),
+            ai_handoff_core::config::CapsuleFormat::Md,
+        )
+        .unwrap();
+
+        set_field(&path, CapField::Goal, "new md goal").unwrap();
+        assert_eq!(toggle_state(&path).unwrap(), "in_progress");
+
+        let c = ai_handoff_core::capsule_codec::read_capsule(&path).unwrap();
+        assert_eq!(c.summary.goal, "new md goal");
+        assert_eq!(c.consumption.state, ConsumptionState::InProgress);
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("```ai-handoff-capsule+json"));
     }
 }

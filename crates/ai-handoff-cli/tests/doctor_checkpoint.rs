@@ -149,3 +149,46 @@ fn checkpoint_with_daemon_online_writes_capsule() {
     std::env::set_current_dir(previous_cwd).unwrap();
     std::env::remove_var("AI_HANDOFF_HOME");
 }
+
+#[test]
+fn checkpoint_structured_stdin_respects_capsule_limits() {
+    let _guard = lock();
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let previous_cwd = std::env::current_dir().unwrap();
+    std::env::set_var("AI_HANDOFF_HOME", home.path());
+    std::env::set_current_dir(cwd.path()).unwrap();
+    std::fs::write(
+        home.path().join("config.toml"),
+        "[capsule]\ndone_max_items = 1\nremaining_max_items = 2\nrisks_max_items = 1\nnext_prompt_max_items = 2\n",
+    )
+    .unwrap();
+    ai_handoff_daemon::ensure_runtime_dirs().unwrap();
+
+    let worker = std::thread::spawn(|| {
+        let router = Router::new();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if serve_once(&router) > 0 {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("daemon did not process checkpoint request");
+    });
+
+    let payload = br#"{"goal":"structured checkpoint","done":["a","b"],"remaining":["c","d","e"],"risks":["f","g"],"next_prompt":"one | two | three"}"#.to_vec();
+    let mut out = Vec::new();
+    let code = checkpoint::run_io(None, &mut Cursor::new(payload), &mut out);
+    worker.join().unwrap();
+    assert_eq!(code, 0);
+    let project_id = ai_handoff_core::fingerprint::fingerprint(cwd.path());
+    let pending = ai_handoff_daemon::store::find_pending(&project_id).unwrap();
+    assert_eq!(pending.summary.goal, "structured checkpoint");
+    assert_eq!(pending.summary.done, vec!["a"]);
+    assert_eq!(pending.summary.remaining, vec!["c", "d"]);
+    assert_eq!(pending.summary.risks, vec!["f"]);
+    assert_eq!(pending.next_prompt.as_deref(), Some("one | two"));
+    std::env::set_current_dir(previous_cwd).unwrap();
+    std::env::remove_var("AI_HANDOFF_HOME");
+}

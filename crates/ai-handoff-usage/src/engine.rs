@@ -119,8 +119,12 @@ mod tests {
         };
         let events = scan(&roots);
         assert_eq!(events.len(), 2);
-        assert!(events.iter().any(|e| e.source == Source::Claude && e.tokens.input == 10));
-        assert!(events.iter().any(|e| e.source == Source::Codex && e.model == "gpt-5.5"));
+        assert!(events
+            .iter()
+            .any(|e| e.source == Source::Claude && e.tokens.input == 10));
+        assert!(events
+            .iter()
+            .any(|e| e.source == Source::Codex && e.model == "gpt-5.5"));
     }
 
     #[test]

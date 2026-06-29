@@ -6,6 +6,8 @@
     "name": "ai-handoff contributors"
   },
   "license": "MIT",
-  "skills": "./skills/"
+  "skills": "./skills/",
+  "experimental": {
+    "monitors": "./monitors/monitors.json"
+  }
 }
-

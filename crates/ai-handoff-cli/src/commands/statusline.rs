@@ -1,4 +1,7 @@
-use ai_handoff_core::{config, fingerprint::fingerprint, install::state::load, paths, sensor::record_claude_rate_limit, statusline::segment};
+use ai_handoff_core::{
+    config, fingerprint::fingerprint, install::state::load, paths,
+    sensor::record_claude_rate_limit, statusline::segment,
+};
 use ai_handoff_daemon::store::find_pending;
 use chrono::Utc;
 use serde_json::Value;
@@ -57,8 +60,8 @@ pub fn run_io(input: &mut dyn Read, out: &mut dyn Write, now_ms: i64, show: bool
     let seg = segment(used_percent, pending, show);
 
     // Fetch previous statusline output (best-effort; None on any failure).
-    let prev = previous_command_from_state(&paths::home())
-        .and_then(|cmd| run_previous(&cmd, &raw_text));
+    let prev =
+        previous_command_from_state(&paths::home()).and_then(|cmd| run_previous(&cmd, &raw_text));
 
     // Combine our segment with the previous statusline output.
     let final_out = combine(&seg, prev.as_deref());
@@ -171,9 +174,7 @@ fn run_previous(command: &str, raw_input: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ai_handoff_core::install::state::{
-        ClaudeState, ClaudeStatuslineState, InstallState, save,
-    };
+    use ai_handoff_core::install::state::{save, ClaudeState, ClaudeStatuslineState, InstallState};
     use std::io::Cursor;
     use std::sync::{Mutex, MutexGuard};
 
@@ -239,7 +240,10 @@ mod tests {
         }"#;
         let (out, code) = run_with(payload, false);
         assert_eq!(code, 0);
-        assert!(out.is_empty(), "show=false must produce empty output, got: {out:?}");
+        assert!(
+            out.is_empty(),
+            "show=false must produce empty output, got: {out:?}"
+        );
 
         std::env::remove_var("AI_HANDOFF_HOME");
     }
@@ -322,7 +326,10 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         // Empty tempdir — no install-state.json
         let result = previous_command_from_state(home.path());
-        assert!(result.is_none(), "expected None for missing state, got {result:?}");
+        assert!(
+            result.is_none(),
+            "expected None for missing state, got {result:?}"
+        );
     }
 
     #[test]
@@ -333,7 +340,9 @@ mod tests {
         let st = InstallState {
             claude: ClaudeState {
                 statusline: Some(ClaudeStatuslineState {
-                    previous: Some(serde_json::json!({"type": "command", "command": "my-prompt --x"})),
+                    previous: Some(
+                        serde_json::json!({"type": "command", "command": "my-prompt --x"}),
+                    ),
                     installed_command: "\"C:\\p\\aho.exe\" statusline".into(),
                 }),
                 ..Default::default()
@@ -367,7 +376,10 @@ mod tests {
         save(home.path(), &st).unwrap();
 
         let result = previous_command_from_state(home.path());
-        assert!(result.is_none(), "self-reference must be blocked, got {result:?}");
+        assert!(
+            result.is_none(),
+            "self-reference must be blocked, got {result:?}"
+        );
     }
 
     // ── Task 5: run_previous() spawn smoke test ──────────────────────────────
@@ -379,10 +391,7 @@ mod tests {
             // `cmd /C echo hi` emits "hi\r\n" — trim to compare safely.
             let result = run_previous("echo hi", "");
             let got = result.expect("echo should succeed on Windows");
-            assert!(
-                got.trim() == "hi",
-                "expected 'hi', got {got:?}"
-            );
+            assert!(got.trim() == "hi", "expected 'hi', got {got:?}");
         }
         #[cfg(not(windows))]
         {

@@ -5,9 +5,10 @@
 //! defaults so a hook is never broken by a bad config.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::path::Path;
 
-use serde::Deserialize;
+use serde::{de, Deserialize};
 use toml_edit::{value, DocumentMut, Item, Table};
 
 use crate::trigger::{BurnRate, TriggerMode};
@@ -19,6 +20,8 @@ pub struct Config {
     pub autostart: Autostart,
     pub statusline: Statusline,
     pub language: Language,
+    pub capsule: CapsuleConfig,
+    pub theme: ThemeConfig,
     pub project_overrides: HashMap<String, ProjectOverride>,
 }
 
@@ -44,6 +47,229 @@ impl Default for Statusline {
     fn default() -> Self {
         Self { show: true }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct CapsuleConfig {
+    pub format: CapsuleFormat,
+    pub next_prompt_max_items: usize,
+    pub remaining_max_items: usize,
+    pub done_max_items: usize,
+    pub risks_max_items: usize,
+}
+
+impl Default for CapsuleConfig {
+    fn default() -> Self {
+        Self {
+            format: CapsuleFormat::Json,
+            next_prompt_max_items: DEFAULT_CAPSULE_ITEM_LIMIT,
+            remaining_max_items: DEFAULT_CAPSULE_ITEM_LIMIT,
+            done_max_items: DEFAULT_CAPSULE_ITEM_LIMIT,
+            risks_max_items: DEFAULT_CAPSULE_ITEM_LIMIT,
+        }
+    }
+}
+
+pub const DEFAULT_CAPSULE_ITEM_LIMIT: usize = 5;
+pub const MAX_CAPSULE_ITEM_LIMIT: usize = 50;
+
+fn clamp_capsule_item_limit(value: usize) -> usize {
+    value.clamp(1, MAX_CAPSULE_ITEM_LIMIT)
+}
+
+impl CapsuleConfig {
+    pub fn next_prompt_limit(self) -> usize {
+        clamp_capsule_item_limit(self.next_prompt_max_items)
+    }
+
+    pub fn remaining_limit(self) -> usize {
+        clamp_capsule_item_limit(self.remaining_max_items)
+    }
+
+    pub fn done_limit(self) -> usize {
+        clamp_capsule_item_limit(self.done_max_items)
+    }
+
+    pub fn risks_limit(self) -> usize {
+        clamp_capsule_item_limit(self.risks_max_items)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum CapsuleFormat {
+    #[default]
+    Json,
+    Md,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct ThemeConfig {
+    pub preset: ThemePreset,
+    pub codex_color: ColorSpec,
+    pub claude_color: ColorSpec,
+    pub focus_border_color: ColorSpec,
+    pub selection_bg_color: ColorSpec,
+    pub selection_fg_color: ColorSpec,
+}
+
+impl Default for ThemeConfig {
+    fn default() -> Self {
+        theme_config_for_preset(ThemePreset::Default)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ThemePreset {
+    #[default]
+    Default,
+    HighContrast,
+    Mono,
+    Custom,
+}
+
+pub fn theme_config_for_preset(preset: ThemePreset) -> ThemeConfig {
+    let (codex, claude, focus, bg, fg) = match preset {
+        ThemePreset::Default | ThemePreset::Custom => {
+            ("#B996EB", "#E68C1E", "#FFA500", "cyan", "black")
+        }
+        ThemePreset::HighContrast => (
+            "light-blue",
+            "light-yellow",
+            "light-yellow",
+            "white",
+            "black",
+        ),
+        ThemePreset::Mono => ("white", "gray", "white", "white", "black"),
+    };
+    ThemeConfig {
+        preset,
+        codex_color: ColorSpec::trusted(codex),
+        claude_color: ColorSpec::trusted(claude),
+        focus_border_color: ColorSpec::trusted(focus),
+        selection_bg_color: ColorSpec::trusted(bg),
+        selection_fg_color: ColorSpec::trusted(fg),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColorSpec(String);
+
+impl ColorSpec {
+    fn trusted(value: &str) -> Self {
+        Self(value.to_string())
+    }
+
+    pub fn parse(value: &str) -> Result<Self, String> {
+        let value = value.trim();
+        if value.is_empty() {
+            return Err("color must not be empty".into());
+        }
+        if parse_color_rgb(value).is_some() || parse_indexed_color(value).is_some() {
+            return Ok(Self(value.to_string()));
+        }
+        Err("expected a named color, #RRGGBB, or 0..255 indexed color".into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn rgb(&self) -> Option<(u8, u8, u8)> {
+        parse_color_rgb(&self.0)
+    }
+}
+
+impl Default for ColorSpec {
+    fn default() -> Self {
+        Self::trusted("white")
+    }
+}
+
+impl<'de> Deserialize<'de> for ColorSpec {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(&value).map_err(de::Error::custom)
+    }
+}
+
+impl fmt::Display for ColorSpec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+fn parse_color_rgb(value: &str) -> Option<(u8, u8, u8)> {
+    let lower = value.trim().to_ascii_lowercase().replace('_', "-");
+    if let Some(hex) = lower.strip_prefix('#') {
+        if hex.len() == 6 {
+            let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+            let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+            let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+            return Some((r, g, b));
+        }
+        return None;
+    }
+    let named = match lower.as_str() {
+        "black" => (0, 0, 0),
+        "red" => (128, 0, 0),
+        "green" => (0, 128, 0),
+        "yellow" => (128, 128, 0),
+        "blue" => (0, 0, 128),
+        "magenta" => (128, 0, 128),
+        "cyan" => (0, 255, 255),
+        "gray" | "grey" => (128, 128, 128),
+        "dark-gray" | "dark-grey" => (64, 64, 64),
+        "light-red" => (255, 85, 85),
+        "light-green" => (85, 255, 85),
+        "light-yellow" => (255, 255, 85),
+        "light-blue" => (85, 85, 255),
+        "light-magenta" => (255, 85, 255),
+        "light-cyan" => (85, 255, 255),
+        "white" => (255, 255, 255),
+        "orange" => (255, 165, 0),
+        "purple" => (185, 150, 235),
+        _ => return ansi_16_rgb(&lower),
+    };
+    Some(named)
+}
+
+fn parse_indexed_color(value: &str) -> Option<u8> {
+    let n: u16 = value.trim().parse().ok()?;
+    if n <= 255 {
+        Some(n as u8)
+    } else {
+        None
+    }
+}
+
+fn ansi_16_rgb(value: &str) -> Option<(u8, u8, u8)> {
+    let n = parse_indexed_color(value)?;
+    Some(match n {
+        0 => (0, 0, 0),
+        1 => (128, 0, 0),
+        2 => (0, 128, 0),
+        3 => (128, 128, 0),
+        4 => (0, 0, 128),
+        5 => (128, 0, 128),
+        6 => (0, 128, 128),
+        7 => (192, 192, 192),
+        8 => (128, 128, 128),
+        9 => (255, 0, 0),
+        10 => (0, 255, 0),
+        11 => (255, 255, 0),
+        12 => (0, 0, 255),
+        13 => (255, 0, 255),
+        14 => (0, 255, 255),
+        15 => (255, 255, 255),
+        _ => return None,
+    })
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -251,10 +477,18 @@ enum ValueKind {
     Percent,
     /// A strictly-positive float.
     PosFloat,
+    /// A small positive item count.
+    Count,
     /// One of `off` / `ask` / `auto`.
     Mode,
     /// A UI language code: `en` / `ko` / `ja` / `zh`.
     Lang,
+    /// Capsule on-disk format: `json` / `md`.
+    CapsuleFormat,
+    /// Theme preset name.
+    ThemePreset,
+    /// Terminal color: named, `#RRGGBB`, or indexed `0..255`.
+    Color,
 }
 
 /// The whitelist of user-editable keys (dotted) and their value types.
@@ -263,10 +497,24 @@ const SETTABLE: &[(&str, ValueKind)] = &[
     ("triggers.five_hour.threshold_percent", ValueKind::Percent),
     ("triggers.five_hour.mode", ValueKind::Mode),
     ("triggers.five_hour.burn_rate.enabled", ValueKind::Bool),
-    ("triggers.five_hour.burn_rate.runway_minutes", ValueKind::PosFloat),
+    (
+        "triggers.five_hour.burn_rate.runway_minutes",
+        ValueKind::PosFloat,
+    ),
     ("autostart.enabled", ValueKind::Bool),
     ("statusline.show", ValueKind::Bool),
     ("language", ValueKind::Lang),
+    ("capsule.format", ValueKind::CapsuleFormat),
+    ("capsule.next_prompt_max_items", ValueKind::Count),
+    ("capsule.remaining_max_items", ValueKind::Count),
+    ("capsule.done_max_items", ValueKind::Count),
+    ("capsule.risks_max_items", ValueKind::Count),
+    ("theme.preset", ValueKind::ThemePreset),
+    ("theme.codex_color", ValueKind::Color),
+    ("theme.claude_color", ValueKind::Color),
+    ("theme.focus_border_color", ValueKind::Color),
+    ("theme.selection_bg_color", ValueKind::Color),
+    ("theme.selection_fg_color", ValueKind::Color),
 ];
 
 /// The editable config keys, in display order (for `config list`).
@@ -283,21 +531,36 @@ pub enum KeyKind {
     Percent,
     /// Strictly-positive float.
     PosFloat,
+    /// Positive count in `1..=50`.
+    Count,
     /// `off` / `ask` / `auto`.
     Mode,
     /// `en` / `ko` / `ja` / `zh`.
     Lang,
+    /// `json` / `md`.
+    CapsuleFormat,
+    /// `default` / `high_contrast` / `mono` / `custom`.
+    ThemePreset,
+    /// Terminal color string.
+    Color,
 }
 
 /// The kind of an editable key, or `None` if `key` is not editable.
 pub fn key_kind(key: &str) -> Option<KeyKind> {
-    SETTABLE.iter().find(|(k, _)| *k == key).map(|(_, v)| match v {
-        ValueKind::Bool => KeyKind::Bool,
-        ValueKind::Percent => KeyKind::Percent,
-        ValueKind::PosFloat => KeyKind::PosFloat,
-        ValueKind::Mode => KeyKind::Mode,
-        ValueKind::Lang => KeyKind::Lang,
-    })
+    SETTABLE
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map(|(_, v)| match v {
+            ValueKind::Bool => KeyKind::Bool,
+            ValueKind::Percent => KeyKind::Percent,
+            ValueKind::PosFloat => KeyKind::PosFloat,
+            ValueKind::Count => KeyKind::Count,
+            ValueKind::Mode => KeyKind::Mode,
+            ValueKind::Lang => KeyKind::Lang,
+            ValueKind::CapsuleFormat => KeyKind::CapsuleFormat,
+            ValueKind::ThemePreset => KeyKind::ThemePreset,
+            ValueKind::Color => KeyKind::Color,
+        })
 }
 
 impl ValueKind {
@@ -322,6 +585,25 @@ impl ValueKind {
                 "en" | "ko" | "ja" | "zh" => value(raw),
                 _ => return Err(invalid("expected one of `en`, `ko`, `ja`, `zh`")),
             },
+            ValueKind::CapsuleFormat => match raw {
+                "json" | "md" => value(raw),
+                _ => return Err(invalid("expected one of `json`, `md`")),
+            },
+            ValueKind::ThemePreset => match raw {
+                "default" | "high_contrast" | "mono" | "custom" => value(raw),
+                _ => {
+                    return Err(invalid(
+                        "expected one of `default`, `high_contrast`, `mono`, `custom`",
+                    ))
+                }
+            },
+            ValueKind::Color => {
+                ColorSpec::parse(raw).map_err(|message| ConfigWriteError::InvalidValue {
+                    key: key.to_string(),
+                    message,
+                })?;
+                value(raw)
+            }
             ValueKind::Percent => {
                 let n: f64 = raw.parse().map_err(|_| invalid("expected a number"))?;
                 if !(0.0..=100.0).contains(&n) {
@@ -336,6 +618,15 @@ impl ValueKind {
                 }
                 value(n)
             }
+            ValueKind::Count => {
+                let n: usize = raw
+                    .parse()
+                    .map_err(|_| invalid("expected a positive integer"))?;
+                if n == 0 || n > MAX_CAPSULE_ITEM_LIMIT {
+                    return Err(invalid("must be between 1 and 50"));
+                }
+                value(n as i64)
+            }
         })
     }
 }
@@ -346,11 +637,7 @@ impl ValueKind {
 /// Rejects unknown keys and out-of-range/ill-typed values before touching the
 /// document. Parse errors on a present-but-corrupt file are propagated so the
 /// caller aborts rather than clobbering it with a blank document.
-pub fn set_value(
-    existing: Option<&str>,
-    key: &str,
-    raw: &str,
-) -> Result<String, ConfigWriteError> {
+pub fn set_value(existing: Option<&str>, key: &str, raw: &str) -> Result<String, ConfigWriteError> {
     let kind = SETTABLE
         .iter()
         .find(|(k, _)| *k == key)
@@ -379,8 +666,49 @@ pub fn set_value(
             })?;
     }
     table.insert(last, item);
+    if key == "theme.preset" {
+        let preset = match raw {
+            "default" => ThemePreset::Default,
+            "high_contrast" => ThemePreset::HighContrast,
+            "mono" => ThemePreset::Mono,
+            "custom" => ThemePreset::Custom,
+            _ => unreachable!("theme preset was validated above"),
+        };
+        if preset != ThemePreset::Custom {
+            let preset_theme = theme_config_for_preset(preset);
+            table.insert(
+                "codex_color",
+                value(preset_theme.codex_color.as_str().to_string()),
+            );
+            table.insert(
+                "claude_color",
+                value(preset_theme.claude_color.as_str().to_string()),
+            );
+            table.insert(
+                "focus_border_color",
+                value(preset_theme.focus_border_color.as_str().to_string()),
+            );
+            table.insert(
+                "selection_bg_color",
+                value(preset_theme.selection_bg_color.as_str().to_string()),
+            );
+            table.insert(
+                "selection_fg_color",
+                value(preset_theme.selection_fg_color.as_str().to_string()),
+            );
+        }
+    }
 
-    Ok(doc.to_string())
+    let text = doc.to_string();
+    if key.starts_with("theme.") {
+        let cfg: Config = toml::from_str(&text).map_err(|e| ConfigWriteError::InvalidValue {
+            key: key.to_string(),
+            message: e.to_string(),
+        })?;
+        validate_theme_contrast(&cfg.theme, key)?;
+    }
+
+    Ok(text)
 }
 
 /// Read the **effective** value of `key` from a resolved [`Config`] (so an
@@ -396,8 +724,25 @@ pub fn get_value(cfg: &Config, key: &str) -> Result<String, ConfigWriteError> {
         "autostart.enabled" => cfg.autostart.enabled.to_string(),
         "statusline.show" => cfg.statusline.show.to_string(),
         "language" => lang_str(cfg.language).to_string(),
+        "capsule.format" => capsule_format_str(cfg.capsule.format).to_string(),
+        "capsule.next_prompt_max_items" => cfg.capsule.next_prompt_limit().to_string(),
+        "capsule.remaining_max_items" => cfg.capsule.remaining_limit().to_string(),
+        "capsule.done_max_items" => cfg.capsule.done_limit().to_string(),
+        "capsule.risks_max_items" => cfg.capsule.risks_limit().to_string(),
+        "theme.preset" => theme_preset_str(cfg.theme.preset).to_string(),
+        "theme.codex_color" => cfg.theme.codex_color.to_string(),
+        "theme.claude_color" => cfg.theme.claude_color.to_string(),
+        "theme.focus_border_color" => cfg.theme.focus_border_color.to_string(),
+        "theme.selection_bg_color" => cfg.theme.selection_bg_color.to_string(),
+        "theme.selection_fg_color" => cfg.theme.selection_fg_color.to_string(),
         _ => return Err(ConfigWriteError::UnknownKey(key.to_string())),
     })
+}
+
+/// Read the built-in default value for an editable key, formatted like
+/// [`get_value`]. UIs use this for reset-to-default and detail previews.
+pub fn default_value(key: &str) -> Result<String, ConfigWriteError> {
+    get_value(&Config::default(), key)
 }
 
 fn mode_str(mode: ModeCfg) -> &'static str {
@@ -416,6 +761,57 @@ pub fn lang_str(lang: Language) -> &'static str {
         Language::Ja => "ja",
         Language::Zh => "zh",
     }
+}
+
+pub fn capsule_format_str(format: CapsuleFormat) -> &'static str {
+    match format {
+        CapsuleFormat::Json => "json",
+        CapsuleFormat::Md => "md",
+    }
+}
+
+pub fn theme_preset_str(preset: ThemePreset) -> &'static str {
+    match preset {
+        ThemePreset::Default => "default",
+        ThemePreset::HighContrast => "high_contrast",
+        ThemePreset::Mono => "mono",
+        ThemePreset::Custom => "custom",
+    }
+}
+
+fn validate_theme_contrast(theme: &ThemeConfig, key: &str) -> Result<(), ConfigWriteError> {
+    let Some(bg) = theme.selection_bg_color.rgb() else {
+        return Ok(());
+    };
+    let Some(fg) = theme.selection_fg_color.rgb() else {
+        return Ok(());
+    };
+    if contrast_ratio(bg, fg) >= 4.5 {
+        return Ok(());
+    }
+    Err(ConfigWriteError::InvalidValue {
+        key: key.to_string(),
+        message: "selection foreground/background contrast must be at least 4.5:1".to_string(),
+    })
+}
+
+fn contrast_ratio(a: (u8, u8, u8), b: (u8, u8, u8)) -> f64 {
+    let la = relative_luminance(a);
+    let lb = relative_luminance(b);
+    let (lighter, darker) = if la >= lb { (la, lb) } else { (lb, la) };
+    (lighter + 0.05) / (darker + 0.05)
+}
+
+fn relative_luminance((r, g, b): (u8, u8, u8)) -> f64 {
+    fn channel(v: u8) -> f64 {
+        let s = v as f64 / 255.0;
+        if s <= 0.03928 {
+            s / 12.92
+        } else {
+            ((s + 0.055) / 1.055).powf(2.4)
+        }
+    }
+    0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
 }
 
 /// Format a float the way a user typed it: drop a redundant `.0` tail.
@@ -478,7 +874,11 @@ mod tests {
 
     #[test]
     fn mode_parses_each_lowercase_variant() {
-        for (text, want) in [("off", ModeCfg::Off), ("ask", ModeCfg::Ask), ("auto", ModeCfg::Auto)] {
+        for (text, want) in [
+            ("off", ModeCfg::Off),
+            ("ask", ModeCfg::Ask),
+            ("auto", ModeCfg::Auto),
+        ] {
             let c = parse(&format!("[triggers.five_hour]\nmode = \"{text}\"\n")).unwrap();
             assert_eq!(c.triggers.five_hour.mode, want);
         }
@@ -593,7 +993,10 @@ mod tests {
     fn set_value_on_empty_creates_minimal_toml_that_reparses() {
         let text = set_value(None, "triggers.five_hour.threshold_percent", "70").unwrap();
         // Round-trips through the typed parser to the requested value.
-        assert_eq!(parse(&text).unwrap().triggers.five_hour.threshold_percent, 70.0);
+        assert_eq!(
+            parse(&text).unwrap().triggers.five_hour.threshold_percent,
+            70.0
+        );
         // Only an implicit parent header is emitted, not an empty `[triggers]`.
         assert!(text.contains("[triggers.five_hour]"));
         assert!(!text.contains("\n[triggers]\n"));
@@ -664,12 +1067,7 @@ enabled = true
     #[test]
     fn set_value_errors_on_non_table_parent() {
         // `triggers` exists but as a scalar — never overwrite it.
-        let err = set_value(
-            Some("triggers = 5\n"),
-            "triggers.five_hour.mode",
-            "auto",
-        )
-        .unwrap_err();
+        let err = set_value(Some("triggers = 5\n"), "triggers.five_hour.mode", "auto").unwrap_err();
         assert!(matches!(err, ConfigWriteError::ShapeConflict { .. }));
     }
 
@@ -685,13 +1083,20 @@ enabled = true
     #[test]
     fn get_value_reports_effective_defaults_and_set_values() {
         let cfg = Config::default();
-        assert_eq!(get_value(&cfg, "triggers.five_hour.threshold_percent").unwrap(), "80");
+        assert_eq!(
+            get_value(&cfg, "triggers.five_hour.threshold_percent").unwrap(),
+            "80"
+        );
         assert_eq!(get_value(&cfg, "triggers.five_hour.mode").unwrap(), "ask");
         assert_eq!(get_value(&cfg, "autostart.enabled").unwrap(), "false");
         assert_eq!(get_value(&cfg, "statusline.show").unwrap(), "true");
 
-        let cfg = parse("[triggers.five_hour]\nthreshold_percent = 42.5\nmode = \"auto\"\n").unwrap();
-        assert_eq!(get_value(&cfg, "triggers.five_hour.threshold_percent").unwrap(), "42.5");
+        let cfg =
+            parse("[triggers.five_hour]\nthreshold_percent = 42.5\nmode = \"auto\"\n").unwrap();
+        assert_eq!(
+            get_value(&cfg, "triggers.five_hour.threshold_percent").unwrap(),
+            "42.5"
+        );
         assert_eq!(get_value(&cfg, "triggers.five_hour.mode").unwrap(), "auto");
     }
 
@@ -707,7 +1112,10 @@ enabled = true
     fn key_kind_maps_each_settable_key() {
         assert_eq!(key_kind("autostart.enabled"), Some(KeyKind::Bool));
         assert_eq!(key_kind("triggers.five_hour.mode"), Some(KeyKind::Mode));
-        assert_eq!(key_kind("triggers.five_hour.threshold_percent"), Some(KeyKind::Percent));
+        assert_eq!(
+            key_kind("triggers.five_hour.threshold_percent"),
+            Some(KeyKind::Percent)
+        );
         assert_eq!(
             key_kind("triggers.five_hour.burn_rate.runway_minutes"),
             Some(KeyKind::PosFloat)
@@ -726,7 +1134,7 @@ enabled = true
         for key in settable_keys() {
             assert!(get_value(&cfg, key).is_ok(), "key {key} not readable");
         }
-        assert_eq!(settable_keys().count(), 8);
+        assert_eq!(settable_keys().count(), 19);
     }
 
     #[test]
@@ -757,6 +1165,95 @@ enabled = true
     #[test]
     fn key_kind_maps_language() {
         assert_eq!(key_kind("language"), Some(KeyKind::Lang));
+    }
+
+    #[test]
+    fn defaults_include_capsule_format_and_theme() {
+        let cfg = Config::default();
+        assert_eq!(cfg.capsule.format, CapsuleFormat::Json);
+        assert_eq!(cfg.capsule.next_prompt_max_items, 5);
+        assert_eq!(cfg.capsule.remaining_max_items, 5);
+        assert_eq!(cfg.capsule.done_max_items, 5);
+        assert_eq!(cfg.capsule.risks_max_items, 5);
+        assert_eq!(cfg.theme.preset, ThemePreset::Default);
+        assert_eq!(cfg.theme.codex_color.as_str(), "#B996EB");
+        assert_eq!(cfg.theme.claude_color.as_str(), "#E68C1E");
+        assert_eq!(cfg.theme.focus_border_color.as_str(), "#FFA500");
+        assert_eq!(cfg.theme.selection_bg_color.as_str(), "cyan");
+        assert_eq!(cfg.theme.selection_fg_color.as_str(), "black");
+    }
+
+    #[test]
+    fn default_value_reports_theme_and_capsule_defaults() {
+        assert_eq!(default_value("capsule.format").unwrap(), "json");
+        assert_eq!(default_value("capsule.remaining_max_items").unwrap(), "5");
+        assert_eq!(default_value("theme.preset").unwrap(), "default");
+        assert_eq!(
+            default_value("theme.focus_border_color").unwrap(),
+            "#FFA500"
+        );
+    }
+
+    #[test]
+    fn set_value_accepts_capsule_format_theme_and_color() {
+        let text = set_value(None, "capsule.format", "md").unwrap();
+        let text = set_value(Some(&text), "capsule.remaining_max_items", "3").unwrap();
+        let text = set_value(Some(&text), "theme.preset", "high_contrast").unwrap();
+        let text = set_value(Some(&text), "theme.codex_color", "#B996EB").unwrap();
+        let cfg = parse(&text).unwrap();
+
+        assert_eq!(cfg.capsule.format, CapsuleFormat::Md);
+        assert_eq!(cfg.capsule.remaining_max_items, 3);
+        assert_eq!(cfg.theme.preset, ThemePreset::HighContrast);
+        assert_eq!(cfg.theme.codex_color.as_str(), "#B996EB");
+    }
+
+    #[test]
+    fn capsule_item_limits_are_editable_positive_counts() {
+        assert_eq!(
+            key_kind("capsule.next_prompt_max_items"),
+            Some(KeyKind::Count)
+        );
+
+        let text = set_value(None, "capsule.done_max_items", "9").unwrap();
+        assert_eq!(parse(&text).unwrap().capsule.done_max_items, 9);
+
+        let err = set_value(None, "capsule.risks_max_items", "0").unwrap_err();
+        assert!(matches!(err, ConfigWriteError::InvalidValue { .. }));
+    }
+
+    #[test]
+    fn setting_theme_preset_writes_preset_colors() {
+        let text = set_value(None, "theme.preset", "mono").unwrap();
+        let cfg = parse(&text).unwrap();
+
+        assert_eq!(cfg.theme.preset, ThemePreset::Mono);
+        assert_eq!(cfg.theme.codex_color.as_str(), "white");
+        assert_eq!(cfg.theme.claude_color.as_str(), "gray");
+        assert_eq!(cfg.theme.focus_border_color.as_str(), "white");
+        assert_eq!(cfg.theme.selection_bg_color.as_str(), "white");
+        assert_eq!(cfg.theme.selection_fg_color.as_str(), "black");
+    }
+
+    #[test]
+    fn high_contrast_preset_uses_distinct_agent_colors() {
+        let theme = theme_config_for_preset(ThemePreset::HighContrast);
+
+        assert_eq!(theme.codex_color.as_str(), "light-blue");
+        assert_eq!(theme.claude_color.as_str(), "light-yellow");
+        assert_ne!(theme.codex_color, theme.claude_color);
+    }
+
+    #[test]
+    fn set_value_rejects_invalid_color_and_bad_selection_contrast() {
+        assert!(matches!(
+            set_value(None, "theme.codex_color", "not a color").unwrap_err(),
+            ConfigWriteError::InvalidValue { .. }
+        ));
+
+        let text = set_value(None, "theme.selection_bg_color", "white").unwrap();
+        let err = set_value(Some(&text), "theme.selection_fg_color", "white").unwrap_err();
+        assert!(matches!(err, ConfigWriteError::InvalidValue { .. }));
     }
 
     #[test]

@@ -1,6 +1,8 @@
 ---
 name: handoff-checkpoint
-description: Manually save a handoff capsule right now. Pass a short goal description as the argument.
+description: Use /handoff checkpoint to manually save a handoff capsule right now. Pass a short goal description as the argument.
+argument-hint: "[summary]"
+disable-model-invocation: true
 ---
 
 # handoff-checkpoint
@@ -14,19 +16,16 @@ automatic 5-hour threshold.
     ai-handoff checkpoint --message "<goal summary>"
     aho checkpoint --message "<goal summary>"
 
-The `--message` flag is required and should describe what you were working on and what
-comes next. Keep it concise but specific enough for the receiving agent to act on.
+For richer handoff detail, send JSON on stdin. The daemon trims each field using
+the shared config limits:
 
-## When to use
+- `capsule.next_prompt_max_items`
+- `capsule.remaining_max_items`
+- `capsule.done_max_items`
+- `capsule.risks_max_items`
 
-- Before switching agents intentionally (Claude Code → Codex or vice versa).
-- Before a long break where context may be lost.
-- After reaching a meaningful milestone mid-session.
-
-## In Claude Code / Codex
-
-Invoke as `/handoff-checkpoint <goal>` in Claude Code or `@handoff-checkpoint <goal>`
-in Codex. The agent will run `ai-handoff checkpoint --message "<goal>"` and report the
-capsule ID on success.
+Invoke from the skill list as the handoff checkpoint entry. The user-facing command is
+`/handoff checkpoint <goal>`; run `ai-handoff checkpoint --message "<goal>"` and report
+the capsule ID on success.
 
 Never include secrets, credentials, or raw transcript text in the message.

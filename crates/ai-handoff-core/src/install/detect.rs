@@ -11,8 +11,12 @@ pub struct InstallTargets {
     /// Claude plugin bundle dir: `~/.claude/skills/ai-handoff` — dropping the
     /// bundle here makes Claude auto-load it as `ai-handoff@skills-dir`.
     pub claude_plugin_dir: PathBuf,
+    /// Plain Claude user skills root for the three `/handoff ...` entries.
+    pub claude_handoff_skills_dir: PathBuf,
     /// Codex plugin bundle dir: `~/.agents/plugins/ai-handoff`.
     pub codex_plugin_dir: PathBuf,
+    /// Plain Codex user skills root for the three `/handoff ...` entries.
+    pub codex_handoff_skills_dir: PathBuf,
     /// Codex personal marketplace manifest: `~/.agents/plugins/marketplace.json`
     /// (auto-discovered by Codex; an entry here registers the local bundle).
     pub agents_marketplace: PathBuf,
@@ -34,7 +38,9 @@ pub fn targets_for(user_home: &Path, ai_home: &Path, ipc_dir: &Path, exe: &Path)
         codex_config: user_home.join(".codex").join("config.toml"),
         claude_settings,
         claude_plugin_dir,
+        claude_handoff_skills_dir: user_home.join(".claude").join("skills"),
         codex_plugin_dir: user_home.join(".agents").join("plugins").join("ai-handoff"),
+        codex_handoff_skills_dir: user_home.join(".agents").join("skills"),
         agents_marketplace: user_home
             .join(".agents")
             .join("plugins")
@@ -80,7 +86,9 @@ mod tests {
         assert_eq!(t.codex_config, uh.join(".codex/config.toml"));
         assert_eq!(t.claude_settings, uh.join(".claude/settings.json"));
         assert_eq!(t.claude_plugin_dir, uh.join(".claude/skills/ai-handoff"));
+        assert_eq!(t.claude_handoff_skills_dir, uh.join(".claude/skills"));
         assert_eq!(t.codex_plugin_dir, uh.join(".agents/plugins/ai-handoff"));
+        assert_eq!(t.codex_handoff_skills_dir, uh.join(".agents/skills"));
         assert_eq!(
             t.agents_marketplace,
             uh.join(".agents/plugins/marketplace.json")

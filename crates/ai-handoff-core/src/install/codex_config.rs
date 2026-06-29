@@ -314,9 +314,9 @@ mod tests {
             1
         );
         assert!(!e2.created_sandbox_table); // already existed the second time
-        // Managed entries are recorded by presence, so a re-apply still reports
-        // them (they are not duplicated — the array length stays 1 above) — this
-        // is what lets a later uninstall remove them after an idempotent install.
+                                            // Managed entries are recorded by presence, so a re-apply still reports
+                                            // them (they are not duplicated — the array length stays 1 above) — this
+                                            // is what lets a later uninstall remove them after an idempotent install.
         assert_eq!(e2.writable_root_added.as_deref(), Some("C:/ipc"));
         assert_eq!(e2.env_key_added.as_deref(), Some("AI_HANDOFF_HOME"));
     }

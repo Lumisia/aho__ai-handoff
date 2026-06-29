@@ -7,6 +7,7 @@ use ai_handoff_core::{
         new_capsule_id, AgentKind, Capsule, Consumption, ConsumptionState, FileChange,
         RedactionMeta, Session, Summary,
     },
+    config,
     fingerprint::fingerprint,
     hook_event::{normalize, HookEventKind},
     redaction::redact,
@@ -164,37 +165,22 @@ fn handle_checkpoint(req: &ai_handoff_ipc::protocol::Request) -> Response {
         .and_then(Value::as_str)
         .unwrap_or("manual checkpoint")
         .to_string();
-    let mut redacted = false;
-    let goal = redact_string(message, &mut redacted);
-    let capsule = Capsule {
-        schema_version: 2,
-        capsule_id: new_capsule_id(now),
-        project_id,
-        created_at: now.to_rfc3339_opts(SecondsFormat::Secs, true),
-        source_agent: agent.clone(),
-        target_agent: opposite_agent(&agent),
-        session: Session {
-            session_id: req.session_id.clone(),
-            ..Session::default()
-        },
-        summary: Summary {
-            goal,
-            done: vec![],
-            remaining: vec![],
-            risks: vec![],
-        },
-        files: vec![],
-        next_prompt: None,
-        redaction: RedactionMeta {
-            applied: redacted,
-            ruleset: "default-v2".to_string(),
-        },
-        consumption: Consumption {
-            state: ConsumptionState::Pending,
-            consumed_by: None,
-            consumed_at: None,
-        },
-    };
+    let mut payload = raw.clone();
+    if let Some(obj) = payload.as_object_mut() {
+        if obj.get("goal").is_none()
+            && obj
+                .get("summary")
+                .and_then(Value::as_object)
+                .is_none_or(|summary| summary.get("goal").is_none())
+        {
+            obj.insert("goal".to_string(), json!(message));
+        }
+    }
+    let normalized = normalize(agent.clone(), HookEventKind::Stop, &payload);
+    let mut capsule = build_capsule(&payload, &project_id, &normalized);
+    capsule.capsule_id = new_capsule_id(now);
+    capsule.created_at = now.to_rfc3339_opts(SecondsFormat::Secs, true);
+    capsule.session.session_id = req.session_id.clone();
 
     match save_capsule(&capsule) {
         Ok(path) => Router::ok(
@@ -290,25 +276,36 @@ fn build_capsule(
     let now = Utc::now();
     let summary_value = payload.get("summary").unwrap_or(payload);
     let mut redacted = false;
+    let limits = config::load().capsule;
 
     let goal = redact_string(
         string_field(summary_value, "goal").unwrap_or_else(|| "handoff capsule".to_string()),
         &mut redacted,
     );
-    let done = redact_strings(
-        array_field(summary_value, &["done", "completed"]),
-        &mut redacted,
+    let done = limit_items(
+        redact_strings(
+            array_field(summary_value, &["done", "completed"]),
+            &mut redacted,
+        ),
+        limits.done_limit(),
     );
-    let remaining = redact_strings(
-        array_field(summary_value, &["remaining", "next_actions"]),
-        &mut redacted,
+    let remaining = limit_items(
+        redact_strings(
+            array_field(summary_value, &["remaining", "next_actions"]),
+            &mut redacted,
+        ),
+        limits.remaining_limit(),
     );
-    let risks = redact_strings(
-        array_field(summary_value, &["risks", "open_issues"]),
-        &mut redacted,
+    let risks = limit_items(
+        redact_strings(
+            array_field(summary_value, &["risks", "open_issues"]),
+            &mut redacted,
+        ),
+        limits.risks_limit(),
     );
-    let next_prompt =
-        string_field(payload, "next_prompt").map(|value| redact_string(value, &mut redacted));
+    let next_prompt = string_field(payload, "next_prompt")
+        .map(|value| redact_string(value, &mut redacted))
+        .map(|value| limit_next_prompt(value, limits.next_prompt_limit()));
 
     Capsule {
         schema_version: 2,
@@ -338,6 +335,26 @@ fn build_capsule(
             consumed_by: None,
             consumed_at: None,
         },
+    }
+}
+
+fn limit_items(mut items: Vec<String>, limit: usize) -> Vec<String> {
+    items.truncate(limit);
+    items
+}
+
+fn limit_next_prompt(value: String, limit: usize) -> String {
+    let items = value
+        .split(['|', '\n'])
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .take(limit)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if items.len() <= 1 {
+        value
+    } else {
+        items.join(" | ")
     }
 }
 
@@ -500,6 +517,40 @@ mod tests {
         assert_eq!(pending.summary.goal, "ship MVP");
         assert_eq!(pending.source_agent, AgentKind::Codex);
         assert_eq!(pending.target_agent, AgentKind::ClaudeCode);
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn stop_capsule_respects_configured_summary_item_limits() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[capsule]\nremaining_max_items = 2\ndone_max_items = 1\nrisks_max_items = 1\nnext_prompt_max_items = 2\n",
+        )
+        .unwrap();
+        let router = Router::new();
+        let req = request(
+            "turn-stop",
+            "stop",
+            "codex",
+            cwd.path(),
+            json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "last_assistant_message": "done\n```ai-handoff-capsule\n{\"goal\":\"ship MVP\",\"done\":[\"a\",\"b\"],\"remaining\":[\"c\",\"d\",\"e\"],\"risks\":[\"f\",\"g\"],\"next_prompt\":\"one | two | three\"}\n```"
+            }),
+        );
+
+        let resp = router.handle(&req);
+        assert_eq!(resp.status, Status::Ok);
+        let project_id = fingerprint(cwd.path());
+        let pending = crate::store::find_pending(&project_id).unwrap();
+        assert_eq!(pending.summary.done, vec!["a"]);
+        assert_eq!(pending.summary.remaining, vec!["c", "d"]);
+        assert_eq!(pending.summary.risks, vec!["f"]);
+        assert_eq!(pending.next_prompt.as_deref(), Some("one | two"));
         std::env::remove_var("AI_HANDOFF_HOME");
     }
 

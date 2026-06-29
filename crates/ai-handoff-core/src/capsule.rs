@@ -65,11 +65,39 @@ pub enum AgentKind {
 }
 
 /// Consumption state — serialized as snake_case strings.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ConsumptionState {
     Pending,
+    InProgress,
+    Blocked,
+    NeedsReview,
     Consumed,
+    Archived,
+}
+
+impl ConsumptionState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ConsumptionState::Pending => "pending",
+            ConsumptionState::InProgress => "in_progress",
+            ConsumptionState::Blocked => "blocked",
+            ConsumptionState::NeedsReview => "needs_review",
+            ConsumptionState::Consumed => "consumed",
+            ConsumptionState::Archived => "archived",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            ConsumptionState::Pending => ConsumptionState::InProgress,
+            ConsumptionState::InProgress => ConsumptionState::Blocked,
+            ConsumptionState::Blocked => ConsumptionState::NeedsReview,
+            ConsumptionState::NeedsReview => ConsumptionState::Consumed,
+            ConsumptionState::Consumed => ConsumptionState::Archived,
+            ConsumptionState::Archived => ConsumptionState::Pending,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -129,10 +129,54 @@ mod tests {
 
     fn sample() -> Vec<UsageEvent> {
         vec![
-            ev(Source::Claude, "C:/a", "claude-opus-4-8", "2026-06-17", Tokens { input: 100, cache_read: 0, cache_write: 0, output: 10 }),
-            ev(Source::Claude, "C:/a", "claude-opus-4-8", "2026-06-18", Tokens { input: 200, cache_read: 0, cache_write: 0, output: 20 }),
-            ev(Source::Codex, "C:/b", "gpt-5.5", "2026-06-18", Tokens { input: 50, cache_read: 5, cache_write: 0, output: 5 }),
-            ev(Source::Codex, "C:/b", "mystery-model", "2026-06-18", Tokens { input: 1000, cache_read: 0, cache_write: 0, output: 0 }),
+            ev(
+                Source::Claude,
+                "C:/a",
+                "claude-opus-4-8",
+                "2026-06-17",
+                Tokens {
+                    input: 100,
+                    cache_read: 0,
+                    cache_write: 0,
+                    output: 10,
+                },
+            ),
+            ev(
+                Source::Claude,
+                "C:/a",
+                "claude-opus-4-8",
+                "2026-06-18",
+                Tokens {
+                    input: 200,
+                    cache_read: 0,
+                    cache_write: 0,
+                    output: 20,
+                },
+            ),
+            ev(
+                Source::Codex,
+                "C:/b",
+                "gpt-5.5",
+                "2026-06-18",
+                Tokens {
+                    input: 50,
+                    cache_read: 5,
+                    cache_write: 0,
+                    output: 5,
+                },
+            ),
+            ev(
+                Source::Codex,
+                "C:/b",
+                "mystery-model",
+                "2026-06-18",
+                Tokens {
+                    input: 1000,
+                    cache_read: 0,
+                    cache_write: 0,
+                    output: 0,
+                },
+            ),
         ]
     }
 

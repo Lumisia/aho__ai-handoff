@@ -32,6 +32,8 @@ pub struct CodexState {
     pub created_env_table: bool,
     #[serde(default)]
     pub plugin: Option<PluginRecord>,
+    #[serde(default)]
+    pub handoff_skill: Option<PluginRecord>,
 }
 
 #[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
@@ -48,6 +50,8 @@ pub struct ClaudeState {
     pub statusline: Option<ClaudeStatuslineState>,
     #[serde(default)]
     pub plugin: Option<PluginRecord>,
+    #[serde(default)]
+    pub handoff_skill: Option<PluginRecord>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -236,10 +240,23 @@ mod tests {
             ],
             marketplace_file: None,
         });
+        st.claude.handoff_skill = Some(PluginRecord {
+            root: "C:\\Users\\PC\\.claude\\skills\\handoff".into(),
+            files: vec!["SKILL.md".into()],
+            marketplace_file: None,
+        });
         st.codex.plugin = Some(PluginRecord {
             root: "C:\\Users\\PC\\.ai-handoff\\plugins\\codex\\ai-handoff".into(),
-            files: vec![".codex-plugin/plugin.json".into(), "hooks/hooks.json".into()],
+            files: vec![
+                ".codex-plugin/plugin.json".into(),
+                "hooks/hooks.json".into(),
+            ],
             marketplace_file: Some("C:\\Users\\PC\\.codex\\marketplace.json".into()),
+        });
+        st.codex.handoff_skill = Some(PluginRecord {
+            root: "C:\\Users\\PC\\.agents\\skills\\handoff".into(),
+            files: vec!["SKILL.md".into()],
+            marketplace_file: None,
         });
         save(dir.path(), &st).unwrap();
         assert_eq!(load(dir.path()), st);

@@ -19,8 +19,31 @@ pub enum EditAction {
 
 const PERCENT_STEP: f64 = 5.0;
 const MINUTES_STEP: f64 = 5.0;
+const COUNT_STEP: i64 = 1;
 const MODES: [&str; 3] = ["off", "ask", "auto"];
 const LANGS: [&str; 4] = ["en", "ko", "ja", "zh"];
+const CAPSULE_FORMATS: [&str; 2] = ["json", "md"];
+const THEME_PRESETS: [&str; 4] = ["default", "high_contrast", "mono", "custom"];
+const COLOR_PRESETS: [&str; 18] = [
+    "#B996EB",
+    "#E68C1E",
+    "#FFA500",
+    "cyan",
+    "light-cyan",
+    "light-blue",
+    "blue",
+    "magenta",
+    "purple",
+    "red",
+    "green",
+    "dark-gray",
+    "black",
+    "white",
+    "gray",
+    "#005F87",
+    "#5F005F",
+    "#005F00",
+];
 
 /// Compute the next raw value for `key`'s `kind`, given the current effective
 /// `current` value and an `action`. Returns `None` if `current` is unparseable
@@ -33,15 +56,35 @@ pub fn next_raw(kind: KeyKind, current: &str, action: EditAction) -> Option<Stri
         }
         KeyKind::Mode => Some(cycle(&MODES, current, action)),
         KeyKind::Lang => Some(cycle(&LANGS, current, action)),
+        KeyKind::CapsuleFormat => Some(cycle(&CAPSULE_FORMATS, current, action)),
+        KeyKind::ThemePreset => Some(cycle(&THEME_PRESETS, current, action)),
+        KeyKind::Color => Some(cycle(&COLOR_PRESETS, current, action)),
         KeyKind::Percent => {
             let now: f64 = current.parse().ok()?;
-            let delta = if action == EditAction::Prev { -PERCENT_STEP } else { PERCENT_STEP };
+            let delta = if action == EditAction::Prev {
+                -PERCENT_STEP
+            } else {
+                PERCENT_STEP
+            };
             Some(fmt_num((now + delta).clamp(0.0, 100.0)))
         }
         KeyKind::PosFloat => {
             let now: f64 = current.parse().ok()?;
-            let delta = if action == EditAction::Prev { -MINUTES_STEP } else { MINUTES_STEP };
+            let delta = if action == EditAction::Prev {
+                -MINUTES_STEP
+            } else {
+                MINUTES_STEP
+            };
             Some(fmt_num((now + delta).max(MINUTES_STEP)))
+        }
+        KeyKind::Count => {
+            let now: i64 = current.parse().ok()?;
+            let delta = if action == EditAction::Prev {
+                -COUNT_STEP
+            } else {
+                COUNT_STEP
+            };
+            Some((now + delta).clamp(1, 50).to_string())
         }
     }
 }
@@ -107,38 +150,130 @@ mod tests {
 
     #[test]
     fn bool_toggles() {
-        assert_eq!(next_raw(KeyKind::Bool, "true", EditAction::Toggle).unwrap(), "false");
-        assert_eq!(next_raw(KeyKind::Bool, "false", EditAction::Next).unwrap(), "true");
+        assert_eq!(
+            next_raw(KeyKind::Bool, "true", EditAction::Toggle).unwrap(),
+            "false"
+        );
+        assert_eq!(
+            next_raw(KeyKind::Bool, "false", EditAction::Next).unwrap(),
+            "true"
+        );
     }
 
     #[test]
     fn mode_cycles_both_directions() {
-        assert_eq!(next_raw(KeyKind::Mode, "off", EditAction::Next).unwrap(), "ask");
-        assert_eq!(next_raw(KeyKind::Mode, "ask", EditAction::Next).unwrap(), "auto");
-        assert_eq!(next_raw(KeyKind::Mode, "auto", EditAction::Next).unwrap(), "off");
-        assert_eq!(next_raw(KeyKind::Mode, "off", EditAction::Prev).unwrap(), "auto");
+        assert_eq!(
+            next_raw(KeyKind::Mode, "off", EditAction::Next).unwrap(),
+            "ask"
+        );
+        assert_eq!(
+            next_raw(KeyKind::Mode, "ask", EditAction::Next).unwrap(),
+            "auto"
+        );
+        assert_eq!(
+            next_raw(KeyKind::Mode, "auto", EditAction::Next).unwrap(),
+            "off"
+        );
+        assert_eq!(
+            next_raw(KeyKind::Mode, "off", EditAction::Prev).unwrap(),
+            "auto"
+        );
     }
 
     #[test]
     fn lang_cycles_through_four_codes() {
-        assert_eq!(next_raw(KeyKind::Lang, "en", EditAction::Next).unwrap(), "ko");
-        assert_eq!(next_raw(KeyKind::Lang, "ko", EditAction::Next).unwrap(), "ja");
-        assert_eq!(next_raw(KeyKind::Lang, "ja", EditAction::Next).unwrap(), "zh");
-        assert_eq!(next_raw(KeyKind::Lang, "zh", EditAction::Next).unwrap(), "en");
-        assert_eq!(next_raw(KeyKind::Lang, "en", EditAction::Prev).unwrap(), "zh");
+        assert_eq!(
+            next_raw(KeyKind::Lang, "en", EditAction::Next).unwrap(),
+            "ko"
+        );
+        assert_eq!(
+            next_raw(KeyKind::Lang, "ko", EditAction::Next).unwrap(),
+            "ja"
+        );
+        assert_eq!(
+            next_raw(KeyKind::Lang, "ja", EditAction::Next).unwrap(),
+            "zh"
+        );
+        assert_eq!(
+            next_raw(KeyKind::Lang, "zh", EditAction::Next).unwrap(),
+            "en"
+        );
+        assert_eq!(
+            next_raw(KeyKind::Lang, "en", EditAction::Prev).unwrap(),
+            "zh"
+        );
+    }
+
+    #[test]
+    fn capsule_format_cycles() {
+        assert_eq!(
+            next_raw(KeyKind::CapsuleFormat, "json", EditAction::Next).unwrap(),
+            "md"
+        );
+        assert_eq!(
+            next_raw(KeyKind::CapsuleFormat, "md", EditAction::Next).unwrap(),
+            "json"
+        );
+    }
+
+    #[test]
+    fn theme_preset_and_colors_cycle() {
+        assert_eq!(
+            next_raw(KeyKind::ThemePreset, "default", EditAction::Next).unwrap(),
+            "high_contrast"
+        );
+        assert_eq!(
+            next_raw(KeyKind::Color, "#B996EB", EditAction::Next).unwrap(),
+            "#E68C1E"
+        );
+        assert_eq!(
+            next_raw(KeyKind::Color, "blue", EditAction::Next).unwrap(),
+            "magenta"
+        );
+        assert_eq!(
+            next_raw(KeyKind::Color, "blue", EditAction::Prev).unwrap(),
+            "light-blue"
+        );
     }
 
     #[test]
     fn percent_steps_and_clamps() {
-        assert_eq!(next_raw(KeyKind::Percent, "80", EditAction::Next).unwrap(), "85");
-        assert_eq!(next_raw(KeyKind::Percent, "98", EditAction::Next).unwrap(), "100");
-        assert_eq!(next_raw(KeyKind::Percent, "2", EditAction::Prev).unwrap(), "0");
+        assert_eq!(
+            next_raw(KeyKind::Percent, "80", EditAction::Next).unwrap(),
+            "85"
+        );
+        assert_eq!(
+            next_raw(KeyKind::Percent, "98", EditAction::Next).unwrap(),
+            "100"
+        );
+        assert_eq!(
+            next_raw(KeyKind::Percent, "2", EditAction::Prev).unwrap(),
+            "0"
+        );
     }
 
     #[test]
     fn posfloat_steps_with_floor() {
-        assert_eq!(next_raw(KeyKind::PosFloat, "30", EditAction::Next).unwrap(), "35");
-        assert_eq!(next_raw(KeyKind::PosFloat, "5", EditAction::Prev).unwrap(), "5");
+        assert_eq!(
+            next_raw(KeyKind::PosFloat, "30", EditAction::Next).unwrap(),
+            "35"
+        );
+        assert_eq!(
+            next_raw(KeyKind::PosFloat, "5", EditAction::Prev).unwrap(),
+            "5"
+        );
+    }
+
+    #[test]
+    fn count_steps_and_clamps() {
+        assert_eq!(
+            next_raw(KeyKind::Count, "5", EditAction::Next).unwrap(),
+            "6"
+        );
+        assert_eq!(
+            next_raw(KeyKind::Count, "1", EditAction::Prev).unwrap(),
+            "1"
+        );
     }
 
     #[test]
@@ -153,7 +288,10 @@ mod tests {
         let path = dir.path().join("config.toml");
         commit(&path, "triggers.five_hour.mode", "auto").unwrap();
         let cfg = config::load_from(&path);
-        assert_eq!(cfg.triggers.five_hour.mode, ai_handoff_core::config::ModeCfg::Auto);
+        assert_eq!(
+            cfg.triggers.five_hour.mode,
+            ai_handoff_core::config::ModeCfg::Auto
+        );
     }
 
     #[test]

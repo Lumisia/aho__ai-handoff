@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    capsule::{Capsule, ConsumptionState},
+    capsule::Capsule,
+    capsule_codec,
     install::{duplicate, state},
     paths,
 };
@@ -199,15 +200,13 @@ pub fn list_capsules_for(home: &Path) -> CapsuleList {
             }
             if let Ok(files) = fs::read_dir(project.path()) {
                 for file in files.flatten() {
-                    if file.path().extension().and_then(|s| s.to_str()) != Some("json") {
+                    let path = file.path();
+                    if !is_capsule_file(&path) {
                         continue;
                     }
-                    match fs::read(file.path())
-                        .ok()
-                        .and_then(|bytes| serde_json::from_slice::<Capsule>(&bytes).ok())
-                    {
-                        Some(capsule) => items.push(summary_from_capsule(capsule, file.path())),
-                        None => skipped += 1,
+                    match capsule_codec::read_capsule(&path) {
+                        Ok(capsule) => items.push(summary_from_capsule(capsule, path)),
+                        Err(_) => skipped += 1,
                     }
                 }
             }
@@ -221,6 +220,13 @@ pub fn list_capsules_for(home: &Path) -> CapsuleList {
         pending_count,
         skipped,
     }
+}
+
+fn is_capsule_file(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|ext| ext.to_str()),
+        Some("json" | "md")
+    )
 }
 
 pub fn read_capsule(path: &Path, max_bytes: u64) -> ReadTextResult {
@@ -490,10 +496,7 @@ fn summary_from_capsule(capsule: Capsule, path: PathBuf) -> CapsuleSummary {
         created_at: capsule.created_at,
         source_agent: format!("{:?}", capsule.source_agent),
         target_agent: format!("{:?}", capsule.target_agent),
-        state: match capsule.consumption.state {
-            ConsumptionState::Pending => "pending".into(),
-            ConsumptionState::Consumed => "consumed".into(),
-        },
+        state: capsule.consumption.state.as_str().into(),
         summary_preview: capsule.summary.goal,
         path: path.to_string_lossy().into_owned(),
     }
@@ -649,6 +652,12 @@ mod tests {
             .path()
             .join("store/capsules/proj-a/cap_20260625_010101_abcd.json");
         write(&good_path, &serde_json::to_string_pretty(&good).unwrap());
+        let md = capsule("cap_20260625_020202_abcd", "proj-a", "2026-06-25T02:02:02Z");
+        let md_path = temp
+            .path()
+            .join("store/capsules/proj-a/cap_20260625_020202_abcd.md");
+        crate::capsule_codec::write_capsule(&md_path, &md, crate::config::CapsuleFormat::Md)
+            .unwrap();
         write(
             &temp.path().join("store/capsules/proj-a/bad.json"),
             "{bad json",
@@ -656,10 +665,11 @@ mod tests {
 
         let list = list_capsules_for(temp.path());
 
-        assert_eq!(list.items.len(), 1);
+        assert_eq!(list.items.len(), 2);
         assert_eq!(list.skipped, 1);
-        assert_eq!(list.pending_count, 1);
-        assert_eq!(list.items[0].capsule_id, "cap_20260625_010101_abcd");
-        assert_eq!(list.items[0].summary_preview, "ship dashboard");
+        assert_eq!(list.pending_count, 2);
+        assert_eq!(list.items[0].capsule_id, "cap_20260625_020202_abcd");
+        assert_eq!(list.items[1].capsule_id, "cap_20260625_010101_abcd");
+        assert_eq!(list.items[1].summary_preview, "ship dashboard");
     }
 }

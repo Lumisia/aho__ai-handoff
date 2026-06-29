@@ -101,7 +101,11 @@ pub fn render(
         Some(dim) => {
             writeln!(out, "By {}:", dim_name(dim))?;
             for g in aggregate::group_by(events, dim) {
-                let label = if g.key.is_empty() { "(unknown)" } else { &g.key };
+                let label = if g.key.is_empty() {
+                    "(unknown)"
+                } else {
+                    &g.key
+                };
                 writeln!(out, "  {:<28} {}", label, summarize(&g))?;
             }
         }
@@ -168,8 +172,28 @@ mod tests {
 
     fn sample() -> Vec<UsageEvent> {
         vec![
-            ev(Source::Claude, "claude-opus-4-8", "2026-06-17", Tokens { input: 1_000_000, cache_read: 0, cache_write: 0, output: 1_000_000 }),
-            ev(Source::Codex, "mystery", "2026-06-18", Tokens { input: 500, cache_read: 0, cache_write: 0, output: 0 }),
+            ev(
+                Source::Claude,
+                "claude-opus-4-8",
+                "2026-06-17",
+                Tokens {
+                    input: 1_000_000,
+                    cache_read: 0,
+                    cache_write: 0,
+                    output: 1_000_000,
+                },
+            ),
+            ev(
+                Source::Codex,
+                "mystery",
+                "2026-06-18",
+                Tokens {
+                    input: 500,
+                    cache_read: 0,
+                    cache_write: 0,
+                    output: 0,
+                },
+            ),
         ]
     }
 
@@ -220,7 +244,10 @@ mod tests {
         render(&sample(), Some(Dimension::Source), true, &mut out).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(v["group_by"], "source");
-        assert!(v["estimate_note"].as_str().unwrap().contains("not an official"));
+        assert!(v["estimate_note"]
+            .as_str()
+            .unwrap()
+            .contains("not an official"));
         assert!(v["total"]["tokens"]["input"].as_u64().unwrap() >= 1_000_000);
         assert!(v["groups"].as_array().unwrap().len() == 2);
     }

@@ -123,14 +123,17 @@ mod tests {
     #[test]
     fn installed_command_uses_forward_slashes_for_windows_paths() {
         assert_eq!(
-            installed_command("C:\\Users\\PC\\Desktop\\ai-handoff\\target\\release\\ai-handoff.exe"),
+            installed_command(
+                "C:\\Users\\PC\\Desktop\\ai-handoff\\target\\release\\ai-handoff.exe"
+            ),
             "\"C:/Users/PC/Desktop/ai-handoff/target/release/ai-handoff.exe\" statusline"
         );
     }
 
     #[test]
     fn apply_treats_backslash_variant_as_ours() {
-        let previous_install = r#"{"statusLine":{"type":"command","command":"\"C:\\p\\ai-handoff.exe\" statusline"}}"#;
+        let previous_install =
+            r#"{"statusLine":{"type":"command","command":"\"C:\\p\\ai-handoff.exe\" statusline"}}"#;
         let (json_str, a) = apply(Some(previous_install), EXE).unwrap();
         let v: Value = serde_json::from_str(&json_str).unwrap();
 

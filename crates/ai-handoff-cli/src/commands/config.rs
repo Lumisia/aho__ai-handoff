@@ -153,10 +153,11 @@ mod tests {
         let code = run_io(ConfigAction::List, &path, &mut out).unwrap();
         assert_eq!(code, 0);
         let text = String::from_utf8(out).unwrap();
-        assert_eq!(text.lines().count(), 8);
+        assert_eq!(text.lines().count(), config::settable_keys().count());
         assert!(text.contains("statusline.show = true"));
         assert!(text.contains("triggers.five_hour.mode = ask"));
         assert!(text.contains("language = en"));
+        assert!(text.contains("capsule.remaining_max_items = 5"));
     }
 
     #[test]

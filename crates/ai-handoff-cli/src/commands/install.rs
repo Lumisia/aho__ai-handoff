@@ -84,10 +84,9 @@ pub fn run_with_targets(
     };
     // The launcher (aho.cmd + PATH) is the CLI shim, independent of the logon
     // autostart, so it always installs on a real (non-dry-run) install.
-    let mut install_launcher =
-        |home: &std::path::Path, gui: Option<&std::path::Path>| {
-            super::launcher::install_aho_launcher(home, gui)
-        };
+    let mut install_launcher = |home: &std::path::Path, gui: Option<&std::path::Path>| {
+        super::launcher::install_aho_launcher(home, gui)
+    };
     let install_launcher = Some(&mut install_launcher as LauncherInstaller<'_>);
     run_with_targets_impl(
         targets,
@@ -409,7 +408,12 @@ mod tests {
         };
         let mut launcher = |home: &std::path::Path, _gui: Option<&std::path::Path>| {
             Ok(state::LauncherState {
-                path: Some(home.join("bin").join("aho.cmd").to_string_lossy().into_owned()),
+                path: Some(
+                    home.join("bin")
+                        .join("aho.cmd")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
                 path_dir_added: Some(home.join("bin").to_string_lossy().into_owned()),
             })
         };
@@ -456,7 +460,11 @@ mod tests {
             "sandbox_mode = \"workspace-write\"\n",
         )
         .unwrap();
-        std::fs::write(user_home.join(".claude/settings.json"), r#"{"model":"opus"}"#).unwrap();
+        std::fs::write(
+            user_home.join(".claude/settings.json"),
+            r#"{"model":"opus"}"#,
+        )
+        .unwrap();
 
         let ai_home = user_home.join("ai-home");
         let targets = targets_for(
@@ -469,7 +477,12 @@ mod tests {
         let mut output = Vec::new();
         let mut launcher = |home: &std::path::Path, _gui: Option<&std::path::Path>| {
             Ok(state::LauncherState {
-                path: Some(home.join("bin").join("aho.cmd").to_string_lossy().into_owned()),
+                path: Some(
+                    home.join("bin")
+                        .join("aho.cmd")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
                 path_dir_added: Some(home.join("bin").to_string_lossy().into_owned()),
             })
         };

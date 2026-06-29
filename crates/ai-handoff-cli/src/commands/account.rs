@@ -35,7 +35,10 @@ fn list(json: bool) -> anyhow::Result<i32> {
                 })
             })
             .collect();
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "accounts": accounts }))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({ "accounts": accounts }))?
+        );
         return Ok(0);
     }
     for (agent, name) in AGENTS {
@@ -59,7 +62,9 @@ fn list(json: bool) -> anyhow::Result<i32> {
 
 fn status(json: bool) -> anyhow::Result<i32> {
     let codex = (account::codex_identity(), account::codex_status());
-    let claude = (account::claude_identity(), account::claude_status());
+    let claude_id = account::claude_identity();
+    let claude_status = claude_usage_status(claude_id.as_ref()).or_else(account::claude_status);
+    let claude = (claude_id, claude_status);
     if json {
         let payload = serde_json::json!({
             "codex": status_json(codex.0.as_ref(), codex.1.as_ref()),
@@ -71,6 +76,25 @@ fn status(json: bool) -> anyhow::Result<i32> {
     print_status("Codex", codex.0.as_ref(), codex.1.as_ref());
     print_status("Claude", claude.0.as_ref(), claude.1.as_ref());
     Ok(0)
+}
+
+fn claude_usage_status(id: Option<&Identity>) -> Option<AccountStatus> {
+    let slots = account::list_slots(Agent::Claude);
+    let selected = slots
+        .iter()
+        .find(|s| s.active)
+        .or_else(|| {
+            id.and_then(|identity| identity.email.as_deref())
+                .and_then(|email| {
+                    slots
+                        .iter()
+                        .find(|s| s.meta.email.as_deref() == Some(email) || s.meta.label == email)
+                })
+        })
+        .or_else(|| slots.first())?;
+    ai_handoff_tui::account_api::fetch_slot_usage(Agent::Claude, &selected.meta.label)
+        .ok()
+        .map(account_status_from_usage)
 }
 
 fn doctor(json: bool) -> anyhow::Result<i32> {
@@ -85,10 +109,12 @@ fn doctor(json: bool) -> anyhow::Result<i32> {
 
     let mut warnings: Vec<String> = Vec::new();
     if !codex_cli {
-        warnings.push("`codex` CLI not on PATH — adding/launching Codex accounts won't work".into());
+        warnings
+            .push("`codex` CLI not on PATH — adding/launching Codex accounts won't work".into());
     }
     if !claude_cli {
-        warnings.push("`claude` CLI not on PATH — adding/launching Claude accounts won't work".into());
+        warnings
+            .push("`claude` CLI not on PATH — adding/launching Claude accounts won't work".into());
     }
     if !codex_in && codex_slots == 0 {
         warnings.push("No Codex account signed in or saved".into());
@@ -109,11 +135,15 @@ fn doctor(json: bool) -> anyhow::Result<i32> {
 
     println!(
         "Codex:  signed in: {}   saved: {codex_slots}   cli: {}   running: {}",
-        yn(codex_in), yn(codex_cli), yn(codex_running)
+        yn(codex_in),
+        yn(codex_cli),
+        yn(codex_running)
     );
     println!(
         "Claude: signed in: {}   saved: {claude_slots}   cli: {}   running: {}",
-        yn(claude_in), yn(claude_cli), yn(claude_running)
+        yn(claude_in),
+        yn(claude_cli),
+        yn(claude_running)
     );
     if warnings.is_empty() {
         println!("\nOK — no problems found.");
@@ -152,13 +182,23 @@ fn plan(id: Option<&Identity>, st: Option<&AccountStatus>) -> String {
 }
 
 fn print_status(name: &str, id: Option<&Identity>, st: Option<&AccountStatus>) {
-    let email = id.and_then(|i| i.email.as_deref()).unwrap_or("(not signed in)");
+    let email = id
+        .and_then(|i| i.email.as_deref())
+        .unwrap_or("(not signed in)");
     println!("{name}: {email}   plan: {}", plan(id, st));
     if let Some(w) = st.and_then(|s| s.five_hour.as_ref()) {
-        println!("  5h:     {:>3.0}% used{}", w.used_percent, reset(w.resets_at));
+        println!(
+            "  5h:     {:>3.0}% used{}",
+            w.used_percent,
+            reset(w.resets_at)
+        );
     }
     if let Some(w) = st.and_then(|s| s.weekly.as_ref()) {
-        println!("  weekly: {:>3.0}% used{}", w.used_percent, reset(w.resets_at));
+        println!(
+            "  weekly: {:>3.0}% used{}",
+            w.used_percent,
+            reset(w.resets_at)
+        );
     }
 }
 
@@ -180,8 +220,19 @@ fn status_json(id: Option<&Identity>, st: Option<&AccountStatus>) -> serde_json:
     })
 }
 
+fn account_status_from_usage(usage: ai_handoff_tui::account_api::UsageData) -> AccountStatus {
+    AccountStatus {
+        plan_type: usage.plan,
+        five_hour: usage.five_hour,
+        weekly: usage.weekly,
+        captured_at: Some(chrono::Utc::now().timestamp_millis()),
+    }
+}
+
 fn reset(resets_at: Option<i64>) -> String {
-    let Some(ts) = resets_at else { return String::new() };
+    let Some(ts) = resets_at else {
+        return String::new();
+    };
     let secs = ts - chrono::Utc::now().timestamp();
     if secs <= 0 {
         return " (resets now)".into();
@@ -191,5 +242,35 @@ fn reset(resets_at: Option<i64>) -> String {
         format!(" (resets in {h}h{m:02}m)")
     } else {
         format!(" (resets in {m}m)")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ai_handoff_core::account::RateWindow;
+    use ai_handoff_tui::account_api::UsageData;
+
+    #[test]
+    fn account_status_from_usage_maps_plan_and_windows() {
+        let status = account_status_from_usage(UsageData {
+            plan: Some("pro".into()),
+            five_hour: Some(RateWindow {
+                used_percent: 42.0,
+                window_minutes: 300,
+                resets_at: Some(1782864000),
+            }),
+            weekly: Some(RateWindow {
+                used_percent: 94.0,
+                window_minutes: 10080,
+                resets_at: Some(1783468800),
+            }),
+            reset_credits: None,
+            reset_credit_details: Vec::new(),
+        });
+
+        assert_eq!(status.plan_type.as_deref(), Some("pro"));
+        assert_eq!(status.five_hour.unwrap().used_percent, 42.0);
+        assert_eq!(status.weekly.unwrap().used_percent, 94.0);
     }
 }

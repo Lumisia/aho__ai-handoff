@@ -3,7 +3,7 @@
 //! Produces an installed plugin bundle for a given agent into a target
 //! directory, embedding the native-binary absolute path into the bundle's
 //! `hooks/hooks.json`. The CLI ships self-contained: the bundle's static
-//! content (the agent manifest + the 7 skills) is EMBEDDED into the binary at
+//! content (the agent manifest + bundled skills) is EMBEDDED into the binary at
 //! compile time via [`include_str!`] (no extra crate dependency), and only the
 //! hooks file is generated at install time with the resolved exe path.
 //!
@@ -29,37 +29,23 @@ const CLAUDE_MANIFEST: &str = include_str!("../../../../.claude-plugin/plugin.js
 /// `<root>/.codex-plugin/plugin.json`.
 const CODEX_MANIFEST: &str = include_str!("../../../../.codex-plugin/plugin.json");
 
-/// The 7 skills shipped in every bundle: `(name, SKILL.md contents)`.
+/// The skills shipped in every bundle: `(name, SKILL.md contents)`.
 const SKILLS: &[(&str, &str)] = &[
-    (
-        "handoff",
-        include_str!("../../../../skills/handoff/SKILL.md"),
-    ),
     (
         "handoff-checkpoint",
         include_str!("../../../../skills/handoff-checkpoint/SKILL.md"),
-    ),
-    (
-        "handoff-clear",
-        include_str!("../../../../skills/handoff-clear/SKILL.md"),
-    ),
-    (
-        "handoff-config",
-        include_str!("../../../../skills/handoff-config/SKILL.md"),
     ),
     (
         "handoff-doctor",
         include_str!("../../../../skills/handoff-doctor/SKILL.md"),
     ),
     (
-        "handoff-ratelimit",
-        include_str!("../../../../skills/handoff-ratelimit/SKILL.md"),
-    ),
-    (
-        "handoff-recent",
-        include_str!("../../../../skills/handoff-recent/SKILL.md"),
+        "handoff-config",
+        include_str!("../../../../skills/handoff-config/SKILL.md"),
     ),
 ];
+
+const LEGACY_USER_SKILLS: &[&str] = &["handoff"];
 
 // ---------------------------------------------------------------------------
 // hooks/hooks.json generation
@@ -101,7 +87,9 @@ fn build_hooks_json(agent: AgentKind, exe: &str) -> String {
             }
         }
         AgentKind::Codex => {
-            for (event, event_arg) in super::codex_hooks::EVENTS.iter().zip(CODEX_EVENT_ARGS.iter())
+            for (event, event_arg) in super::codex_hooks::EVENTS
+                .iter()
+                .zip(CODEX_EVENT_ARGS.iter())
             {
                 let command = super::codex_hooks::managed_command(exe, event_arg);
                 let inner = if *event == "PostToolUse" {
@@ -181,7 +169,7 @@ fn write_text_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
 /// Writes (each atomically):
 /// - the agent manifest: Claude → `.claude-plugin/plugin.json`, Codex →
 ///   `.codex-plugin/plugin.json` (embedded content, verbatim),
-/// - each of the 7 skills to `skills/<name>/SKILL.md`,
+/// - each bundled skill to `skills/<name>/SKILL.md`,
 /// - `hooks/hooks.json` with the 4 lifecycle events.
 ///
 /// Idempotent: re-running into the same dir overwrites files cleanly. Returns a
@@ -198,13 +186,26 @@ pub fn generate_bundle(
 
     // Agent manifest.
     let (manifest_rel, manifest_body) = match agent {
-        AgentKind::ClaudeCode => (".claude-plugin/plugin.json", CLAUDE_MANIFEST),
-        AgentKind::Codex => (".codex-plugin/plugin.json", CODEX_MANIFEST),
+        AgentKind::ClaudeCode => (".claude-plugin/plugin.json", CLAUDE_MANIFEST.to_string()),
+        AgentKind::Codex => {
+            let mut manifest: serde_json::Value = serde_json::from_str(CODEX_MANIFEST)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+            manifest["hooks"] = serde_json::json!("./hooks/hooks.json");
+            (
+                ".codex-plugin/plugin.json",
+                serde_json::to_string_pretty(&manifest).expect("serialization cannot fail"),
+            )
+        }
     };
-    write_text_atomic(&target_root.join(manifest_rel), manifest_body)?;
+    write_text_atomic(&target_root.join(manifest_rel), &manifest_body)?;
     files.push(manifest_rel.to_string());
 
-    // Skills.
+    // Skills. The plugin bundle root is fully owned by ai-handoff, so clear
+    // stale skill dirs from earlier versions before writing the current set.
+    let skills_root = target_root.join("skills");
+    if skills_root.exists() {
+        std::fs::remove_dir_all(&skills_root)?;
+    }
     for (name, body) in SKILLS {
         let rel = format!("skills/{name}/SKILL.md");
         write_text_atomic(&target_root.join(&rel), body)?;
@@ -221,6 +222,60 @@ pub fn generate_bundle(
         files,
         marketplace_file: None,
     })
+}
+
+/// Generate the plain user skills that expose the three `/handoff ...` entries
+/// outside the plugin namespace. Each directory name starts with `handoff-`, so
+/// typing `/handoff` filters the listing to these entries in skill pickers.
+pub fn generate_handoff_user_skills(skills_root: &Path) -> std::io::Result<PluginRecord> {
+    std::fs::create_dir_all(skills_root)?;
+    remove_legacy_user_skills(skills_root)?;
+
+    let mut files = Vec::new();
+    for (name, body) in SKILLS {
+        let target_root = skills_root.join(name);
+        if let Some(existing) = read_existing_skill(&target_root)? {
+            if existing != *body && !existing.contains("ai-handoff") {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    format!(
+                        "refusing to overwrite existing non-ai-handoff skill at {}",
+                        target_root.join("SKILL.md").display()
+                    ),
+                ));
+            }
+        }
+        let rel = format!("{name}/SKILL.md");
+        write_text_atomic(&skills_root.join(&rel), body)?;
+        files.push(rel);
+    }
+
+    Ok(PluginRecord {
+        root: skills_root.to_string_lossy().into_owned(),
+        files,
+        marketplace_file: None,
+    })
+}
+
+fn remove_legacy_user_skills(skills_root: &Path) -> std::io::Result<()> {
+    for name in LEGACY_USER_SKILLS {
+        let dir = skills_root.join(name);
+        let Some(existing) = read_existing_skill(&dir)? else {
+            continue;
+        };
+        if existing.contains("ai-handoff") {
+            std::fs::remove_dir_all(dir)?;
+        }
+    }
+    Ok(())
+}
+
+fn read_existing_skill(target_root: &Path) -> std::io::Result<Option<String>> {
+    match std::fs::read_to_string(target_root.join("SKILL.md")) {
+        Ok(text) => Ok(Some(text)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -284,9 +339,9 @@ pub fn merge_marketplace_entry(existing: Option<&str>) -> Result<String, Marketp
         .as_array_mut()
         .ok_or(MarketplaceError::UnexpectedShape("plugins is not an array"))?;
 
-    let already = plugins.iter().any(|p| {
-        p.get("name").and_then(Value::as_str) == Some(MARKETPLACE_PLUGIN_NAME)
-    });
+    let already = plugins
+        .iter()
+        .any(|p| p.get("name").and_then(Value::as_str) == Some(MARKETPLACE_PLUGIN_NAME));
     if !already {
         plugins.push(json!({
             "name": MARKETPLACE_PLUGIN_NAME,
@@ -307,9 +362,7 @@ pub fn remove_marketplace_entry(existing: &str) -> Result<String, MarketplaceErr
     let mut root: Value = serde_json::from_str(existing)?;
 
     if let Some(plugins) = root.get_mut("plugins").and_then(Value::as_array_mut) {
-        plugins.retain(|p| {
-            p.get("name").and_then(Value::as_str) != Some(MARKETPLACE_PLUGIN_NAME)
-        });
+        plugins.retain(|p| p.get("name").and_then(Value::as_str) != Some(MARKETPLACE_PLUGIN_NAME));
     }
 
     Ok(serde_json::to_string_pretty(&root).expect("serialization cannot fail"))
@@ -335,18 +388,20 @@ mod tests {
         // Manifest exists and equals the embedded content.
         assert_eq!(read(root, ".claude-plugin/plugin.json"), CLAUDE_MANIFEST);
 
-        // All 7 skills exist.
+        // All bundled skills exist.
         for (name, body) in SKILLS {
             assert_eq!(read(root, &format!("skills/{name}/SKILL.md")), *body);
         }
+        let skill_names: Vec<&str> = SKILLS.iter().map(|(name, _)| *name).collect();
+        assert_eq!(
+            skill_names,
+            ["handoff-checkpoint", "handoff-doctor", "handoff-config"]
+        );
 
         // hooks/hooks.json parses with all 4 events.
         let hooks: Value = serde_json::from_str(&read(root, "hooks/hooks.json")).unwrap();
         for ev in super::super::claude::EVENTS {
-            assert!(
-                hooks["hooks"][ev].is_array(),
-                "missing claude event {ev}"
-            );
+            assert!(hooks["hooks"][ev].is_array(), "missing claude event {ev}");
         }
 
         // Stop hook uses exec form with the abs exe + _aiHandoff.
@@ -367,16 +422,52 @@ mod tests {
         assert!(hooks["hooks"]["Stop"][0].get("matcher").is_none());
 
         // Record lists the written relative paths.
-        assert_eq!(
-            rec.root,
-            root.to_string_lossy().into_owned()
-        );
-        assert!(rec.files.contains(&".claude-plugin/plugin.json".to_string()));
+        assert_eq!(rec.root, root.to_string_lossy().into_owned());
+        assert!(rec
+            .files
+            .contains(&".claude-plugin/plugin.json".to_string()));
         assert!(rec.files.contains(&"hooks/hooks.json".to_string()));
         assert!(rec
             .files
-            .contains(&"skills/handoff/SKILL.md".to_string()));
+            .contains(&"skills/handoff-checkpoint/SKILL.md".to_string()));
+        assert!(rec
+            .files
+            .contains(&"skills/handoff-doctor/SKILL.md".to_string()));
+        assert!(rec
+            .files
+            .contains(&"skills/handoff-config/SKILL.md".to_string()));
         assert_eq!(rec.files.len(), 1 + SKILLS.len() + 1);
+        assert!(rec.marketplace_file.is_none());
+    }
+
+    #[test]
+    fn generate_handoff_user_skills_writes_three_subcommand_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("skills");
+
+        let rec = generate_handoff_user_skills(&root).unwrap();
+
+        assert_eq!(
+            read(&root, "handoff-checkpoint/SKILL.md"),
+            include_str!("../../../../skills/handoff-checkpoint/SKILL.md")
+        );
+        assert_eq!(
+            read(&root, "handoff-doctor/SKILL.md"),
+            include_str!("../../../../skills/handoff-doctor/SKILL.md")
+        );
+        assert_eq!(
+            read(&root, "handoff-config/SKILL.md"),
+            include_str!("../../../../skills/handoff-config/SKILL.md")
+        );
+        assert_eq!(rec.root, root.to_string_lossy().into_owned());
+        assert_eq!(
+            rec.files,
+            [
+                "handoff-checkpoint/SKILL.md",
+                "handoff-doctor/SKILL.md",
+                "handoff-config/SKILL.md"
+            ]
+        );
         assert!(rec.marketplace_file.is_none());
     }
 
@@ -388,8 +479,14 @@ mod tests {
 
         generate_bundle(AgentKind::Codex, exe, root).unwrap();
 
-        // Codex manifest exists and equals the embedded content.
-        assert_eq!(read(root, ".codex-plugin/plugin.json"), CODEX_MANIFEST);
+        // Codex manifest is based on the embedded source manifest, but installed
+        // bundles point at the generated native-exe hook file.
+        let source_manifest: Value = serde_json::from_str(CODEX_MANIFEST).unwrap();
+        let installed_manifest: Value =
+            serde_json::from_str(&read(root, ".codex-plugin/plugin.json")).unwrap();
+        assert_eq!(installed_manifest["name"], source_manifest["name"]);
+        assert_eq!(installed_manifest["version"], source_manifest["version"]);
+        assert_eq!(installed_manifest["hooks"], "./hooks/hooks.json");
         // Claude manifest must NOT be written for a Codex bundle.
         assert!(!root.join(".claude-plugin/plugin.json").exists());
 
@@ -478,9 +575,7 @@ mod tests {
         let plugins = v["plugins"].as_array().unwrap();
         // foreign + ours, no duplicate after the second merge
         assert_eq!(plugins.len(), 2);
-        assert!(plugins
-            .iter()
-            .any(|p| p["name"] == "other"));
+        assert!(plugins.iter().any(|p| p["name"] == "other"));
         assert_eq!(
             plugins
                 .iter()

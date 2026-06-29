@@ -43,7 +43,10 @@ pub fn run_io(snapshot: &DashboardSnapshot, out: &mut dyn Write) -> anyhow::Resu
     writeln!(out)?;
     writeln!(out, "Next")?;
     writeln!(out, "  ai-handoff --help shows subcommands")?;
-    writeln!(out, "  ai-handoff usage --group-by model breaks down tokens")?;
+    writeln!(
+        out,
+        "  ai-handoff usage --group-by model breaks down tokens"
+    )?;
     writeln!(out, "  ai-handoff dashboard opens the optional GUI")?;
     Ok(0)
 }

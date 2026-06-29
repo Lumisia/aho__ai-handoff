@@ -1,14 +1,16 @@
 use ai_handoff_core::{
     capsule::{AgentKind, Capsule, Consumption, ConsumptionState},
-    paths,
+    capsule_codec, config, paths,
 };
 use chrono::{DateTime, Utc};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 pub fn save_capsule(c: &Capsule) -> std::io::Result<PathBuf> {
-    let path = paths::capsule_path(&c.project_id, &c.capsule_id);
-    write_capsule_atomic(&path, c)?;
+    let format = config::load().capsule.format;
+    let path =
+        capsule_codec::capsule_path(&paths::project_dir(&c.project_id), &c.capsule_id, format);
+    capsule_codec::write_capsule(&path, c, format).map_err(std::io::Error::other)?;
     Ok(path)
 }
 
@@ -20,12 +22,11 @@ pub fn find_pending(project_id: &str) -> Option<Capsule> {
         .flatten()
         .filter_map(|entry| {
             let path = entry.path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            if !is_capsule_file(&path) {
                 return None;
             }
 
-            let bytes = std::fs::read(&path).ok()?;
-            let capsule: Capsule = serde_json::from_slice(&bytes).ok()?;
+            let capsule = capsule_codec::read_capsule(&path).ok()?;
             if capsule.consumption.state != ConsumptionState::Pending {
                 return None;
             }
@@ -47,30 +48,35 @@ pub fn mark_consumed(
     by: AgentKind,
     now: DateTime<Utc>,
 ) -> std::io::Result<()> {
-    let path = paths::capsule_path(project_id, capsule_id);
-    let bytes = std::fs::read(&path)?;
-    let mut capsule: Capsule = serde_json::from_slice(&bytes)?;
+    let path = find_capsule_path(project_id, capsule_id)
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "capsule not found"))?;
+    let mut capsule = capsule_codec::read_capsule(&path).map_err(std::io::Error::other)?;
     capsule.consumption = Consumption {
         state: ConsumptionState::Consumed,
         consumed_by: Some(format_agent(by)),
         consumed_at: Some(now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
     };
-    write_capsule_atomic(&path, &capsule)
+    let format = if path.extension().and_then(|ext| ext.to_str()) == Some("md") {
+        config::CapsuleFormat::Md
+    } else {
+        config::CapsuleFormat::Json
+    };
+    capsule_codec::write_capsule(&path, &capsule, format).map_err(std::io::Error::other)
 }
 
-fn write_capsule_atomic(path: &Path, capsule: &Capsule) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
+fn is_capsule_file(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|ext| ext.to_str()),
+        Some("json" | "md")
+    )
+}
 
-    let tmp = path.with_extension("json.tmp");
-    let bytes = serde_json::to_vec_pretty(capsule)?;
-    std::fs::write(&tmp, bytes)?;
-    if std::fs::rename(&tmp, path).is_err() {
-        let _ = std::fs::remove_file(path);
-        std::fs::rename(&tmp, path)?;
-    }
-    Ok(())
+fn find_capsule_path(project_id: &str, capsule_id: &str) -> Option<PathBuf> {
+    let dir = paths::project_dir(project_id);
+    [config::CapsuleFormat::Json, config::CapsuleFormat::Md]
+        .into_iter()
+        .map(|format| capsule_codec::capsule_path(&dir, capsule_id, format))
+        .find(|path| path.exists())
 }
 
 fn parse_created_at(value: &str) -> DateTime<Utc> {
@@ -146,6 +152,35 @@ mod tests {
 
         let pending = find_pending("projX").unwrap();
         assert_eq!(pending.capsule_id, "old");
+
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn md_format_save_find_pending_and_mark_consumed() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[capsule]\nformat = \"md\"\n",
+        )
+        .unwrap();
+
+        let path = save_capsule(&capsule("md-new", "2026-06-25T13:00:00Z")).unwrap();
+        assert_eq!(path.extension().and_then(|ext| ext.to_str()), Some("md"));
+        assert_eq!(find_pending("projX").unwrap().capsule_id, "md-new");
+
+        mark_consumed(
+            "projX",
+            "md-new",
+            AgentKind::ClaudeCode,
+            chrono::Utc.with_ymd_and_hms(2026, 6, 25, 14, 0, 0).unwrap(),
+        )
+        .unwrap();
+
+        let updated = ai_handoff_core::capsule_codec::read_capsule(&path).unwrap();
+        assert_eq!(updated.consumption.state, ConsumptionState::Consumed);
 
         std::env::remove_var("AI_HANDOFF_HOME");
     }

@@ -24,7 +24,14 @@ fn install_dry_run_prints_plan_and_writes_nothing() {
     let mut input: &[u8] = b"";
     let mut output = Vec::new();
     let code = run_with_targets(
-        &targets, true, false, None, &mut input, &mut output, false, true,
+        &targets,
+        true,
+        false,
+        None,
+        &mut input,
+        &mut output,
+        false,
+        true,
     )
     .unwrap();
 

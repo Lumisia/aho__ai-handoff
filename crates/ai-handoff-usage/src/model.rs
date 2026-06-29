@@ -115,7 +115,15 @@ mod tests {
             cache_write: 30,
             output: 40,
         });
-        assert_eq!(a, Tokens { input: 11, cache_read: 22, cache_write: 33, output: 44 });
+        assert_eq!(
+            a,
+            Tokens {
+                input: 11,
+                cache_read: 22,
+                cache_write: 33,
+                output: 44
+            }
+        );
     }
 
     #[test]
@@ -147,7 +155,12 @@ mod tests {
             session: "s1".into(),
             model: "gpt-5.5".into(),
             day: "2026-06-17".into(),
-            tokens: Tokens { input: 5, cache_read: 1, cache_write: 0, output: 2 },
+            tokens: Tokens {
+                input: 5,
+                cache_read: 1,
+                cache_write: 0,
+                output: 2,
+            },
         };
         let json = serde_json::to_value(&ev).unwrap();
         assert_eq!(json["source"], "codex");

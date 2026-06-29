@@ -140,7 +140,15 @@ mod tests {
         assert_eq!(e.project, "C:/proj");
         assert_eq!(e.session, "sess-abc");
         // input_tokens includes cached: fresh = 14881 - 7040.
-        assert_eq!(e.tokens, Tokens { input: 7841, cache_read: 7040, cache_write: 0, output: 147 });
+        assert_eq!(
+            e.tokens,
+            Tokens {
+                input: 7841,
+                cache_read: 7040,
+                cache_write: 0,
+                output: 147
+            }
+        );
     }
 
     #[test]
