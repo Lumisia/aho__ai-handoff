@@ -75,7 +75,7 @@ Set-ExecutionPolicy Bypass -Scope Process -Force; & ([scriptblock]::Create((irm 
 需要可重复安装时固定 release:
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Lumisia/aho__ai-handoff/master/scripts/install.ps1))) -Yes -Version v2.0.8
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Lumisia/aho__ai-handoff/master/scripts/install.ps1))) -Yes -Version v2.0.9
 ```
 
 ### Shell Installer
