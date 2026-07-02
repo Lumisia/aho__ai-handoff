@@ -22,6 +22,7 @@ line or surface any `error:` output verbatim.
 - `triggers.five_hour.threshold_percent`
 - `triggers.five_hour.mode`
 - `capsule.format`
+- `capsule.language`
 - `capsule.next_prompt_max_items`
 - `capsule.remaining_max_items`
 - `capsule.done_max_items`

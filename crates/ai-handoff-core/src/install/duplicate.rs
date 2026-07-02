@@ -34,8 +34,10 @@ pub struct DuplicateFinding {
 ///
 /// # Claude
 /// Parses `claude_settings_text` as JSON. If `enabledPlugins` contains any
-/// `ai-handoff@* = true`, a finding is returned for the legacy plugin. During a
-/// plugin-mode install, direct managed `hooks` entries are also flagged.
+/// `ai-handoff@* = true`, a finding is returned for the legacy plugin. Managed
+/// settings `hooks` entries are NOT flagged: settings.json is the canonical
+/// Claude hook location in both install modes (Claude never loads hooks from
+/// the `~/.claude/skills` bundle).
 ///
 /// # Error handling
 /// `None` inputs and parse failures are silently ignored — this function
@@ -112,16 +114,6 @@ pub fn detect(
                         ),
                     });
                 }
-            }
-            if installing_plugin && value_has_ai_handoff_hooks(&val) {
-                findings.push(DuplicateFinding {
-                    agent: "claude",
-                    detail: "Direct ai-handoff entries detected in Claude settings hooks while \
-                             the v2 plugin is being installed. These hooks will double-fire with \
-                             the plugin bundle. Remove the direct hooks with the old install \
-                             state or keep direct-hook mode with ai-handoff install --no-plugin."
-                        .to_string(),
-                });
             }
         }
     }

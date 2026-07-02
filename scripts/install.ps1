@@ -61,6 +61,7 @@ $ahHome = if ($env:AI_HANDOFF_HOME) { $env:AI_HANDOFF_HOME } else { Join-Path $e
 $binDir = Join-Path $ahHome 'bin'
 $tmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("ai-handoff-install-" + [System.Guid]::NewGuid().ToString('N'))
 $archive = Join-Path $tmpDir $artifact
+$checksum = "$archive.sha256"
 $exeName = 'ai-handoff.exe'
 $dest = Join-Path $binDir $exeName
 
@@ -71,6 +72,7 @@ try {
     Write-Host "Downloading $url"
     try {
         Invoke-WebRequest -Uri $url -OutFile $archive -UseBasicParsing
+        Invoke-WebRequest -Uri "$url.sha256" -OutFile $checksum -UseBasicParsing
     }
     catch {
         throw @"
@@ -79,6 +81,11 @@ A published GitHub Release with Windows artifacts is required.
 URL: $url
 Error: $($_.Exception.Message)
 "@
+    }
+    $expectedHash = ((Get-Content -Path $checksum -Raw).Trim() -split '\s+')[0].ToLowerInvariant()
+    $actualHash = (Get-FileHash -Path $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actualHash -ne $expectedHash) {
+        throw "Checksum mismatch for $artifact. Expected $expectedHash, got $actualHash."
     }
 
     # --- Extract --------------------------------------------------------------

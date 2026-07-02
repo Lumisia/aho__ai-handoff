@@ -16,7 +16,7 @@
 
 | 命令 | 终端等价命令 | 说明 |
 |---|---|---|
-| `handoff` | `ai-handoff hook session-start --agent <self>` | 获取并消费当前项目和当前 agent 对应的最新待处理 capsule。 |
+| `handoff` | `ai-handoff handoff --agent <self>` | 获取并消费当前项目和当前 agent 对应的最新待处理 capsule。 |
 | `handoff config` | `ai-handoff config list` | 显示可编辑的 config keys。直接编辑时使用 `ai-handoff config get <key>` 和 `ai-handoff config set <key> <value>`。 |
 | `handoff doctor` | `ai-handoff doctor` | 检查 plugin 状态、hook trust、daemon 可达性、IPC、store 和常见重复 hook 问题。 |
 | `handoff checkpoint` | `ai-handoff checkpoint --message "work snapshot"` | 从当前任务创建本地 capsule。message 应简短说明下一个 agent 为什么要看这个 checkpoint。 |

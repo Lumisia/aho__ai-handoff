@@ -28,7 +28,7 @@ pub fn write_capsule(
     format: CapsuleFormat,
 ) -> Result<(), CapsuleCodecError> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(CapsuleCodecError::Io)?;
+        crate::secure_fs::ensure_private_dir(parent).map_err(CapsuleCodecError::Io)?;
     }
     let bytes = match format {
         CapsuleFormat::Json => {
@@ -69,12 +69,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
             .and_then(|ext| ext.to_str())
             .unwrap_or("capsule")
     ));
-    std::fs::write(&tmp, bytes)?;
-    if std::fs::rename(&tmp, path).is_err() {
-        let _ = std::fs::remove_file(path);
-        std::fs::rename(&tmp, path)?;
-    }
-    Ok(())
+    crate::secure_fs::write_private_atomic(path, &tmp, bytes)
 }
 
 fn render_markdown_capsule(capsule: &Capsule) -> Result<String, serde_json::Error> {

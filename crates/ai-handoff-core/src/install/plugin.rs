@@ -60,75 +60,51 @@ const LEGACY_USER_SKILLS: &[&str] = &[
 // hooks/hooks.json generation
 // ---------------------------------------------------------------------------
 
-/// Build the bundle's `hooks/hooks.json` text for `agent`, embedding the
-/// absolute `exe` path into every managed hook command.
-///
-/// Claude uses the exec form (mirroring [`super::claude`]): `command` is the
-/// bare exe with `args` + `_aiHandoff:true` + `timeout:10`, and PostToolUse
-/// carries `"matcher":"Write|Edit|Bash"`.
+/// Build the Codex bundle's `hooks/hooks.json` text, embedding the absolute
+/// `exe` path into every managed hook command.
 ///
 /// Codex uses the command-string form (mirroring [`super::codex_hooks`]):
 /// `command = managed_command(exe, event_arg)`, `_aiHandoff:true`, `timeout:10`,
 /// every event outer entry carries `"matcher":"*"`, and PostToolUse additionally
 /// carries a `"statusMessage"`. The `_aiHandoff` flag keeps parity with the
 /// direct `codex_hooks` path so `codex_hooks::remove` can key off it.
+///
+/// Claude has no bundle hooks: Claude only loads hooks from settings.json
+/// ([`super::claude`]), never from the `~/.claude/skills` bundle.
 fn build_hooks_json(agent: AgentKind, exe: &str) -> String {
     use serde_json::{json, Map, Value};
 
-    let mut hooks = Map::new();
+    debug_assert_eq!(agent, AgentKind::Codex, "only Codex bundles carry hooks");
 
-    match agent {
-        AgentKind::ClaudeCode => {
-            for (event, event_arg) in super::claude::EVENTS.iter().zip(CLAUDE_EVENT_ARGS.iter()) {
-                let inner = json!({
-                    "type": "command",
-                    "command": exe,
-                    "args": ["hook", *event_arg, "--agent", "claude-code"],
-                    "_aiHandoff": true,
-                    "timeout": 10
-                });
-                let outer = if *event == "PostToolUse" {
-                    json!({ "matcher": "Write|Edit|Bash", "hooks": [inner] })
-                } else {
-                    json!({ "hooks": [inner] })
-                };
-                hooks.insert(event.to_string(), Value::Array(vec![outer]));
-            }
-        }
-        AgentKind::Codex => {
-            for (event, event_arg) in super::codex_hooks::EVENTS
-                .iter()
-                .zip(CODEX_EVENT_ARGS.iter())
-            {
-                let command = super::codex_hooks::managed_command(exe, event_arg);
-                let inner = if *event == "PostToolUse" {
-                    json!({
-                        "type": "command",
-                        "command": command,
-                        "_aiHandoff": true,
-                        "timeout": 10,
-                        "statusMessage": "Checking handoff threshold"
-                    })
-                } else {
-                    json!({
-                        "type": "command",
-                        "command": command,
-                        "_aiHandoff": true,
-                        "timeout": 10
-                    })
-                };
-                let outer = json!({ "matcher": "*", "hooks": [inner] });
-                hooks.insert(event.to_string(), Value::Array(vec![outer]));
-            }
-        }
+    let mut hooks = Map::new();
+    for (event, event_arg) in super::codex_hooks::EVENTS
+        .iter()
+        .zip(CODEX_EVENT_ARGS.iter())
+    {
+        let command = super::codex_hooks::managed_command(exe, event_arg);
+        let inner = if *event == "PostToolUse" {
+            json!({
+                "type": "command",
+                "command": command,
+                "_aiHandoff": true,
+                "timeout": 10,
+                "statusMessage": "Checking handoff threshold"
+            })
+        } else {
+            json!({
+                "type": "command",
+                "command": command,
+                "_aiHandoff": true,
+                "timeout": 10
+            })
+        };
+        let outer = json!({ "matcher": "*", "hooks": [inner] });
+        hooks.insert(event.to_string(), Value::Array(vec![outer]));
     }
 
     let root = json!({ "hooks": Value::Object(hooks) });
     serde_json::to_string_pretty(&root).expect("serialization cannot fail")
 }
-
-/// Kebab CLI arg strings for the Claude events (same order as `claude::EVENTS`).
-const CLAUDE_EVENT_ARGS: [&str; 4] = ["session-start", "user-prompt", "post-tool-use", "stop"];
 
 /// Kebab CLI arg strings for the Codex events (same order as `codex_hooks::EVENTS`).
 const CODEX_EVENT_ARGS: [&str; 4] = ["session-start", "user-prompt", "post-tool-use", "stop"];
@@ -172,14 +148,16 @@ fn write_text_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
 // Public entry point
 // ---------------------------------------------------------------------------
 
-/// Generate an installed plugin bundle for `agent` under `target_root`,
-/// embedding the absolute `exe` path into the generated `hooks/hooks.json`.
+/// Generate an installed plugin bundle for `agent` under `target_root`.
 ///
 /// Writes (each atomically):
 /// - the agent manifest: Claude → `.claude-plugin/plugin.json`, Codex →
 ///   `.codex-plugin/plugin.json` (embedded content, verbatim),
 /// - each bundled skill to `skills/<name>/SKILL.md`,
-/// - `hooks/hooks.json` with the 4 lifecycle events.
+/// - Codex only: `hooks/hooks.json` with the 4 lifecycle events (embedding the
+///   absolute `exe` path). Claude gets NO hooks file — Claude never loads
+///   hooks from `~/.claude/skills`, so Claude hooks live in settings.json
+///   (see [`super::claude`]); shipping a dead hooks file here only misleads.
 ///
 /// Idempotent: re-running into the same dir overwrites files cleanly. Returns a
 /// [`PluginRecord`] listing the bundle `root` plus the relative paths written
@@ -221,10 +199,21 @@ pub fn generate_bundle(
         files.push(rel);
     }
 
-    // Generated hooks with the embedded absolute exe path.
-    let hooks_rel = "hooks/hooks.json";
-    write_text_atomic(&target_root.join(hooks_rel), &build_hooks_json(agent, exe))?;
-    files.push(hooks_rel.to_string());
+    match agent {
+        AgentKind::Codex => {
+            // Generated hooks with the embedded absolute exe path.
+            let hooks_rel = "hooks/hooks.json";
+            write_text_atomic(&target_root.join(hooks_rel), &build_hooks_json(agent, exe))?;
+            files.push(hooks_rel.to_string());
+        }
+        AgentKind::ClaudeCode => {
+            // Remove the dead hooks file older installs shipped (never loaded).
+            let stale_hooks = target_root.join("hooks");
+            if stale_hooks.exists() {
+                std::fs::remove_dir_all(&stale_hooks)?;
+            }
+        }
+    }
 
     Ok(PluginRecord {
         root: target_root.to_string_lossy().into_owned(),
@@ -366,7 +355,7 @@ mod tests {
     }
 
     #[test]
-    fn generate_claude_bundle_writes_manifest_skills_and_exec_hooks() {
+    fn generate_claude_bundle_writes_manifest_and_skills_without_hooks() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let exe = "C:\\Program Files\\ai-handoff\\ai-handoff.exe";
@@ -391,35 +380,16 @@ mod tests {
             ]
         );
 
-        // hooks/hooks.json parses with all 4 events.
-        let hooks: Value = serde_json::from_str(&read(root, "hooks/hooks.json")).unwrap();
-        for ev in super::super::claude::EVENTS {
-            assert!(hooks["hooks"][ev].is_array(), "missing claude event {ev}");
-        }
-
-        // Stop hook uses exec form with the abs exe + _aiHandoff.
-        let stop = &hooks["hooks"]["Stop"][0]["hooks"][0];
-        assert_eq!(stop["command"], exe);
-        assert_eq!(stop["args"][0], "hook");
-        assert_eq!(stop["args"][1], "stop");
-        assert_eq!(stop["args"][3], "claude-code");
-        assert_eq!(stop["_aiHandoff"], true);
-        assert_eq!(stop["timeout"], 10);
-
-        // PostToolUse outer entry carries the Claude matcher.
-        assert_eq!(
-            hooks["hooks"]["PostToolUse"][0]["matcher"],
-            "Write|Edit|Bash"
-        );
-        // Non-PostToolUse events have no matcher.
-        assert!(hooks["hooks"]["Stop"][0].get("matcher").is_none());
+        // NO hooks file: Claude never loads hooks from `~/.claude/skills`, so
+        // Claude hooks belong in settings.json (super::claude::apply).
+        assert!(!root.join("hooks").exists());
 
         // Record lists the written relative paths.
         assert_eq!(rec.root, root.to_string_lossy().into_owned());
         assert!(rec
             .files
             .contains(&".claude-plugin/plugin.json".to_string()));
-        assert!(rec.files.contains(&"hooks/hooks.json".to_string()));
+        assert!(!rec.files.contains(&"hooks/hooks.json".to_string()));
         assert!(rec.files.contains(&"skills/handoff/SKILL.md".to_string()));
         assert!(rec
             .files
@@ -430,8 +400,20 @@ mod tests {
         assert!(rec
             .files
             .contains(&"skills/handoff-config/SKILL.md".to_string()));
-        assert_eq!(rec.files.len(), 1 + SKILLS.len() + 1);
+        assert_eq!(rec.files.len(), 1 + SKILLS.len());
         assert!(rec.marketplace_file.is_none());
+    }
+
+    #[test]
+    fn generate_claude_bundle_removes_stale_hooks_from_older_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("hooks")).unwrap();
+        std::fs::write(root.join("hooks/hooks.json"), "{}").unwrap();
+
+        generate_bundle(AgentKind::ClaudeCode, "C:\\p\\ai-handoff.exe", root).unwrap();
+
+        assert!(!root.join("hooks").exists());
     }
 
     #[test]
@@ -534,12 +516,15 @@ mod tests {
         let root = dir.path();
         let exe = "C:\\p\\ai-handoff.exe";
 
-        let first = generate_bundle(AgentKind::ClaudeCode, exe, root).unwrap();
-        let second = generate_bundle(AgentKind::ClaudeCode, exe, root).unwrap();
+        let first = generate_bundle(AgentKind::Codex, exe, root).unwrap();
+        let second = generate_bundle(AgentKind::Codex, exe, root).unwrap();
         assert_eq!(first, second);
         // Files are present and well-formed after the second run.
         let hooks: Value = serde_json::from_str(&read(root, "hooks/hooks.json")).unwrap();
-        assert_eq!(hooks["hooks"]["Stop"][0]["hooks"][0]["command"], exe);
+        assert_eq!(
+            hooks["hooks"]["Stop"][0]["hooks"][0]["command"],
+            format!("\"{exe}\" hook stop --agent codex")
+        );
         // No leftover temp files.
         assert!(!root.join("hooks/hooks.json.ai-handoff.tmp").exists());
     }

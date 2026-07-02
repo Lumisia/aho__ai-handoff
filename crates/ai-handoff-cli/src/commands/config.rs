@@ -157,7 +157,22 @@ mod tests {
         assert!(text.contains("statusline.show = true"));
         assert!(text.contains("triggers.five_hour.mode = ask"));
         assert!(text.contains("language = en"));
+        assert!(text.contains("capsule.language = en"));
         assert!(text.contains("capsule.remaining_max_items = 5"));
+    }
+
+    #[test]
+    fn capsule_language_set_get_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        let (code, text) = run_set(&path, "capsule.language", "ko");
+        assert_eq!(code, 0);
+        assert_eq!(text.trim(), "capsule.language = ko");
+
+        let (code, text) = run_get(&path, "capsule.language");
+        assert_eq!(code, 0);
+        assert_eq!(text.trim(), "ko");
     }
 
     #[test]

@@ -348,7 +348,7 @@ mod tests {
     #[test]
     fn settings_rows_cover_all_keys_with_kinds() {
         let rows = settings_rows(&Config::default());
-        assert_eq!(rows.len(), 19);
+        assert_eq!(rows.len(), 20);
         let threshold = rows
             .iter()
             .find(|r| r.key == "triggers.five_hour.threshold_percent")
@@ -364,6 +364,9 @@ mod tests {
         let format = rows.iter().find(|r| r.key == "capsule.format").unwrap();
         assert_eq!(format.value, "json");
         assert_eq!(format.kind, KeyKind::CapsuleFormat);
+        let language = rows.iter().find(|r| r.key == "capsule.language").unwrap();
+        assert_eq!(language.value, "en");
+        assert_eq!(language.kind, KeyKind::Lang);
         let limit = rows
             .iter()
             .find(|r| r.key == "capsule.remaining_max_items")

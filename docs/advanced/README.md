@@ -16,7 +16,7 @@ This guide explains the details that are intentionally kept out of the beginner 
 
 | Command | Terminal equivalent | Details |
 |---|---|---|
-| `handoff` | `ai-handoff hook session-start --agent <self>` | Fetches and consumes the latest pending capsule for the current project and current agent. |
+| `handoff` | `ai-handoff handoff --agent <self>` | Fetches and consumes the latest pending capsule for the current project and current agent. |
 | `handoff config` | `ai-handoff config list` | Shows editable config keys. Use `ai-handoff config get <key>` and `ai-handoff config set <key> <value>` for direct edits. |
 | `handoff doctor` | `ai-handoff doctor` | Checks plugin state, hook trust, daemon reachability, IPC, store, and common duplicate-hook problems. |
 | `handoff checkpoint` | `ai-handoff checkpoint --message "work snapshot"` | Creates a local capsule from the current task. Use a short message that tells the next agent what the checkpoint is for. |

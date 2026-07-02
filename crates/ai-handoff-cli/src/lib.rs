@@ -36,6 +36,13 @@ pub enum Commands {
         #[arg(long)]
         file: Option<std::path::PathBuf>,
     },
+    /// Consume the pending handoff capsule for this project (the /handoff
+    /// skill's backend). Prints hook-style JSON; `{}` means nothing pending.
+    Handoff {
+        /// The agent consuming the capsule (sets which capsules match).
+        #[arg(long, value_enum, default_value_t = AgentArg::Codex)]
+        agent: AgentArg,
+    },
     Tui,
     Dashboard,
     Install {
@@ -178,6 +185,7 @@ pub fn run_cli(cli: Cli) -> anyhow::Result<i32> {
             agent,
             file,
         }) => commands::checkpoint::run(message, agent, file),
+        Some(Commands::Handoff { agent }) => commands::handoff::run(agent),
         Some(Commands::Dashboard) => commands::dashboard::run(),
         Some(Commands::Install {
             dry_run,
@@ -228,6 +236,24 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_handoff_command_with_agent() {
+        let cli = Cli::try_parse_from(["ai-handoff", "handoff", "--agent", "claude-code"]).unwrap();
+        match cli.command {
+            Some(Commands::Handoff { agent }) => assert_eq!(agent, AgentArg::ClaudeCode),
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        // Bare `handoff` defaults to codex (mirrors the hook command).
+        let bare = Cli::try_parse_from(["ai-handoff", "handoff"]).unwrap();
+        assert!(matches!(
+            bare.command,
+            Some(Commands::Handoff {
+                agent: AgentArg::Codex
+            })
+        ));
     }
 
     #[test]

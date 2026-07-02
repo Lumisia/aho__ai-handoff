@@ -6,6 +6,7 @@ use anyhow::Context;
 use chrono::{SecondsFormat, Utc};
 use serde_json::{json, Value};
 use std::io::{Read, Write};
+use std::time::Duration;
 
 pub fn run(
     message: Option<String>,
@@ -24,7 +25,9 @@ pub fn run(
     }
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
-    Ok(run_io(message, agent, &raw_text, &mut out))
+    Ok(run_io_with_autostart(
+        message, agent, &raw_text, &mut out, true,
+    ))
 }
 
 pub fn run_io(
@@ -32,6 +35,16 @@ pub fn run_io(
     agent: Option<String>,
     raw_text: &str,
     out: &mut dyn Write,
+) -> i32 {
+    run_io_with_autostart(message, agent, raw_text, out, false)
+}
+
+pub fn run_io_with_autostart(
+    message: Option<String>,
+    agent: Option<String>,
+    raw_text: &str,
+    out: &mut dyn Write,
+    autostart_daemon: bool,
 ) -> i32 {
     let input_json = serde_json::from_str::<Value>(raw_text.trim()).unwrap_or(Value::Null);
     let cwd = std::env::current_dir()
@@ -87,12 +100,33 @@ pub fn run_io(
         },
     };
 
-    let resp = send(&req, &ClientConfig::default());
-    let text = serde_json::to_string(&resp.hook_stdout).unwrap_or_else(|_| "{}".to_string());
-    let _ = writeln!(out, "{text}");
+    let mut resp = send(&req, &ClientConfig::default());
+    // Mirror the hook path: a checkpoint must not fail just because the daemon
+    // is not running yet — spawn it and retry once.
+    if autostart_daemon
+        && super::hook::daemon_unavailable(&resp)
+        && super::hook::try_start_daemon().is_ok()
+    {
+        resp = send(
+            &req,
+            &ClientConfig {
+                request_timeout: Duration::from_millis(2500),
+                ..ClientConfig::default()
+            },
+        );
+    }
     if resp.status == Status::Ok {
+        let text = serde_json::to_string(&resp.hook_stdout).unwrap_or_else(|_| "{}".to_string());
+        let _ = writeln!(out, "{text}");
         0
     } else {
+        let text = serde_json::to_string(&json!({
+            "status": resp.status,
+            "warnings": resp.warnings,
+            "diagnostics": resp.diagnostics,
+        }))
+        .unwrap_or_else(|_| r#"{"status":"error"}"#.to_string());
+        let _ = writeln!(out, "{text}");
         1
     }
 }

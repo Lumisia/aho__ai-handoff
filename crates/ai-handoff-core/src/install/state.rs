@@ -124,30 +124,12 @@ pub fn load(ai_home: &Path) -> InstallState {
 }
 
 pub fn save(ai_home: &Path, st: &InstallState) -> std::io::Result<()> {
-    std::fs::create_dir_all(ai_home)?;
+    crate::secure_fs::ensure_private_dir(ai_home)?;
     let p = state_path(ai_home);
     let tmp = p.with_extension("json.tmp");
     let json = serde_json::to_vec_pretty(st)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(&tmp, &json)?;
-    match std::fs::rename(&tmp, &p) {
-        Ok(()) => Ok(()),
-        Err(error) if p.exists() => {
-            std::fs::remove_file(&p)?;
-            std::fs::rename(&tmp, &p).map_err(|second_error| {
-                let _ = std::fs::remove_file(&tmp);
-                if second_error.kind() == std::io::ErrorKind::Other {
-                    error
-                } else {
-                    second_error
-                }
-            })
-        }
-        Err(error) => {
-            let _ = std::fs::remove_file(&tmp);
-            Err(error)
-        }
-    }
+    crate::secure_fs::write_private_atomic(&p, &tmp, &json)
 }
 
 #[cfg(test)]

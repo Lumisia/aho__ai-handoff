@@ -23,6 +23,13 @@ fn doctor_json_reports_daemon_unreachable_and_exits_zero() {
     assert_eq!(code, 0);
     let report: serde_json::Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(report["daemon"], "unreachable");
+    assert!(
+        matches!(
+            report["ipc_permissions"]["status"].as_str(),
+            Some("ok" | "warning")
+        ),
+        "{report}"
+    );
     std::env::remove_var("AI_HANDOFF_HOME");
 }
 
@@ -149,6 +156,22 @@ fn checkpoint_with_daemon_online_writes_capsule() {
         cwd.path().file_name().unwrap().to_string_lossy()
     );
     std::env::set_current_dir(previous_cwd).unwrap();
+    std::env::remove_var("AI_HANDOFF_HOME");
+}
+
+#[test]
+fn checkpoint_offline_reports_daemon_unavailable_in_output() {
+    let _guard = lock();
+    let home = tempfile::tempdir().unwrap();
+    std::env::set_var("AI_HANDOFF_HOME", home.path());
+
+    let mut out = Vec::new();
+    let code = checkpoint::run_io(Some("offline checkpoint".into()), None, "", &mut out);
+    assert_eq!(code, 1);
+    let report: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(report["status"], "degraded");
+    assert_eq!(report["warnings"][0], "daemon_unavailable");
+
     std::env::remove_var("AI_HANDOFF_HOME");
 }
 

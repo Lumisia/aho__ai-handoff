@@ -5,8 +5,9 @@
 //! and best-effort: missing roots yield no events, unreadable files are
 //! skipped. The Claude dedupe set is shared across all Claude files.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use crate::model::UsageEvent;
 use crate::{claude, codex};
@@ -18,6 +19,30 @@ pub struct Roots {
     pub claude_projects: Option<PathBuf>,
     /// Codex log dirs: `<CODEX_HOME>/sessions` and `<CODEX_HOME>/archived_sessions`.
     pub codex_dirs: Vec<PathBuf>,
+}
+
+/// In-memory scan cache keyed by file path and invalidated by mtime + size.
+#[derive(Debug, Default)]
+pub struct ScanCache {
+    files: HashMap<PathBuf, CachedFile>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedFile {
+    fingerprint: FileFingerprint,
+    parsed: ParsedFile,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileFingerprint {
+    len: u64,
+    modified: Option<SystemTime>,
+}
+
+#[derive(Debug, Clone)]
+enum ParsedFile {
+    Claude(Vec<claude::ParsedEvent>),
+    Codex(Vec<UsageEvent>),
 }
 
 /// Resolve the default roots from the user's home dir, honoring `CODEX_HOME`.
@@ -54,9 +79,88 @@ pub fn scan(roots: &Roots) -> Vec<UsageEvent> {
     out
 }
 
+/// Scan all roots using cached parsed events for unchanged JSONL files.
+pub fn scan_cached(roots: &Roots, cache: &mut ScanCache) -> Vec<UsageEvent> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    let mut current = HashSet::new();
+
+    if let Some(root) = &roots.claude_projects {
+        for file in jsonl_files(root) {
+            current.insert(file.clone());
+            if let Some(ParsedFile::Claude(events)) =
+                cached_or_parse(&file, FileKind::Claude, cache)
+            {
+                for parsed in events {
+                    if seen.insert(parsed.key) {
+                        out.push(parsed.event);
+                    }
+                }
+            }
+        }
+    }
+    for dir in &roots.codex_dirs {
+        for file in jsonl_files(dir) {
+            current.insert(file.clone());
+            if let Some(ParsedFile::Codex(events)) = cached_or_parse(&file, FileKind::Codex, cache)
+            {
+                out.extend(events);
+            }
+        }
+    }
+    cache.files.retain(|path, _| current.contains(path));
+    out
+}
+
 /// Convenience: scan the default roots.
 pub fn scan_default() -> Vec<UsageEvent> {
     scan(&default_roots())
+}
+
+fn cached_or_parse(path: &Path, kind: FileKind, cache: &mut ScanCache) -> Option<ParsedFile> {
+    let fingerprint = fingerprint(path)?;
+    if let Some(cached) = cache.files.get(path) {
+        if cached.fingerprint == fingerprint && parsed_kind_matches(&cached.parsed, kind) {
+            return Some(cached.parsed.clone());
+        }
+    }
+    let parsed = match kind {
+        FileKind::Claude => ParsedFile::Claude(claude::parse_file_events(path).ok()?),
+        FileKind::Codex => {
+            let mut events = Vec::new();
+            codex::parse_file(path, &mut events).ok()?;
+            ParsedFile::Codex(events)
+        }
+    };
+    cache.files.insert(
+        path.to_path_buf(),
+        CachedFile {
+            fingerprint,
+            parsed: parsed.clone(),
+        },
+    );
+    Some(parsed)
+}
+
+#[derive(Debug, Clone, Copy)]
+enum FileKind {
+    Claude,
+    Codex,
+}
+
+fn parsed_kind_matches(parsed: &ParsedFile, kind: FileKind) -> bool {
+    matches!(
+        (parsed, kind),
+        (ParsedFile::Claude(_), FileKind::Claude) | (ParsedFile::Codex(_), FileKind::Codex)
+    )
+}
+
+fn fingerprint(path: &Path) -> Option<FileFingerprint> {
+    let metadata = std::fs::metadata(path).ok()?;
+    Some(FileFingerprint {
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+    })
 }
 
 /// Recursively collect every `*.jsonl` file under `root` (returns empty when
@@ -134,6 +238,37 @@ mod tests {
             codex_dirs: vec![PathBuf::from("C:/nope/codex")],
         };
         assert!(scan(&roots).is_empty());
+    }
+
+    #[test]
+    fn scan_cached_reuses_unchanged_files_and_invalidates_changed_or_deleted_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let codex = dir.path().join(".codex/sessions/2026/06/17");
+        std::fs::create_dir_all(&codex).unwrap();
+        let path = codex.join("rollout-x.jsonl");
+        let line1 = r#"{"timestamp":"2026-06-17T14:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":2,"total_tokens":12}}}}"#;
+        let line2 = r#"{"timestamp":"2026-06-17T14:01:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":20,"cached_input_tokens":5,"output_tokens":3,"total_tokens":23}}}}"#;
+        std::fs::write(&path, format!("{line1}\n")).unwrap();
+        let roots = Roots {
+            claude_projects: None,
+            codex_dirs: vec![dir.path().join(".codex/sessions")],
+        };
+        let mut cache = ScanCache::default();
+
+        let first = scan_cached(&roots, &mut cache);
+        let second = scan_cached(&roots, &mut cache);
+        assert_eq!(first, second);
+        assert_eq!(second.len(), 1);
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&path, format!("{line1}\n{line2}\n")).unwrap();
+        let changed = scan_cached(&roots, &mut cache);
+        assert_eq!(changed.len(), 2);
+        assert_eq!(changed[1].tokens.cache_read, 5);
+
+        std::fs::remove_file(&path).unwrap();
+        let deleted = scan_cached(&roots, &mut cache);
+        assert!(deleted.is_empty());
     }
 
     #[test]

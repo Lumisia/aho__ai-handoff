@@ -5,6 +5,7 @@
 //! a Settings save, writes config) so the interaction logic is unit-testable
 //! without a TTY. The draw + event loop are the thin, untested shell.
 
+use std::cell::Cell as StdCell;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -97,6 +98,7 @@ fn setting_desc(key: &str) -> String {
         "statusline.show" => "setting.statusline",
         "language" => "setting.language",
         "capsule.format" => "setting.capsule_format",
+        "capsule.language" => "setting.capsule_language",
         "capsule.next_prompt_max_items" => "setting.capsule_next_prompt_max_items",
         "capsule.remaining_max_items" => "setting.capsule_remaining_max_items",
         "capsule.done_max_items" => "setting.capsule_done_max_items",
@@ -110,6 +112,33 @@ fn setting_desc(key: &str) -> String {
         _ => return String::new(),
     };
     t!(desc_key).into_owned()
+}
+
+fn setting_label(key: &str) -> String {
+    let label_key = match key {
+        "triggers.five_hour.enabled" => "setting_label.five_hour_enabled",
+        "triggers.five_hour.threshold_percent" => "setting_label.threshold",
+        "triggers.five_hour.mode" => "setting_label.mode",
+        "triggers.five_hour.burn_rate.enabled" => "setting_label.burn_enabled",
+        "triggers.five_hour.burn_rate.runway_minutes" => "setting_label.runway",
+        "autostart.enabled" => "setting_label.autostart",
+        "statusline.show" => "setting_label.statusline",
+        "language" => "setting_label.language",
+        "capsule.format" => "setting_label.capsule_format",
+        "capsule.language" => "setting_label.capsule_language",
+        "capsule.next_prompt_max_items" => "setting_label.capsule_next_prompt_max_items",
+        "capsule.remaining_max_items" => "setting_label.capsule_remaining_max_items",
+        "capsule.done_max_items" => "setting_label.capsule_done_max_items",
+        "capsule.risks_max_items" => "setting_label.capsule_risks_max_items",
+        "theme.preset" => "setting_label.theme_preset",
+        "theme.codex_color" => "setting_label.theme_codex_color",
+        "theme.claude_color" => "setting_label.theme_claude_color",
+        "theme.focus_border_color" => "setting_label.theme_focus_border_color",
+        "theme.selection_bg_color" => "setting_label.theme_selection_bg_color",
+        "theme.selection_fg_color" => "setting_label.theme_selection_fg_color",
+        _ => return key.to_string(),
+    };
+    t!(label_key).into_owned()
 }
 
 /// The quit-confirmation hint, in the active language.
@@ -501,6 +530,10 @@ pub struct App {
     cap_confirm_delete: bool,
     /// The working buffer while editing a capsule field.
     cap_edit_buf: String,
+    /// Byte cursor in `cap_edit_buf`; always kept on a UTF-8 char boundary.
+    cap_edit_cursor: usize,
+    /// Last rendered editor content width, used for visual-line cursor movement.
+    cap_edit_wrap_width: StdCell<usize>,
     /// Cached parsed/raw detail of the currently-selected capsule.
     cap_detail: Option<CapDetail>,
     status: String,
@@ -523,7 +556,7 @@ struct SettingCategory {
     desc_key: &'static str,
 }
 
-const SETTING_CATEGORIES: [SettingCategory; 9] = [
+const SETTING_CATEGORIES: [SettingCategory; 10] = [
     SettingCategory {
         key: "settings.category.all",
         desc_key: "settings.category_desc.all",
@@ -547,6 +580,10 @@ const SETTING_CATEGORIES: [SettingCategory; 9] = [
     SettingCategory {
         key: "settings.category.display",
         desc_key: "settings.category_desc.display",
+    },
+    SettingCategory {
+        key: "settings.category.language",
+        desc_key: "settings.category_desc.language",
     },
     SettingCategory {
         key: "settings.category.security",
@@ -624,6 +661,8 @@ impl App {
             cap_field: 0,
             cap_confirm_delete: false,
             cap_edit_buf: String::new(),
+            cap_edit_cursor: 0,
+            cap_edit_wrap_width: StdCell::new(80),
             cap_detail: None,
             status: default_hint(),
             should_quit: false,
@@ -747,7 +786,8 @@ impl App {
         if account::login_complete(poll.agent, &poll.home) {
             let (agent, home) = (poll.agent, poll.home.clone());
             self.login_poll = None;
-            let status = match account::capture_login(agent, &home, "official-cli-login") {
+            let status = match account::capture_login_as_active(agent, &home, "official-cli-login")
+            {
                 Ok(label) => t!("status.account_captured", label = label).into_owned(),
                 Err(e) => t!("status.account_capture_failed", err = e.to_string()).into_owned(),
             };
@@ -1511,10 +1551,49 @@ impl App {
                 self.cap_focus = CapFocus::Detail;
                 self.status = t!("status.edit_cancelled").into_owned();
             }
-            KeyCode::Backspace => {
-                self.cap_edit_buf.pop();
+            KeyCode::Left => {
+                self.cap_edit_cursor = prev_char_boundary(&self.cap_edit_buf, self.cap_edit_cursor);
             }
-            KeyCode::Char(c) => self.cap_edit_buf.push(c),
+            KeyCode::Right => {
+                self.cap_edit_cursor = next_char_boundary(&self.cap_edit_buf, self.cap_edit_cursor);
+            }
+            KeyCode::Up => {
+                self.cap_edit_cursor = move_cursor_vertical_wrapped(
+                    &self.cap_edit_buf,
+                    self.cap_edit_cursor,
+                    -1,
+                    self.cap_edit_wrap_width.get(),
+                );
+            }
+            KeyCode::Down => {
+                self.cap_edit_cursor = move_cursor_vertical_wrapped(
+                    &self.cap_edit_buf,
+                    self.cap_edit_cursor,
+                    1,
+                    self.cap_edit_wrap_width.get(),
+                );
+            }
+            KeyCode::Home => self.cap_edit_cursor = 0,
+            KeyCode::End => self.cap_edit_cursor = self.cap_edit_buf.len(),
+            KeyCode::Backspace => {
+                if self.cap_edit_cursor > 0 {
+                    let prev = prev_char_boundary(&self.cap_edit_buf, self.cap_edit_cursor);
+                    self.cap_edit_buf
+                        .replace_range(prev..self.cap_edit_cursor, "");
+                    self.cap_edit_cursor = prev;
+                }
+            }
+            KeyCode::Delete => {
+                if self.cap_edit_cursor < self.cap_edit_buf.len() {
+                    let next = next_char_boundary(&self.cap_edit_buf, self.cap_edit_cursor);
+                    self.cap_edit_buf
+                        .replace_range(self.cap_edit_cursor..next, "");
+                }
+            }
+            KeyCode::Char(c) => {
+                self.cap_edit_buf.insert(self.cap_edit_cursor, c);
+                self.cap_edit_cursor += c.len_utf8();
+            }
             _ => {}
         }
     }
@@ -1557,6 +1636,7 @@ impl App {
         match current {
             Some(text) => {
                 self.cap_edit_buf = text;
+                self.cap_edit_cursor = self.cap_edit_buf.len();
                 self.cap_focus = CapFocus::Editing;
                 let name = field_label(field);
                 self.status = if field.is_list() {
@@ -2564,6 +2644,8 @@ impl App {
         let detail_active = focused && self.cap_focus == CapFocus::Detail;
 
         if self.cap_focus == CapFocus::Editing {
+            self.cap_edit_wrap_width
+                .set(area.width.saturating_sub(2).max(1) as usize);
             let field = CAP_FIELDS[self.cap_field];
             let hint = if field.is_list() {
                 t!("capsule.edit_hint_list")
@@ -2578,10 +2660,7 @@ impl App {
             let lines = vec![
                 Line::from(banner.into_owned()).italic(),
                 Line::from(""),
-                Line::from(vec![
-                    Span::raw(self.cap_edit_buf.clone()),
-                    Span::styled("▏", Style::default().fg(Color::Cyan)),
-                ]),
+                capsule_editor_cursor_line(&self.cap_edit_buf, self.cap_edit_cursor),
             ];
             let editor = Paragraph::new(lines)
                 .wrap(Wrap { trim: false })
@@ -3668,7 +3747,11 @@ impl App {
             } else {
                 Style::default()
             };
-            Row::new([Cell::from(r.key), Cell::from(r.value.clone())]).style(style)
+            Row::new([
+                Cell::from(setting_label(r.key)),
+                Cell::from(r.value.clone()),
+            ])
+            .style(style)
         });
         let title = format!(
             "{} — {}",
@@ -3716,7 +3799,7 @@ impl App {
                     t!("settings.detail_key").into_owned(),
                     Style::default().add_modifier(Modifier::BOLD),
                 ),
-                Span::raw(format!(" {}", row.key)),
+                Span::raw(format!(" {} ({})", setting_label(row.key), row.key)),
             ]),
             Line::from(vec![
                 Span::styled(
@@ -3998,21 +4081,167 @@ fn status_style(status: &CheckStatus) -> (&'static str, Color) {
 fn setting_category_index(key: &str) -> usize {
     if key.starts_with("triggers.") {
         2
+    } else if key == "capsule.language" {
+        6
     } else if key.starts_with("capsule.") {
         3
     } else if key.starts_with("paths.") {
         4
-    } else if key.starts_with("theme.") || matches!(key, "language" | "statusline.show") {
+    } else if key.starts_with("theme.") || key == "statusline.show" {
         5
-    } else if key.starts_with("security.") {
+    } else if key == "language" {
         6
-    } else if key.starts_with("agents.") {
+    } else if key.starts_with("security.") {
         7
+    } else if key.starts_with("agents.") {
+        8
     } else if key.starts_with("autostart.") {
         1
     } else {
-        8
+        9
     }
+}
+
+fn prev_char_boundary(text: &str, cursor: usize) -> usize {
+    let cursor = cursor.min(text.len());
+    text[..cursor]
+        .char_indices()
+        .last()
+        .map(|(idx, _)| idx)
+        .unwrap_or(0)
+}
+
+fn next_char_boundary(text: &str, cursor: usize) -> usize {
+    let cursor = cursor.min(text.len());
+    if cursor >= text.len() {
+        return text.len();
+    }
+    text[cursor..]
+        .char_indices()
+        .nth(1)
+        .map(|(idx, _)| cursor + idx)
+        .unwrap_or(text.len())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct VisualRow {
+    start: usize,
+    end: usize,
+}
+
+fn move_cursor_vertical_wrapped(
+    text: &str,
+    cursor: usize,
+    direction: i8,
+    wrap_width: usize,
+) -> usize {
+    let cursor = cursor.min(text.len());
+    let rows = visual_rows(text, wrap_width.max(1));
+    if rows.is_empty() {
+        return 0;
+    }
+    let row_idx = rows
+        .iter()
+        .rposition(|row| cursor >= row.start && cursor <= row.end)
+        .unwrap_or(0);
+    let row = rows[row_idx];
+    let column = text[row.start..cursor.min(row.end)].chars().count();
+    let target_idx = if direction < 0 {
+        row_idx.checked_sub(1)
+    } else if row_idx + 1 < rows.len() {
+        Some(row_idx + 1)
+    } else {
+        None
+    };
+    match target_idx {
+        Some(idx) => {
+            let target = rows[idx];
+            cursor_at_column(text, target.start, target.end, column)
+        }
+        None if direction < 0 => 0,
+        None => text.len(),
+    }
+}
+
+fn visual_rows(text: &str, wrap_width: usize) -> Vec<VisualRow> {
+    let mut rows = Vec::new();
+    let width = wrap_width.max(1);
+    let mut line_start = 0;
+    loop {
+        let line_end = text[line_start..]
+            .find('\n')
+            .map(|idx| line_start + idx)
+            .unwrap_or(text.len());
+        push_wrapped_line_rows(text, line_start, line_end, width, &mut rows);
+        if line_end >= text.len() {
+            break;
+        }
+        line_start = line_end + 1;
+    }
+    rows
+}
+
+fn push_wrapped_line_rows(
+    text: &str,
+    line_start: usize,
+    line_end: usize,
+    width: usize,
+    rows: &mut Vec<VisualRow>,
+) {
+    if line_start == line_end {
+        rows.push(VisualRow {
+            start: line_start,
+            end: line_end,
+        });
+        return;
+    }
+    let mut row_start = line_start;
+    let mut columns = 0usize;
+    for (offset, _) in text[line_start..line_end].char_indices() {
+        if columns == width {
+            let idx = line_start + offset;
+            rows.push(VisualRow {
+                start: row_start,
+                end: idx,
+            });
+            row_start = idx;
+            columns = 0;
+        }
+        columns += 1;
+    }
+    rows.push(VisualRow {
+        start: row_start,
+        end: line_end,
+    });
+}
+
+fn cursor_at_column(text: &str, line_start: usize, line_end: usize, column: usize) -> usize {
+    text[line_start..line_end]
+        .char_indices()
+        .nth(column)
+        .map(|(idx, _)| line_start + idx)
+        .unwrap_or(line_end)
+}
+
+fn capsule_editor_cursor_line(text: &str, cursor: usize) -> Line<'static> {
+    let cursor = cursor.min(text.len());
+    let before = text[..cursor].to_string();
+    let after = &text[cursor..];
+    let mut spans = vec![Span::raw(before)];
+    if let Some(ch) = after.chars().next() {
+        let char_len = ch.len_utf8();
+        spans.push(Span::styled(
+            ch.to_string(),
+            Style::default().fg(Color::Black).bg(Color::Cyan),
+        ));
+        spans.push(Span::raw(after[char_len..].to_string()));
+    } else {
+        spans.push(Span::styled(
+            " ",
+            Style::default().fg(Color::Black).bg(Color::Cyan),
+        ));
+    }
+    Line::from(spans)
 }
 
 fn is_selection_color_key(key: &str) -> bool {
@@ -4529,6 +4758,7 @@ mod tests {
                 "settings.category.capsule",
                 "settings.category.paths",
                 "settings.category.display",
+                "settings.category.language",
                 "settings.category.security",
                 "settings.category.agents",
                 "settings.category.advanced",
@@ -4575,6 +4805,21 @@ mod tests {
     }
 
     #[test]
+    fn settings_labels_use_short_translated_names_not_raw_keys() {
+        rust_i18n::set_locale("ko");
+        let cfg = ai_handoff_core::config::Config::default();
+        for row in settings_rows(&cfg) {
+            assert_ne!(
+                setting_label(row.key),
+                row.key,
+                "missing short label for {}",
+                row.key
+            );
+        }
+        rust_i18n::set_locale("en");
+    }
+
+    #[test]
     fn settings_categories_follow_design_doc_order() {
         let keys: Vec<&str> = SETTING_CATEGORIES.iter().map(|c| c.key).collect();
         assert_eq!(
@@ -4586,6 +4831,7 @@ mod tests {
                 "settings.category.capsule",
                 "settings.category.paths",
                 "settings.category.display",
+                "settings.category.language",
                 "settings.category.security",
                 "settings.category.agents",
                 "settings.category.advanced",
@@ -5136,10 +5382,19 @@ mod tests {
         app.on_key(key(KeyCode::Char('e')));
         assert_eq!(app.cap_focus, CapFocus::Editing);
         assert_eq!(app.cap_edit_buf, "old goal");
+        assert_eq!(app.cap_edit_cursor, "old goal".len());
+        for _ in 0..5 {
+            app.on_key(key(KeyCode::Left));
+        }
         app.on_key(key(KeyCode::Char('!')));
+        assert_eq!(app.cap_edit_buf, "old! goal");
+        assert_eq!(app.cap_edit_cursor, 4);
+        app.on_key(key(KeyCode::Right));
+        app.on_key(key(KeyCode::Delete));
+        assert_eq!(app.cap_edit_buf, "old! oal");
         app.on_key(key(KeyCode::Enter));
         let on_disk: Capsule = serde_json::from_slice(&std::fs::read(&cap_path).unwrap()).unwrap();
-        assert_eq!(on_disk.summary.goal, "old goal!");
+        assert_eq!(on_disk.summary.goal, "old! oal");
         assert_eq!(app.cap_focus, CapFocus::Detail);
 
         // Delete needs a confirm; then the file and the tree entry are gone.
@@ -5148,6 +5403,45 @@ mod tests {
         app.on_key(key(KeyCode::Char('d')));
         assert!(!cap_path.exists());
         assert!(app.cap_tree.is_empty());
+    }
+
+    #[test]
+    fn capsule_field_editor_arrow_keys_move_cursor_by_line_and_char() {
+        let mut app = test_app();
+        app.tab = Tab::Capsule;
+        app.focus_content = true;
+        app.cap_focus = CapFocus::Editing;
+        app.cap_edit_buf = "alpha\nbeta\ncharlie".to_string();
+        app.cap_edit_cursor = "alpha\nbeta\ncharlie".len();
+
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(&app.cap_edit_buf[app.cap_edit_cursor..], "\ncharlie");
+        app.on_key(key(KeyCode::Left));
+        assert_eq!(&app.cap_edit_buf[app.cap_edit_cursor..], "a\ncharlie");
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(&app.cap_edit_buf[app.cap_edit_cursor..], "rlie");
+        app.on_key(key(KeyCode::Home));
+        assert_eq!(app.cap_edit_cursor, 0);
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(&app.cap_edit_buf[app.cap_edit_cursor..], "beta\ncharlie");
+    }
+
+    #[test]
+    fn capsule_field_editor_up_down_follow_wrapped_visual_lines() {
+        let mut app = test_app();
+        app.tab = Tab::Capsule;
+        app.focus_content = true;
+        app.cap_focus = CapFocus::Editing;
+        app.cap_edit_wrap_width.set(10);
+        app.cap_edit_buf = "abcdefghijABCDEFGHIJklmnopqrst".to_string();
+        app.cap_edit_cursor = 15;
+
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.cap_edit_cursor, 5);
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.cap_edit_cursor, 15);
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.cap_edit_cursor, 25);
     }
 
     #[test]

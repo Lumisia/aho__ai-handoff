@@ -139,6 +139,29 @@ pub fn record_claude_rate_limit(input: &serde_json::Value, now_ms: i64) -> bool 
     }
 }
 
+/// How old a sample without a `resets_at` may be and still drive the trigger.
+const TRIGGER_STRICT_FRESHNESS_MS: i64 = 10 * 60 * 1000;
+
+/// The Claude `used_percent` the five-hour trigger may act on, or `None` when
+/// nothing trustworthy is recorded.
+///
+/// Within one five-hour window `used_percent` only ever grows, so any sample
+/// whose `resets_at` is still in the future is a valid LOWER BOUND on the
+/// current usage — a stale-but-unexpired sample that already crossed the
+/// threshold means the live value has too. This keeps the trigger working
+/// without any background polling or network fetches (deliberate: the daemon
+/// must never burn CPU or call home while idle). Samples with no `resets_at`
+/// carry no window proof, so they only count when captured recently.
+pub fn claude_used_percent_for_trigger(now_ms: i64) -> Option<f64> {
+    // 24h scan window; read_claude_rate_limit already rejects expired resets_at.
+    let usage = read_claude_rate_limit(24 * 60 * 60 * 1000, now_ms)?;
+    match usage.resets_at {
+        Some(_) => Some(usage.used_percent),
+        None => (now_ms - usage.captured_at <= TRIGGER_STRICT_FRESHNESS_MS)
+            .then_some(usage.used_percent),
+    }
+}
+
 /// Scan all `*.json` files in `paths::rate_limits_dir()` and return the
 /// freshest valid `ClaudeUsage` sample.
 ///
@@ -439,6 +462,64 @@ mod tests {
         );
 
         std::env::remove_var("AI_HANDOFF_HOME");
+
+        // --- trigger helper: stale sample with an open window still counts ---
+        {
+            let trigger_home = tempfile::tempdir().unwrap();
+            std::env::set_var("AI_HANDOFF_HOME", trigger_home.path());
+            let now_ms: i64 = 1_750_000_000_000;
+            let future_reset = (now_ms as f64 / 1000.0) + 3600.0;
+
+            // 2h-old sample, resets_at 1h in the future → monotonic lower
+            // bound, usable despite being far past the strict freshness.
+            let stale_open = make_input(
+                Some("sid-trigger-open"),
+                Some(serde_json::json!(83.0)),
+                Some(serde_json::json!(future_reset)),
+            );
+            assert!(record_claude_rate_limit(
+                &stale_open,
+                now_ms - 2 * 60 * 60 * 1000
+            ));
+            assert_eq!(claude_used_percent_for_trigger(now_ms), Some(83.0));
+
+            // Without resets_at the same age is NOT trusted...
+            let trigger_home2 = tempfile::tempdir().unwrap();
+            std::env::set_var("AI_HANDOFF_HOME", trigger_home2.path());
+            let no_reset = make_input(
+                Some("sid-trigger-bare"),
+                Some(serde_json::json!(90.0)),
+                None,
+            );
+            assert!(record_claude_rate_limit(
+                &no_reset,
+                now_ms - 2 * 60 * 60 * 1000
+            ));
+            assert_eq!(claude_used_percent_for_trigger(now_ms), None);
+
+            // ...but a recent capture without resets_at is.
+            let trigger_home3 = tempfile::tempdir().unwrap();
+            std::env::set_var("AI_HANDOFF_HOME", trigger_home3.path());
+            let fresh_bare = make_input(
+                Some("sid-trigger-fresh"),
+                Some(serde_json::json!(70.0)),
+                None,
+            );
+            assert!(record_claude_rate_limit(&fresh_bare, now_ms - 60_000));
+            assert_eq!(claude_used_percent_for_trigger(now_ms), Some(70.0));
+
+            // An expired window yields nothing (read layer drops it).
+            let trigger_home4 = tempfile::tempdir().unwrap();
+            std::env::set_var("AI_HANDOFF_HOME", trigger_home4.path());
+            let expired = make_input(
+                Some("sid-trigger-expired"),
+                Some(serde_json::json!(99.0)),
+                Some(serde_json::json!((now_ms as f64 / 1000.0) - 1.0)),
+            );
+            assert!(record_claude_rate_limit(&expired, now_ms - 60_000));
+            assert_eq!(claude_used_percent_for_trigger(now_ms), None);
+            std::env::remove_var("AI_HANDOFF_HOME");
+        }
 
         // --- missing dir → read returns None ---
         // Point AI_HANDOFF_HOME to a directory with no rate-limits subdir.

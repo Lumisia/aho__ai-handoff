@@ -8,11 +8,13 @@ pub trait Handler {
 }
 
 pub fn serve_once(handler: &dyn Handler) -> usize {
-    let _ = std::fs::create_dir_all(requests_dir());
-    let _ = std::fs::create_dir_all(responses_dir());
-    let _ = std::fs::create_dir_all(dead_letter_dir());
-
     let Ok(entries) = std::fs::read_dir(requests_dir()) else {
+        // Request dir missing (first run, or wiped mid-run): (re)create the IPC
+        // dirs once and report no work. The next poll serves normally. Keeping
+        // the ensure/harden calls OUT of the success path matters: on Windows
+        // each hardening spawns icacls.exe, and doing that per poll turned the
+        // idle daemon into a constant process-spawn loop.
+        ensure_ipc_dirs();
         return 0;
     };
 
@@ -44,11 +46,36 @@ pub fn serve_once(handler: &dyn Handler) -> usize {
     processed
 }
 
+/// The idle-poll ceiling for [`serve_forever`]'s adaptive backoff. Clients wait
+/// up to 1.5s for a response by default, so a 400ms worst-case pickup delay
+/// stays well inside that budget while keeping the idle daemon near-silent.
+const MAX_IDLE_POLL: Duration = Duration::from_millis(400);
+
 pub fn serve_forever(handler: &dyn Handler, poll: Duration) -> ! {
+    ensure_ipc_dirs();
+    let max_poll = MAX_IDLE_POLL.max(poll);
+    let mut current = poll;
     loop {
-        serve_once(handler);
-        std::thread::sleep(poll);
+        if serve_once(handler) > 0 {
+            // Active burst: snap back to the fast poll for low hook latency.
+            current = poll;
+        } else {
+            // Idle: back off exponentially so a quiet daemon costs almost
+            // nothing (no dir scans 40×/sec in the background).
+            current = (current * 2).min(max_poll);
+        }
+        std::thread::sleep(current);
     }
+}
+
+/// Create + harden every IPC directory. Called once at daemon startup and
+/// again only if the request dir disappears — never in the hot poll loop.
+fn ensure_ipc_dirs() {
+    let _ = ai_handoff_core::secure_fs::ensure_private_dir(&ai_handoff_core::paths::home());
+    let _ = ai_handoff_core::secure_fs::ensure_private_dir(&ai_handoff_core::paths::ipc_dir());
+    let _ = ai_handoff_core::secure_fs::ensure_private_dir(&requests_dir());
+    let _ = ai_handoff_core::secure_fs::ensure_private_dir(&responses_dir());
+    let _ = ai_handoff_core::secure_fs::ensure_private_dir(&dead_letter_dir());
 }
 
 fn is_request_file(path: &Path) -> bool {
@@ -57,22 +84,23 @@ fn is_request_file(path: &Path) -> bool {
 
 fn write_response(resp: &Response) -> std::io::Result<()> {
     let dir = responses_dir();
-    std::fs::create_dir_all(&dir)?;
+    ai_handoff_core::secure_fs::ensure_private_dir(&dir)?;
     let path = dir.join(format!("{}.json", resp.request_id));
     let tmp = dir.join(format!("{}.json.tmp", resp.request_id));
     let bytes = serde_json::to_vec(resp)?;
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(tmp, path)?;
+    ai_handoff_core::secure_fs::write_private_atomic(&path, &tmp, &bytes)?;
     Ok(())
 }
 
 fn move_to_dead_letter(path: &Path) {
-    let _ = std::fs::create_dir_all(dead_letter_dir());
+    let _ = ai_handoff_core::secure_fs::ensure_private_dir(&dead_letter_dir());
     if let Some(name) = path.file_name() {
         let dest = dead_letter_dir().join(name);
         let _ = std::fs::remove_file(&dest);
         if std::fs::rename(path, &dest).is_err() {
             let _ = std::fs::remove_file(path);
+        } else {
+            let _ = ai_handoff_core::secure_fs::harden_private_file(&dest);
         }
     }
 }

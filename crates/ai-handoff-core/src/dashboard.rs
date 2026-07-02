@@ -360,13 +360,35 @@ fn read_install_summary(home: &Path) -> InstallSummary {
 
 fn check_dir(id: &str, label: &str, path: &Path) -> CheckRow {
     match fs::metadata(path) {
-        Ok(meta) if meta.is_dir() => CheckRow {
-            id: id.into(),
-            label: label.into(),
-            status: CheckStatus::Ok,
-            message: "present".into(),
-            path: Some(path.to_string_lossy().into_owned()),
-        },
+        Ok(meta) if meta.is_dir() => {
+            let permissions = crate::secure_fs::private_dir_status(path);
+            let (status, message) = match permissions.status {
+                crate::secure_fs::PermissionStatus::Ok => {
+                    (CheckStatus::Ok, format!("present; {}", permissions.message))
+                }
+                crate::secure_fs::PermissionStatus::Warning => (
+                    CheckStatus::Warning,
+                    format!("present but permissions are broad: {}", permissions.message),
+                ),
+                crate::secure_fs::PermissionStatus::Error => (
+                    CheckStatus::Error,
+                    format!(
+                        "present but permissions could not be checked: {}",
+                        permissions.message
+                    ),
+                ),
+                crate::secure_fs::PermissionStatus::Missing => {
+                    (CheckStatus::Missing, "missing".into())
+                }
+            };
+            CheckRow {
+                id: id.into(),
+                label: label.into(),
+                status,
+                message,
+                path: Some(path.to_string_lossy().into_owned()),
+            }
+        }
         Ok(_) => CheckRow {
             id: id.into(),
             label: label.into(),

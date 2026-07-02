@@ -16,7 +16,7 @@
 
 | 명령어 | 터미널 명령 | 설명 |
 |---|---|---|
-| `handoff` | `ai-handoff hook session-start --agent <self>` | 현재 프로젝트와 현재 에이전트에 맞는 최신 대기 캡슐을 받아오고 소비 처리합니다. |
+| `handoff` | `ai-handoff handoff --agent <self>` | 현재 프로젝트와 현재 에이전트에 맞는 최신 대기 캡슐을 받아오고 소비 처리합니다. |
 | `handoff config` | `ai-handoff config list` | 수정 가능한 config key를 보여줍니다. 직접 수정할 때는 `ai-handoff config get <key>`와 `ai-handoff config set <key> <value>`를 씁니다. |
 | `handoff doctor` | `ai-handoff doctor` | plugin 상태, hook 신뢰 상태, daemon 연결, IPC, store, 중복 hook 문제를 점검합니다. |
 | `handoff checkpoint` | `ai-handoff checkpoint --message "work snapshot"` | 현재 작업에서 로컬 캡슐을 만듭니다. 다음 에이전트가 왜 이 checkpoint를 봐야 하는지 짧게 적습니다. |

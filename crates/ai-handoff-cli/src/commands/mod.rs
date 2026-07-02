@@ -5,6 +5,7 @@ pub mod config;
 pub mod daemon;
 pub mod dashboard;
 pub mod doctor;
+pub mod handoff;
 pub mod hook;
 pub mod install;
 pub mod launcher;

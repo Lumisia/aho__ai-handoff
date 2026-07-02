@@ -68,14 +68,15 @@ fn cleanup_response(request_id: &str) {
 
 fn write_request(req: &Request) -> std::io::Result<()> {
     let dir = requests_dir();
-    std::fs::create_dir_all(&dir)?;
-    std::fs::create_dir_all(responses_dir())?;
+    // No explicit ensure calls here: `write_private_atomic` creates + hardens
+    // the parent dir itself, and the daemon hardens the full IPC tree at
+    // startup. Hooks fire on every tool call, and each Windows hardening
+    // spawns icacls.exe — four redundant spawns per hook add real latency.
 
     let path = dir.join(format!("{}.json", req.request_id));
     let tmp = dir.join(format!("{}.json.tmp", req.request_id));
     let bytes = serde_json::to_vec(req)?;
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(tmp, path)?;
+    ai_handoff_core::secure_fs::write_private_atomic(&path, &tmp, &bytes)?;
     Ok(())
 }
 

@@ -3,6 +3,9 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+const releaseWorkflow = readFileSync(join(root, '.github/workflows/release.yml'), 'utf8');
+const installSh = readFileSync(join(root, 'scripts/install.sh'), 'utf8');
+const installPs1 = readFileSync(join(root, 'scripts/install.ps1'), 'utf8');
 const required = [
   '.claude-plugin/plugin.json', '.codex-plugin/plugin.json',
   '.claude-plugin/marketplace.json', '.agents/plugins/marketplace.json',
@@ -38,5 +41,26 @@ for (const [label, market] of [['claude', claudeMarket], ['codex', codexMarket]]
   if (!(market.plugins || []).some((entry) => entry.name === claude.name)) {
     throw new Error(`${label} marketplace does not list plugin ${claude.name}`);
   }
+}
+for (const target of [
+  'linux-x86_64',
+  'linux-aarch64',
+  'darwin-aarch64',
+  'darwin-x86_64',
+  'windows-x86_64',
+  'windows-aarch64',
+]) {
+  if (!releaseWorkflow.includes(`target_name: ${target}`)) {
+    throw new Error(`release workflow missing target: ${target}`);
+  }
+}
+if (!releaseWorkflow.includes('.sha256') || !releaseWorkflow.includes('Get-FileHash')) {
+  throw new Error('release workflow must publish sha256 checksum files');
+}
+if (!installSh.includes('.sha256') || !installSh.includes('sha256sum') || !installSh.includes('shasum -a 256')) {
+  throw new Error('install.sh must verify sha256 checksums');
+}
+if (!installPs1.includes('.sha256') || !installPs1.includes('Get-FileHash')) {
+  throw new Error('install.ps1 must verify sha256 checksums');
 }
 process.stdout.write(`package valid: ${claude.name}@${claude.version} (marketplace: ${claudeMarket.name})\n`);

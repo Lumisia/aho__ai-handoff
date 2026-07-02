@@ -71,6 +71,23 @@ pub fn fetch_slot_usage(agent: Agent, label: &str) -> Result<UsageData, String> 
     }
 }
 
+/// Fetch usage for the live (active) account, using its own credential file.
+/// Backs the GUI/CLI status views when no local sample is available (Claude
+/// statusline samples only exist while a session is running).
+pub fn fetch_live_usage(agent: Agent) -> Result<UsageData, String> {
+    match agent {
+        Agent::Codex => {
+            let (token, account_id) =
+                account::codex_request_auth().ok_or("not signed in to Codex")?;
+            fetch_usage(&token, account_id.as_deref())
+        }
+        Agent::Claude => {
+            let (token, plan) = account::claude_live_oauth().ok_or("not signed in to Claude")?;
+            fetch_claude_usage(&token, plan)
+        }
+    }
+}
+
 fn fetch_usage(access_token: &str, account_id: Option<&str>) -> Result<UsageData, String> {
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(4))

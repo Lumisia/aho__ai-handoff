@@ -16,6 +16,13 @@ use sha2::{Digest, Sha256};
 
 use crate::model::{local_day, Source, Tokens, UsageEvent};
 
+/// Parsed Claude event plus the stable dedupe key used across transcript files.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedEvent {
+    pub key: String,
+    pub event: UsageEvent,
+}
+
 /// Parse one Claude session file, appending [`UsageEvent`]s to `out` and
 /// recording dedupe keys in `seen` (shared across files). A missing file or an
 /// unreadable line is skipped, never fatal.
@@ -24,27 +31,34 @@ pub fn parse_file(
     seen: &mut HashSet<String>,
     out: &mut Vec<UsageEvent>,
 ) -> std::io::Result<()> {
-    let file = std::fs::File::open(path)?;
-    let reader = BufReader::new(file);
-    let path_str = path.to_string_lossy();
-    for (lineno, line) in reader.lines().enumerate() {
-        let Ok(line) = line else { continue };
-        if line.trim().is_empty() {
-            continue;
-        }
-        if let Some(ev) = parse_line(&line, &path_str, lineno, seen) {
-            out.push(ev);
+    for parsed in parse_file_events(path)? {
+        if seen.insert(parsed.key) {
+            out.push(parsed.event);
         }
     }
     Ok(())
 }
 
-fn parse_line(
-    line: &str,
-    path: &str,
-    lineno: usize,
-    seen: &mut HashSet<String>,
-) -> Option<UsageEvent> {
+/// Parse one Claude session file without applying cross-file dedupe. The caller
+/// can reuse the returned keys when merging cached file results.
+pub fn parse_file_events(path: &Path) -> std::io::Result<Vec<ParsedEvent>> {
+    let file = std::fs::File::open(path)?;
+    let reader = BufReader::new(file);
+    let path_str = path.to_string_lossy();
+    let mut out = Vec::new();
+    for (lineno, line) in reader.lines().enumerate() {
+        let Ok(line) = line else { continue };
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Some(ev) = parse_line(&line, &path_str, lineno) {
+            out.push(ev);
+        }
+    }
+    Ok(out)
+}
+
+fn parse_line(line: &str, path: &str, lineno: usize) -> Option<ParsedEvent> {
     let v: Value = serde_json::from_str(line).ok()?;
     let msg = v.get("message")?;
     let usage = msg.get("usage")?;
@@ -53,9 +67,6 @@ fn parse_line(
         Some(id) => hash(&["claude", id]),
         None => hash(&["claude-fallback", path, &lineno.to_string(), line]),
     };
-    if !seen.insert(key) {
-        return None; // already counted
-    }
 
     let model = msg
         .get("model")
@@ -86,13 +97,16 @@ fn parse_line(
         output: u("output_tokens"),
     };
 
-    Some(UsageEvent {
-        source: Source::Claude,
-        project,
-        session,
-        model,
-        day,
-        tokens,
+    Some(ParsedEvent {
+        key,
+        event: UsageEvent {
+            source: Source::Claude,
+            project,
+            session,
+            model,
+            day,
+            tokens,
+        },
     })
 }
 

@@ -115,11 +115,10 @@ pub fn plan_install(
     }
 
     if agents.claude {
-        // In plugin mode the bundle carries hooks, so settings only gets the
-        // statusLine; in legacy mode we preview the settings `hooks` patch too.
-        let settings_base = if plugin {
-            claude_settings_existing.clone()
-        } else {
+        // Claude loads hooks only from settings.json (or a real plugin install),
+        // NOT from the `~/.claude/skills` bundle — so the settings `hooks` patch
+        // applies in BOTH modes. The bundle only carries skills.
+        let settings_base = {
             let (after, _events) = claude::apply(claude_settings_existing.as_deref(), &exe)?;
             Some(after)
         };
@@ -224,17 +223,19 @@ fn remove_managed_statusline_previous(
 /// back up each target, write the new text, and record exactly what we changed
 /// into the state so [`apply_uninstall`] can later undo precisely those edits.
 ///
-/// `plugin` selects how lifecycle hooks are delivered:
-/// - `true` (default): drop a generated plugin bundle per agent (Claude
-///   auto-loads `~/.claude/skills/ai-handoff`; Codex gets a bundle in
-///   `~/.agents/plugins/ai-handoff` + a `marketplace.json` entry + the
-///   `[plugins."ai-handoff@..."] enabled = true` toggle). The direct
-///   `hooks.json` / settings `hooks` patches are NOT written.
+/// `plugin` selects how CODEX lifecycle hooks are delivered:
+/// - `true` (default): Codex gets a bundle in `~/.agents/plugins/ai-handoff` +
+///   a `marketplace.json` entry + the `[plugins."ai-handoff@..."] enabled =
+///   true` toggle; the direct Codex `hooks.json` patch is NOT written. Claude
+///   additionally gets a skills bundle at `~/.claude/skills/ai-handoff`
+///   (skills only — Claude never loads hooks from the skills dir).
 /// - `false` (`--no-plugin`): the legacy behavior — patch Codex `hooks.json`
-///   and Claude settings `hooks` directly, with NO bundle or marketplace work.
+///   directly, with NO bundle or marketplace work.
 ///
-/// In BOTH modes the Claude statusLine and the Codex `writable_roots` / env are
-/// applied directly, exactly as before.
+/// In BOTH modes the Claude settings `hooks` patch, the Claude statusLine, and
+/// the Codex `writable_roots` / env are applied directly. Claude hooks MUST go
+/// through settings.json: a bundle under `~/.claude/skills` is not a plugin,
+/// so a hooks file there would never fire.
 ///
 /// Scheduled-task registration is the CLI's responsibility, not ours.
 pub fn apply_install(
@@ -285,11 +286,11 @@ pub fn apply_install(
     // --- Claude: parse/compute everything (no writes yet) ---
     let claude_pending = if agents.claude {
         let settings_existing = read_existing(&t.claude_settings)?;
-        // In plugin mode the bundle carries hooks, so settings only gets the
-        // statusLine; in legacy mode we patch the settings `hooks` first.
-        let (settings_base, settings_events) = if plugin {
-            (settings_existing.clone(), Vec::new())
-        } else {
+        // Claude only loads hooks from settings.json (or a real plugin managed
+        // by Claude's own plugin system) — never from the `~/.claude/skills`
+        // bundle. Patch the settings `hooks` in BOTH modes; the bundle exists
+        // solely to auto-load skills.
+        let (settings_base, settings_events) = {
             let (after, events) = claude::apply(settings_existing.as_deref(), &exe)?;
             (Some(after), events)
         };
@@ -887,12 +888,13 @@ mod tests {
 
         let st = apply_install(&t, &agents, Utc::now(), true).unwrap();
 
-        // Bundles exist at both plugin dirs.
+        // Bundles exist at both plugin dirs. The Claude bundle carries skills
+        // only — Claude never loads hooks from the skills dir.
         assert!(t
             .claude_plugin_dir
             .join(".claude-plugin/plugin.json")
             .exists());
-        assert!(t.claude_plugin_dir.join("hooks/hooks.json").exists());
+        assert!(!t.claude_plugin_dir.join("hooks/hooks.json").exists());
         assert!(t.claude_plugin_dir.join("skills/handoff/SKILL.md").exists());
         assert!(t
             .claude_plugin_dir
@@ -971,15 +973,18 @@ mod tests {
         assert!(!t.codex_hooks.exists());
         assert!(st.codex.hooks_file.is_none());
 
-        // Claude settings has the statusLine but NO managed `hooks` entry.
+        // Claude settings has the statusLine AND the managed `hooks` entries —
+        // settings.json is the only place Claude actually loads hooks from.
         let cs: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&t.claude_settings).unwrap()).unwrap();
         assert_eq!(
             cs["statusLine"]["command"],
             "\"C:/p/ai-handoff.exe\" statusline"
         );
-        assert!(cs.get("hooks").is_none());
-        assert!(st.claude.managed_hook_events.is_empty());
+        assert!(cs["hooks"]["Stop"][0]["hooks"][0]["_aiHandoff"]
+            .as_bool()
+            .unwrap());
+        assert_eq!(st.claude.managed_hook_events.len(), 4);
     }
 
     #[test]

@@ -11,8 +11,8 @@ use ai_handoff_core::{
     fingerprint::fingerprint,
     hook_event::{normalize, HookEventKind},
     redaction::redact,
-    sensor::used_percent_from_jsonl,
-    trigger::{evaluate_trigger, TriggerMode},
+    sensor::{claude_used_percent_for_trigger, used_percent_from_jsonl},
+    trigger::{evaluate_trigger, TriggerAction, TriggerMode},
 };
 use ai_handoff_ipc::{
     protocol::{degraded, Response, Status, VERSION},
@@ -24,13 +24,26 @@ use std::sync::Mutex;
 
 pub struct Router {
     deduper: Mutex<Deduper>,
+    /// Once-per-session marks: threshold-trigger firings and pending-capsule
+    /// notices, keyed by `<kind>:<agent>:<session_id-or-project_id>`.
+    session_marks: Mutex<Deduper>,
 }
 
 impl Router {
     pub fn new() -> Self {
         Self {
             deduper: Mutex::new(Deduper::new(1024)),
+            session_marks: Mutex::new(Deduper::new(1024)),
         }
+    }
+
+    /// Record a once-per-session mark. Returns `true` when the mark was
+    /// already present (i.e. the action already happened this session).
+    fn mark_seen(&self, key: &str) -> bool {
+        self.session_marks
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .check_and_record(key)
     }
 
     fn ok(
@@ -63,6 +76,9 @@ impl Handler for Router {
         if req.kind == "checkpoint" {
             return handle_checkpoint(req);
         }
+        if req.kind == "handoff_consume" {
+            return handle_handoff_consume(req);
+        }
         if req.kind != "hook_event" {
             return degraded(&req.request_id, "unsupported_request");
         }
@@ -90,34 +106,40 @@ impl Handler for Router {
 
         match event {
             HookEventKind::SessionStart | HookEventKind::UserPromptSubmit => {
+                // A pending capsule is only announced, never consumed here —
+                // consumption is explicit via `ai-handoff handoff` (/handoff).
                 if let Some(capsule) = find_pending(&project_id) {
                     if capsule.target_agent == normalized.agent {
-                        let context = render_capsule_context(&capsule);
-                        let _ = mark_consumed(
-                            &project_id,
-                            &capsule.capsule_id,
-                            normalized.agent.clone(),
-                            Utc::now(),
-                        );
-                        return Self::ok(
-                            req,
-                            json!({
-                                "hookSpecificOutput": {
-                                    "hookEventName": hook_event_name(event),
-                                    "additionalContext": context,
-                                }
-                            }),
-                            json!({}),
-                        );
+                        let mark = session_mark_key("notice", &req.agent, &normalized, &project_id);
+                        if !self.mark_seen(&mark) {
+                            return Self::ok(
+                                req,
+                                json!({
+                                    "hookSpecificOutput": {
+                                        "hookEventName": hook_event_name(event),
+                                        "additionalContext": render_pending_notice(&capsule),
+                                    }
+                                }),
+                                json!({ "pending_notice": true }),
+                            );
+                        }
                     }
                 }
                 Self::ok(req, json!({}), json!({}))
             }
             HookEventKind::PostToolUse => {
-                let used = normalized
-                    .transcript_path
-                    .as_deref()
-                    .and_then(used_percent_from_jsonl);
+                let used = match normalized.agent {
+                    // Claude usage comes from statusline samples (a sample
+                    // whose 5h window is still open is a valid lower bound);
+                    // the Claude transcript JSONL has no rate-limit payload.
+                    AgentKind::ClaudeCode => {
+                        claude_used_percent_for_trigger(Utc::now().timestamp_millis())
+                    }
+                    AgentKind::Codex => normalized
+                        .transcript_path
+                        .as_deref()
+                        .and_then(used_percent_from_jsonl),
+                };
                 let cfg = ai_handoff_core::config::load();
                 let resolved = ai_handoff_core::config::resolve(&cfg, &project_id);
                 let mode = if resolved.enabled {
@@ -129,14 +151,43 @@ impl Handler for Router {
                     used,
                     resolved.threshold,
                     mode,
-                    false, // trigger dedupe: SP4d
-                    &[],   // burn-rate samples: SP4d
+                    false,
+                    &[], // burn-rate samples: SP4d
                     &resolved.burn,
                 );
+                let mut fired = false;
+                let stdout = match outcome.action {
+                    TriggerAction::None => json!({}),
+                    action => {
+                        let mark =
+                            session_mark_key("trigger", &req.agent, &normalized, &project_id);
+                        if self.mark_seen(&mark) {
+                            json!({})
+                        } else {
+                            fired = true;
+                            let context = render_trigger_context(
+                                action,
+                                used.unwrap_or_default(),
+                                resolved.threshold,
+                                &req.agent,
+                            );
+                            json!({
+                                "hookSpecificOutput": {
+                                    "hookEventName": "PostToolUse",
+                                    "additionalContext": context,
+                                }
+                            })
+                        }
+                    }
+                };
                 Self::ok(
                     req,
-                    json!({}),
-                    json!({ "used_percent": used, "trigger_reason": outcome.reason }),
+                    stdout,
+                    json!({
+                        "used_percent": used,
+                        "trigger_reason": outcome.reason,
+                        "trigger_fired": fired,
+                    }),
                 )
             }
             HookEventKind::Stop => {
@@ -192,6 +243,100 @@ fn handle_checkpoint(req: &ai_handoff_ipc::protocol::Request) -> Response {
         ),
         Err(_) => degraded(&req.request_id, "daemon_error"),
     }
+}
+
+/// Explicit capsule consumption (`ai-handoff handoff` / the /handoff skill).
+/// Finds the pending capsule targeted at the calling agent, marks it consumed,
+/// and returns its rendered context. Empty stdout when nothing is pending.
+fn handle_handoff_consume(req: &ai_handoff_ipc::protocol::Request) -> Response {
+    let raw = raw_with_request_fallbacks(req);
+    let cwd = raw
+        .get("cwd")
+        .and_then(Value::as_str)
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(&req.cwd));
+    let project_id = fingerprint(&cwd);
+    let Some(agent) = parse_agent(&req.agent) else {
+        return degraded(&req.request_id, "daemon_error");
+    };
+
+    match find_pending(&project_id) {
+        Some(capsule) if capsule.target_agent == agent => {
+            let context = render_capsule_context(&capsule);
+            if mark_consumed(&project_id, &capsule.capsule_id, agent, Utc::now()).is_err() {
+                return degraded(&req.request_id, "daemon_error");
+            }
+            Router::ok(
+                req,
+                json!({
+                    "hookSpecificOutput": {
+                        "hookEventName": "Handoff",
+                        "additionalContext": context,
+                    },
+                    "consumed": true,
+                    "capsule_id": capsule.capsule_id,
+                }),
+                json!({}),
+            )
+        }
+        _ => Router::ok(req, json!({}), json!({ "pending": false })),
+    }
+}
+
+/// Once-per-session mark key. Falls back to the project fingerprint when the
+/// hook payload carries no session id.
+fn session_mark_key(
+    kind: &str,
+    agent: &str,
+    normalized: &ai_handoff_core::hook_event::NormalizedHookEvent,
+    project_id: &str,
+) -> String {
+    format!(
+        "{kind}:{agent}:{}",
+        normalized.session_id.as_deref().unwrap_or(project_id)
+    )
+}
+
+fn agent_cli_name(agent: &str) -> &str {
+    match agent {
+        "claude" | "claude-code" => "claude-code",
+        _ => "codex",
+    }
+}
+
+/// Context injected when the five-hour trigger fires. Instructs the agent to
+/// checkpoint (auto) or ask the user first (ask), then resume the interrupted
+/// work — the capsule must never end the turn.
+fn render_trigger_context(
+    action: TriggerAction,
+    used_percent: f64,
+    threshold: f64,
+    agent: &str,
+) -> String {
+    let agent = agent_cli_name(agent);
+    let header = format!(
+        "[ai-handoff] Five-hour usage {used_percent:.0}% reached the configured threshold {threshold:.0}%."
+    );
+    let checkpoint_steps = format!(
+        "Write a small JSON file summarizing the CURRENT work (fields: goal, done[], remaining[], risks[], next_prompt), then run:\n  ai-handoff checkpoint --agent {agent} --file <path-to.json>\nAfter the checkpoint succeeds, resume the interrupted work exactly where it stopped."
+    );
+    match action {
+        TriggerAction::Create => format!(
+            "{header}\nCreate a handoff capsule NOW without asking the user. {checkpoint_steps}"
+        ),
+        _ => format!(
+            "{header}\nPause briefly and ask the user, in the user's language: \"캡슐을 만드시겠습니까?\" (Create a handoff capsule?).\nIf the user agrees: {checkpoint_steps}\nIf the user declines: resume the interrupted work without creating a capsule and do not ask again this session."
+        ),
+    }
+}
+
+/// Context injected on SessionStart / UserPromptSubmit when a pending capsule
+/// targets this agent. Announce only — /handoff performs the consumption.
+fn render_pending_notice(capsule: &Capsule) -> String {
+    format!(
+        "[ai-handoff] A pending handoff capsule for this project targets you (goal: {}). It was NOT consumed automatically. Briefly tell the user it exists; run /handoff (ai-handoff handoff) only when the user wants to continue from it.",
+        capsule.summary.goal
+    )
 }
 
 fn parse_agent(value: &str) -> Option<AgentKind> {
@@ -557,7 +702,7 @@ mod tests {
     }
 
     #[test]
-    fn session_start_injects_and_consumes_pending_capsule() {
+    fn session_start_notifies_without_consuming_pending_capsule() {
         let _guard = env_lock();
         let home = tempfile::tempdir().unwrap();
         let cwd = tempfile::tempdir().unwrap();
@@ -571,15 +716,171 @@ mod tests {
             "session-start",
             "claude-code",
             cwd.path(),
+            json!({ "cwd": cwd.path().to_string_lossy(), "session_id": "s-notice" }),
+        );
+        let resp = router.handle(&req);
+        assert_eq!(resp.status, Status::Ok);
+        let context = resp.hook_stdout["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(context.contains("continue router"));
+        assert!(context.contains("/handoff"));
+        // The capsule stays pending — only /handoff consumes it.
+        assert!(crate::store::find_pending(&project_id).is_some());
+
+        // The notice fires once per session, not on every prompt.
+        let again = request(
+            "turn-start-2",
+            "user-prompt",
+            "claude-code",
+            cwd.path(),
+            json!({ "cwd": cwd.path().to_string_lossy(), "session_id": "s-notice" }),
+        );
+        let resp2 = router.handle(&again);
+        assert_eq!(resp2.hook_stdout, json!({}));
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn handoff_consume_marks_consumed_and_returns_context() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        let project_id = fingerprint(cwd.path());
+        crate::store::save_capsule(&pending_capsule(&project_id)).unwrap();
+
+        let router = Router::new();
+        let mut req = request(
+            "turn-consume",
+            "handoff",
+            "claude-code",
+            cwd.path(),
             json!({ "cwd": cwd.path().to_string_lossy() }),
         );
+        req.kind = "handoff_consume".into();
         let resp = router.handle(&req);
         assert_eq!(resp.status, Status::Ok);
         assert!(resp.hook_stdout["hookSpecificOutput"]["additionalContext"]
             .as_str()
             .unwrap()
             .contains("continue router"));
+        assert_eq!(resp.hook_stdout["consumed"], true);
         assert!(crate::store::find_pending(&project_id).is_none());
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn handoff_consume_ignores_capsule_for_other_agent() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        let project_id = fingerprint(cwd.path());
+        // Capsule targets ClaudeCode; Codex asks to consume — nothing happens.
+        crate::store::save_capsule(&pending_capsule(&project_id)).unwrap();
+
+        let router = Router::new();
+        let mut req = request(
+            "turn-consume-wrong",
+            "handoff",
+            "codex",
+            cwd.path(),
+            json!({ "cwd": cwd.path().to_string_lossy() }),
+        );
+        req.kind = "handoff_consume".into();
+        let resp = router.handle(&req);
+        assert_eq!(resp.hook_stdout, json!({}));
+        assert!(crate::store::find_pending(&project_id).is_some());
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn post_tool_use_fires_claude_trigger_once_per_session() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[triggers.five_hour]\nenabled = true\nthreshold_percent = 50\nmode = \"ask\"\n",
+        )
+        .unwrap();
+        // Fresh Claude statusline sample above threshold.
+        let now_ms = Utc::now().timestamp_millis();
+        assert!(ai_handoff_core::sensor::record_claude_rate_limit(
+            &json!({
+                "session_id": "sid-trigger",
+                "rate_limits": { "five_hour": { "used_percentage": 75.0 } }
+            }),
+            now_ms,
+        ));
+
+        let router = Router::new();
+        let req = request(
+            "turn-trigger",
+            "post-tool-use",
+            "claude-code",
+            cwd.path(),
+            json!({ "cwd": cwd.path().to_string_lossy(), "session_id": "s-trig" }),
+        );
+        let resp = router.handle(&req);
+        assert_eq!(resp.status, Status::Ok);
+        let context = resp.hook_stdout["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .expect("trigger context");
+        assert!(context.contains("캡슐을 만드시겠습니까?"));
+        assert!(context.contains("resume the interrupted work"));
+        assert_eq!(resp.diagnostics["trigger_fired"], true);
+
+        // Second PostToolUse in the same session: suppressed.
+        let again = request(
+            "turn-trigger-2",
+            "post-tool-use",
+            "claude-code",
+            cwd.path(),
+            json!({ "cwd": cwd.path().to_string_lossy(), "session_id": "s-trig" }),
+        );
+        let resp2 = router.handle(&again);
+        assert_eq!(resp2.hook_stdout, json!({}));
+        assert_eq!(resp2.diagnostics["trigger_fired"], false);
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn post_tool_use_auto_mode_instructs_checkpoint_without_asking() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[triggers.five_hour]\nenabled = true\nthreshold_percent = 50\nmode = \"auto\"\n",
+        )
+        .unwrap();
+        let now_ms = Utc::now().timestamp_millis();
+        assert!(ai_handoff_core::sensor::record_claude_rate_limit(
+            &json!({
+                "session_id": "sid-auto",
+                "rate_limits": { "five_hour": { "used_percentage": 90.0 } }
+            }),
+            now_ms,
+        ));
+
+        let router = Router::new();
+        let req = request(
+            "turn-auto",
+            "post-tool-use",
+            "claude-code",
+            cwd.path(),
+            json!({ "cwd": cwd.path().to_string_lossy(), "session_id": "s-auto" }),
+        );
+        let resp = router.handle(&req);
+        let context = resp.hook_stdout["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .expect("trigger context");
+        assert!(context.contains("without asking"));
+        assert!(context.contains("ai-handoff checkpoint --agent claude-code"));
         std::env::remove_var("AI_HANDOFF_HOME");
     }
 

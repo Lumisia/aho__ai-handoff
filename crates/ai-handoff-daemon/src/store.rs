@@ -8,6 +8,7 @@ use std::time::SystemTime;
 
 pub fn save_capsule(c: &Capsule) -> std::io::Result<PathBuf> {
     let format = config::load().capsule.format;
+    ai_handoff_core::secure_fs::ensure_private_dir(&paths::store_dir())?;
     let path =
         capsule_codec::capsule_path(&paths::project_dir(&c.project_id), &c.capsule_id, format);
     capsule_codec::write_capsule(&path, c, format).map_err(std::io::Error::other)?;
@@ -24,8 +25,9 @@ pub fn save_project_label(project_id: &str, cwd: &Path) -> std::io::Result<()> {
         return Ok(());
     };
     let dir = paths::project_dir(project_id);
-    std::fs::create_dir_all(&dir)?;
-    std::fs::write(dir.join("project.label"), label)
+    ai_handoff_core::secure_fs::ensure_private_dir(&paths::store_dir())?;
+    ai_handoff_core::secure_fs::ensure_private_dir(&dir)?;
+    ai_handoff_core::secure_fs::write_private_file(&dir.join("project.label"), label.as_bytes())
 }
 
 pub fn find_pending(project_id: &str) -> Option<Capsule> {

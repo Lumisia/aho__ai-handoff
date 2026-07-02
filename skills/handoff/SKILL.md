@@ -10,8 +10,8 @@ Fetch the pending handoff capsule for this project and continue from it.
 
 ## Usage
 
-    ai-handoff hook session-start --agent <self>
-    aho hook session-start --agent <self>
+    ai-handoff handoff --agent <self>
+    aho handoff --agent <self>
 
 Always pass `--agent` set to the agent you are: `claude-code` if you are Claude
 Code, `codex` if you are Codex. Run the command from the current project
@@ -23,5 +23,7 @@ stdout is `{}`, report that there is no pending handoff capsule for this
 project/agent.
 
 This command consumes a pending capsule by marking it consumed in the local
-store. Do not run `checkpoint` from `/handoff`; checkpoint creates a new
-handoff instead of receiving one.
+store. Capsules are never consumed automatically at session start — a session
+only receives a short notice that one is pending, and this command is the only
+way to consume it. Do not run `checkpoint` from `/handoff`; checkpoint creates
+a new handoff instead of receiving one.

@@ -13,5 +13,5 @@ pub mod model;
 pub mod pricing;
 
 pub use aggregate::{group_by, totals, Dimension, Group};
-pub use engine::{default_roots, scan, scan_default, Roots};
+pub use engine::{default_roots, scan, scan_cached, scan_default, Roots, ScanCache};
 pub use model::{Source, Tokens, UsageEvent};

@@ -125,9 +125,23 @@ pub fn codex_home() -> Option<PathBuf> {
     user_home().map(|h| h.join(".codex"))
 }
 
-/// `~/.claude`.
+/// `$CLAUDE_CONFIG_DIR` if set, otherwise `~/.claude`.
 pub fn claude_home() -> Option<PathBuf> {
+    if let Some(c) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+        if !c.is_empty() {
+            return Some(PathBuf::from(c));
+        }
+    }
     user_home().map(|h| h.join(".claude"))
+}
+
+fn claude_config_json_path() -> Option<PathBuf> {
+    if let Some(c) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+        if !c.is_empty() {
+            return Some(PathBuf::from(c).join(".claude.json"));
+        }
+    }
+    user_home().map(|h| h.join(".claude.json"))
 }
 
 /// Resolve a CLI program on `PATH`, honoring Windows `PATHEXT` so `.cmd`/`.bat`
@@ -306,6 +320,15 @@ pub fn claude_slot_oauth(label: &str) -> Option<(String, Option<String>)> {
     claude_oauth_from_path(&slot_dir(Agent::Claude, label).join(cred_filename(Agent::Claude)))
 }
 
+/// The live (active) Claude OAuth `(access_token, plan)` from
+/// `~/.claude/.credentials.json`.
+///
+/// **Secret material.** Only for the usage fetcher; the token must never be
+/// logged, displayed, or passed to any agent. Returns `None` when not signed in.
+pub fn claude_live_oauth() -> Option<(String, Option<String>)> {
+    claude_oauth_from_path(&live_auth_path(Agent::Claude)?)
+}
+
 /// Read `(access_token, account_id)` from a Codex `auth.json` at `path`.
 fn request_auth_from_path(path: &Path) -> Option<(String, Option<String>)> {
     let value: Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
@@ -356,7 +379,7 @@ fn default_organization_id(auth: &Value) -> Option<String> {
 /// Pull the Claude account email/plan from `~/.claude.json` (the config — the
 /// OAuth tokens live in a separate `.credentials.json` we never read here).
 pub fn claude_identity() -> Option<Identity> {
-    let path = user_home()?.join(".claude.json");
+    let path = claude_config_json_path()?;
     let value: Value = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
     let acc = value.get("oauthAccount");
     let email = acc
@@ -653,6 +676,18 @@ pub fn capture_login(agent: Agent, profile_home: &Path, source: &str) -> std::io
     save_slot(agent, &bytes, identity.as_ref(), source)
 }
 
+/// Capture a completed vendor-CLI login, then make that saved slot the active
+/// local credential. This is the "add account" path used by the UIs.
+pub fn capture_login_as_active(
+    agent: Agent,
+    profile_home: &Path,
+    source: &str,
+) -> std::io::Result<String> {
+    let label = capture_login(agent, profile_home, source)?;
+    switch_slot(agent, &label)?;
+    Ok(label)
+}
+
 /// Whether an official login into `profile_home` has finished writing a usable
 /// credential (used to poll while the vendor CLI runs in another window).
 pub fn login_complete(agent: Agent, profile_home: &Path) -> bool {
@@ -729,7 +764,7 @@ pub fn switch_slot(agent: Agent, label: &str) -> std::io::Result<()> {
 /// replacing the file (it holds projects/history/settings too).
 fn patch_claude_oauth_account(email: Option<String>) -> std::io::Result<()> {
     let Some(email) = email else { return Ok(()) };
-    let Some(path) = user_home().map(|h| h.join(".claude.json")) else {
+    let Some(path) = claude_config_json_path() else {
         return Ok(());
     };
     let Ok(bytes) = std::fs::read(&path) else {
@@ -958,6 +993,42 @@ mod tests {
         )
         .unwrap();
         assert!(login_complete(Agent::Claude, dir.path()));
+    }
+
+    #[test]
+    fn capture_login_as_active_switches_claude_to_saved_slot() {
+        let _guard = crate::test_support::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let live = tempfile::tempdir().unwrap();
+        let profile = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        std::env::set_var("CLAUDE_CONFIG_DIR", live.path());
+
+        let credential =
+            br#"{"claudeAiOauth":{"accessToken":"secret-token","subscriptionType":"pro"}}"#;
+        std::fs::write(profile.path().join(".credentials.json"), credential).unwrap();
+        std::fs::write(
+            profile.path().join(".claude.json"),
+            br#"{"oauthAccount":{"emailAddress":"dev@example.com"},"subscriptionType":"pro"}"#,
+        )
+        .unwrap();
+        std::fs::write(live.path().join(".claude.json"), b"{}").unwrap();
+
+        let label =
+            capture_login_as_active(Agent::Claude, profile.path(), "official-cli-login").unwrap();
+
+        assert_eq!(label, "dev@example.com");
+        assert_eq!(
+            std::fs::read(live.path().join(".credentials.json")).unwrap(),
+            credential
+        );
+        let slots = list_slots(Agent::Claude);
+        assert_eq!(slots.len(), 1);
+        assert!(slots[0].active);
+        assert_eq!(slots[0].meta.email.as_deref(), Some("dev@example.com"));
+
+        std::env::remove_var("AI_HANDOFF_HOME");
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
     }
 
     #[test]

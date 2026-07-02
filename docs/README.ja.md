@@ -93,7 +93,7 @@ ai-handoff doctor
 ターミナルでも同じ操作を実行できます。
 
 ```sh
-ai-handoff hook session-start --agent <codex|claude-code>
+ai-handoff handoff --agent <codex|claude-code>
 ai-handoff checkpoint --message "work snapshot"
 ai-handoff doctor
 ai-handoff config list

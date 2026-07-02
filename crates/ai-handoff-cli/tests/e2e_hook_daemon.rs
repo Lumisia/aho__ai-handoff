@@ -1,4 +1,4 @@
-use ai_handoff_cli::commands::hook;
+use ai_handoff_cli::commands::{handoff, hook};
 use ai_handoff_daemon::router::Router;
 use ai_handoff_ipc::server::serve_once;
 use std::io::Cursor;
@@ -61,6 +61,7 @@ fn stop_then_peer_session_start_roundtrips_capsule() {
         ai_handoff_core::capsule::AgentKind::Codex
     );
 
+    // Session start only announces the pending capsule; it must NOT consume it.
     let start_payload = format!(
         r#"{{"cwd":"{}","session_id":"claude-s","turn_id":"t2"}}"#,
         cwd.path().to_string_lossy().replace('\\', "\\\\")
@@ -75,11 +76,29 @@ fn stop_then_peer_session_start_roundtrips_capsule() {
     assert_eq!(start_code, 0);
     let start_text = String::from_utf8(start_out).unwrap();
     assert!(start_text.contains("additionalContext"));
-    assert!(start_text.contains("handoff e2e"));
+    assert!(start_text.contains("/handoff"));
 
     let capsule_path = ai_handoff_core::paths::capsule_path(&project_id, &pending.capsule_id);
+    let after_start: ai_handoff_core::capsule::Capsule =
+        serde_json::from_slice(&std::fs::read(&capsule_path).unwrap()).unwrap();
+    assert_eq!(
+        after_start.consumption.state,
+        ai_handoff_core::capsule::ConsumptionState::Pending
+    );
+
+    // Explicit /handoff (ai-handoff handoff) consumes it and prints the capsule.
+    let prev_dir = std::env::current_dir().unwrap();
+    std::env::set_current_dir(cwd.path()).unwrap();
+    let mut consume_out = Vec::new();
+    let consume_code = handoff::run_io("claude-code", &mut consume_out, false);
+    std::env::set_current_dir(prev_dir).unwrap();
+    assert_eq!(consume_code, 0);
+    let consume_text = String::from_utf8(consume_out).unwrap();
+    assert!(consume_text.contains("additionalContext"));
+    assert!(consume_text.contains("handoff e2e"));
+
     let consumed: ai_handoff_core::capsule::Capsule =
-        serde_json::from_slice(&std::fs::read(capsule_path).unwrap()).unwrap();
+        serde_json::from_slice(&std::fs::read(&capsule_path).unwrap()).unwrap();
     assert_eq!(
         consumed.consumption.state,
         ai_handoff_core::capsule::ConsumptionState::Consumed

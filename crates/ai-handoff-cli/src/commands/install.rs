@@ -195,7 +195,7 @@ fn run_with_targets_impl(
         if selected.claude {
             writeln!(
                 out,
-                "Claude plugin bundle written to {}; Claude auto-loads it next session (no command needed).",
+                "Claude skills bundle written to {}; hooks installed into settings.json (Claude loads both next session).",
                 targets.claude_plugin_dir.display()
             )?;
         }

@@ -49,6 +49,9 @@ pub fn run_io(json_output: bool, out: &mut dyn Write) -> i32 {
     } else {
         "unreachable"
     };
+    let ipc_permissions = permission_report(ai_handoff_core::secure_fs::private_dir_status(
+        &ai_handoff_core::paths::ipc_dir(),
+    ));
 
     // Per-agent plugin install state, read from the recorded install-state.
     let st = ai_handoff_core::install::state::load(&ai_handoff_core::paths::home());
@@ -59,6 +62,7 @@ pub fn run_io(json_output: bool, out: &mut dyn Write) -> i32 {
         "daemon": daemon,
         "home": ai_handoff_core::paths::home().to_string_lossy(),
         "ipc": ai_handoff_core::paths::ipc_dir().to_string_lossy(),
+        "ipc_permissions": ipc_permissions,
         "plugin": {
             "claude": claude_plugin,
             "codex": codex_plugin,
@@ -73,6 +77,14 @@ pub fn run_io(json_output: bool, out: &mut dyn Write) -> i32 {
         );
     } else {
         let _ = writeln!(out, "daemon: {daemon}");
+        let _ = writeln!(
+            out,
+            "ipc permissions: {} ({})",
+            report["ipc_permissions"]["status"]
+                .as_str()
+                .unwrap_or("unknown"),
+            report["ipc_permissions"]["message"].as_str().unwrap_or("")
+        );
         let _ = writeln!(
             out,
             "claude plugin: {}/{}",
@@ -116,6 +128,19 @@ fn mark(ok: bool, yes: &'static str, no: &'static str) -> &'static str {
     } else {
         no
     }
+}
+
+fn permission_report(report: ai_handoff_core::secure_fs::PermissionReport) -> serde_json::Value {
+    let status = match report.status {
+        ai_handoff_core::secure_fs::PermissionStatus::Ok => "ok",
+        ai_handoff_core::secure_fs::PermissionStatus::Warning => "warning",
+        ai_handoff_core::secure_fs::PermissionStatus::Error => "error",
+        ai_handoff_core::secure_fs::PermissionStatus::Missing => "missing",
+    };
+    json!({
+        "status": status,
+        "message": report.message,
+    })
 }
 
 fn claude_plugin_state(rec: &Option<ai_handoff_core::install::PluginRecord>) -> serde_json::Value {

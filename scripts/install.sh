@@ -105,6 +105,7 @@ home="${AI_HANDOFF_HOME:-$HOME/.ai-handoff}"
 bin_dir="$home/bin"
 tmp_dir="${TMPDIR:-/tmp}/ai-handoff-install-$$"
 archive="$tmp_dir/$artifact"
+checksum="$archive.sha256"
 
 mkdir -p "$tmp_dir" "$bin_dir"
 cleanup() {
@@ -114,6 +115,21 @@ trap cleanup EXIT INT TERM
 
 echo "Downloading $url"
 curl -fsSL "$url" -o "$archive"
+echo "Downloading $url.sha256"
+curl -fsSL "$url.sha256" -o "$checksum"
+
+verify_checksum() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    (cd "$tmp_dir" && sha256sum -c "$artifact.sha256")
+  elif command -v shasum >/dev/null 2>&1; then
+    (cd "$tmp_dir" && shasum -a 256 -c "$artifact.sha256")
+  else
+    echo "missing required command: sha256sum or shasum" >&2
+    exit 1
+  fi
+}
+
+verify_checksum
 
 if [ "$ext" = "zip" ]; then
   unzip -q "$archive" -d "$tmp_dir"

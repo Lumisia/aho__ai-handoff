@@ -24,6 +24,7 @@ const MODES: [&str; 3] = ["off", "ask", "auto"];
 const LANGS: [&str; 4] = ["en", "ko", "ja", "zh"];
 const CAPSULE_FORMATS: [&str; 2] = ["json", "md"];
 const THEME_PRESETS: [&str; 4] = ["default", "high_contrast", "mono", "custom"];
+const GUI_THEME_PRESETS: [&str; 3] = ["white", "dark", "custom"];
 const COLOR_PRESETS: [&str; 18] = [
     "#B996EB",
     "#E68C1E",
@@ -58,6 +59,7 @@ pub fn next_raw(kind: KeyKind, current: &str, action: EditAction) -> Option<Stri
         KeyKind::Lang => Some(cycle(&LANGS, current, action)),
         KeyKind::CapsuleFormat => Some(cycle(&CAPSULE_FORMATS, current, action)),
         KeyKind::ThemePreset => Some(cycle(&THEME_PRESETS, current, action)),
+        KeyKind::GuiThemePreset => Some(cycle(&GUI_THEME_PRESETS, current, action)),
         KeyKind::Color => Some(cycle(&COLOR_PRESETS, current, action)),
         KeyKind::Percent => {
             let now: f64 = current.parse().ok()?;

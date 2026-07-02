@@ -31,10 +31,18 @@ JSON fields (top level): `goal`, `done` (array), `remaining` (array),
 `risks` (array), `next_prompt` (string), optional `agent`. The daemon trims each
 field using the shared config limits:
 
+- `capsule.language`
 - `capsule.next_prompt_max_items`
 - `capsule.remaining_max_items`
 - `capsule.done_max_items`
 - `capsule.risks_max_items`
+
+Before writing the JSON, read `capsule.language` with
+`ai-handoff config get capsule.language` when practical. Write the natural
+language values in `goal`, `done`, `remaining`, `risks`, and `next_prompt` in
+that language: `ko`, `ja`, `zh`, or `en`. Keep JSON key names in English. If the
+setting cannot be read, default to English. Existing capsules are not
+translated by the daemon.
 
 Invoke from the skill list as the handoff checkpoint entry. The user-facing command is
 `/handoff checkpoint <goal>`; create a short JSON file with non-empty fields when

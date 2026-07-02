@@ -22,6 +22,7 @@ pub struct Config {
     pub language: Language,
     pub capsule: CapsuleConfig,
     pub theme: ThemeConfig,
+    pub gui_theme: GuiThemeConfig,
     pub project_overrides: HashMap<String, ProjectOverride>,
 }
 
@@ -53,6 +54,7 @@ impl Default for Statusline {
 #[serde(default)]
 pub struct CapsuleConfig {
     pub format: CapsuleFormat,
+    pub language: Language,
     pub next_prompt_max_items: usize,
     pub remaining_max_items: usize,
     pub done_max_items: usize,
@@ -63,6 +65,7 @@ impl Default for CapsuleConfig {
     fn default() -> Self {
         Self {
             format: CapsuleFormat::Json,
+            language: Language::En,
             next_prompt_max_items: DEFAULT_CAPSULE_ITEM_LIMIT,
             remaining_max_items: DEFAULT_CAPSULE_ITEM_LIMIT,
             done_max_items: DEFAULT_CAPSULE_ITEM_LIMIT,
@@ -152,6 +155,124 @@ pub fn theme_config_for_preset(preset: ThemePreset) -> ThemeConfig {
         focus_border_color: ColorSpec::trusted(focus),
         selection_bg_color: ColorSpec::trusted(bg),
         selection_fg_color: ColorSpec::trusted(fg),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct GuiThemeConfig {
+    pub preset: GuiThemePreset,
+    pub codex_color: ColorSpec,
+    pub claude_color: ColorSpec,
+    pub focus_border_color: ColorSpec,
+    pub selection_bg_color: ColorSpec,
+    pub selection_fg_color: ColorSpec,
+    pub app_bg_color: ColorSpec,
+    pub sidebar_bg_color: ColorSpec,
+    pub panel_bg_color: ColorSpec,
+    pub text_color: ColorSpec,
+}
+
+impl Default for GuiThemeConfig {
+    fn default() -> Self {
+        gui_theme_config_for_preset(GuiThemePreset::White)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum GuiThemePreset {
+    #[default]
+    White,
+    Dark,
+    Custom,
+}
+
+pub fn gui_theme_config_for_preset(preset: GuiThemePreset) -> GuiThemeConfig {
+    let (codex, claude, focus, selection_bg, selection_fg, app_bg, sidebar_bg, panel_bg, text) =
+        match preset {
+            GuiThemePreset::White | GuiThemePreset::Custom => (
+                "#B996EB", "#E68C1E", "#FFA500", "cyan", "black", "#F5F5F2", "#EEF0EC", "#FFFFFF",
+                "#20242A",
+            ),
+            GuiThemePreset::Dark => (
+                "#BD93F9", "#FFB86C", "#FF79C6", "#44475A", "#F8F8F2", "#282A36", "#21222C",
+                "#282A36", "#F8F8F2",
+            ),
+        };
+    GuiThemeConfig {
+        preset,
+        codex_color: ColorSpec::trusted(codex),
+        claude_color: ColorSpec::trusted(claude),
+        focus_border_color: ColorSpec::trusted(focus),
+        selection_bg_color: ColorSpec::trusted(selection_bg),
+        selection_fg_color: ColorSpec::trusted(selection_fg),
+        app_bg_color: ColorSpec::trusted(app_bg),
+        sidebar_bg_color: ColorSpec::trusted(sidebar_bg),
+        panel_bg_color: ColorSpec::trusted(panel_bg),
+        text_color: ColorSpec::trusted(text),
+    }
+}
+
+fn legacy_dark_gui_theme_config() -> GuiThemeConfig {
+    GuiThemeConfig {
+        preset: GuiThemePreset::Dark,
+        codex_color: ColorSpec::trusted("#C8A7FF"),
+        claude_color: ColorSpec::trusted("#FFB05C"),
+        focus_border_color: ColorSpec::trusted("#FF9F43"),
+        selection_bg_color: ColorSpec::trusted("#FF79C6"),
+        selection_fg_color: ColorSpec::trusted("#111318"),
+        app_bg_color: ColorSpec::trusted("#0B0D14"),
+        sidebar_bg_color: ColorSpec::trusted("#111522"),
+        panel_bg_color: ColorSpec::trusted("#191D2A"),
+        text_color: ColorSpec::trusted("#F8F8F2"),
+    }
+}
+
+fn gui_theme_colors_eq(a: &GuiThemeConfig, b: &GuiThemeConfig) -> bool {
+    a.codex_color == b.codex_color
+        && a.claude_color == b.claude_color
+        && a.focus_border_color == b.focus_border_color
+        && a.selection_bg_color == b.selection_bg_color
+        && a.selection_fg_color == b.selection_fg_color
+        && a.app_bg_color == b.app_bg_color
+        && a.sidebar_bg_color == b.sidebar_bg_color
+        && a.panel_bg_color == b.panel_bg_color
+        && a.text_color == b.text_color
+}
+
+/// Resolve GUI presets to their current built-in colors.
+///
+/// Older config files may contain the previous built-in dark tuple. Treat that
+/// exact tuple as the dark preset, but preserve non-canonical values as custom.
+pub fn effective_gui_theme_config(theme: &GuiThemeConfig) -> GuiThemeConfig {
+    let white = gui_theme_config_for_preset(GuiThemePreset::White);
+    let dark = gui_theme_config_for_preset(GuiThemePreset::Dark);
+    let legacy_dark = legacy_dark_gui_theme_config();
+
+    match theme.preset {
+        GuiThemePreset::White => {
+            if gui_theme_colors_eq(theme, &white) {
+                white
+            } else {
+                let mut custom = theme.clone();
+                custom.preset = GuiThemePreset::Custom;
+                custom
+            }
+        }
+        GuiThemePreset::Dark => {
+            if gui_theme_colors_eq(theme, &white)
+                || gui_theme_colors_eq(theme, &dark)
+                || gui_theme_colors_eq(theme, &legacy_dark)
+            {
+                dark
+            } else {
+                let mut custom = theme.clone();
+                custom.preset = GuiThemePreset::Custom;
+                custom
+            }
+        }
+        GuiThemePreset::Custom => theme.clone(),
     }
 }
 
@@ -487,6 +608,8 @@ enum ValueKind {
     CapsuleFormat,
     /// Theme preset name.
     ThemePreset,
+    /// GUI theme preset name.
+    GuiThemePreset,
     /// Terminal color: named, `#RRGGBB`, or indexed `0..255`.
     Color,
 }
@@ -505,6 +628,7 @@ const SETTABLE: &[(&str, ValueKind)] = &[
     ("statusline.show", ValueKind::Bool),
     ("language", ValueKind::Lang),
     ("capsule.format", ValueKind::CapsuleFormat),
+    ("capsule.language", ValueKind::Lang),
     ("capsule.next_prompt_max_items", ValueKind::Count),
     ("capsule.remaining_max_items", ValueKind::Count),
     ("capsule.done_max_items", ValueKind::Count),
@@ -517,9 +641,26 @@ const SETTABLE: &[(&str, ValueKind)] = &[
     ("theme.selection_fg_color", ValueKind::Color),
 ];
 
+const GUI_SETTABLE: &[(&str, ValueKind)] = &[
+    ("gui_theme.preset", ValueKind::GuiThemePreset),
+    ("gui_theme.codex_color", ValueKind::Color),
+    ("gui_theme.claude_color", ValueKind::Color),
+    ("gui_theme.focus_border_color", ValueKind::Color),
+    ("gui_theme.selection_bg_color", ValueKind::Color),
+    ("gui_theme.selection_fg_color", ValueKind::Color),
+    ("gui_theme.app_bg_color", ValueKind::Color),
+    ("gui_theme.sidebar_bg_color", ValueKind::Color),
+    ("gui_theme.panel_bg_color", ValueKind::Color),
+    ("gui_theme.text_color", ValueKind::Color),
+];
+
 /// The editable config keys, in display order (for `config list`).
 pub fn settable_keys() -> impl Iterator<Item = &'static str> {
     SETTABLE.iter().map(|(k, _)| *k)
+}
+
+pub fn gui_settable_keys() -> impl Iterator<Item = &'static str> {
+    GUI_SETTABLE.iter().map(|(k, _)| *k)
 }
 
 /// The public value-kind of an editable key, for UIs that edit config (e.g. the
@@ -541,6 +682,8 @@ pub enum KeyKind {
     CapsuleFormat,
     /// `default` / `high_contrast` / `mono` / `custom`.
     ThemePreset,
+    /// `white` / `dark` / `custom`.
+    GuiThemePreset,
     /// Terminal color string.
     Color,
 }
@@ -549,6 +692,7 @@ pub enum KeyKind {
 pub fn key_kind(key: &str) -> Option<KeyKind> {
     SETTABLE
         .iter()
+        .chain(GUI_SETTABLE.iter())
         .find(|(k, _)| *k == key)
         .map(|(_, v)| match v {
             ValueKind::Bool => KeyKind::Bool,
@@ -559,6 +703,7 @@ pub fn key_kind(key: &str) -> Option<KeyKind> {
             ValueKind::Lang => KeyKind::Lang,
             ValueKind::CapsuleFormat => KeyKind::CapsuleFormat,
             ValueKind::ThemePreset => KeyKind::ThemePreset,
+            ValueKind::GuiThemePreset => KeyKind::GuiThemePreset,
             ValueKind::Color => KeyKind::Color,
         })
 }
@@ -596,6 +741,10 @@ impl ValueKind {
                         "expected one of `default`, `high_contrast`, `mono`, `custom`",
                     ))
                 }
+            },
+            ValueKind::GuiThemePreset => match raw {
+                "white" | "dark" | "custom" => value(raw),
+                _ => return Err(invalid("expected one of `white`, `dark`, `custom`")),
             },
             ValueKind::Color => {
                 ColorSpec::parse(raw).map_err(|message| ConfigWriteError::InvalidValue {
@@ -640,6 +789,7 @@ impl ValueKind {
 pub fn set_value(existing: Option<&str>, key: &str, raw: &str) -> Result<String, ConfigWriteError> {
     let kind = SETTABLE
         .iter()
+        .chain(GUI_SETTABLE.iter())
         .find(|(k, _)| *k == key)
         .map(|(_, v)| *v)
         .ok_or_else(|| ConfigWriteError::UnknownKey(key.to_string()))?;
@@ -698,6 +848,59 @@ pub fn set_value(existing: Option<&str>, key: &str, raw: &str) -> Result<String,
             );
         }
     }
+    if key == "gui_theme.preset" {
+        let preset = match raw {
+            "white" => GuiThemePreset::White,
+            "dark" => GuiThemePreset::Dark,
+            "custom" => GuiThemePreset::Custom,
+            _ => unreachable!("gui theme preset was validated above"),
+        };
+        if preset != GuiThemePreset::Custom {
+            let preset_theme = gui_theme_config_for_preset(preset);
+            table.insert(
+                "codex_color",
+                value(preset_theme.codex_color.as_str().to_string()),
+            );
+            table.insert(
+                "claude_color",
+                value(preset_theme.claude_color.as_str().to_string()),
+            );
+            table.insert(
+                "focus_border_color",
+                value(preset_theme.focus_border_color.as_str().to_string()),
+            );
+            table.insert(
+                "selection_bg_color",
+                value(preset_theme.selection_bg_color.as_str().to_string()),
+            );
+            table.insert(
+                "selection_fg_color",
+                value(preset_theme.selection_fg_color.as_str().to_string()),
+            );
+            table.insert(
+                "app_bg_color",
+                value(preset_theme.app_bg_color.as_str().to_string()),
+            );
+            table.insert(
+                "sidebar_bg_color",
+                value(preset_theme.sidebar_bg_color.as_str().to_string()),
+            );
+            table.insert(
+                "panel_bg_color",
+                value(preset_theme.panel_bg_color.as_str().to_string()),
+            );
+            table.insert(
+                "text_color",
+                value(preset_theme.text_color.as_str().to_string()),
+            );
+        }
+    }
+    if key.starts_with("gui_theme.") && key != "gui_theme.preset" {
+        table.insert(
+            "preset",
+            value(gui_theme_preset_str(GuiThemePreset::Custom)),
+        );
+    }
 
     let text = doc.to_string();
     if key.starts_with("theme.") {
@@ -707,6 +910,17 @@ pub fn set_value(existing: Option<&str>, key: &str, raw: &str) -> Result<String,
         })?;
         validate_theme_contrast(&cfg.theme, key)?;
     }
+    if key.starts_with("gui_theme.") {
+        let cfg: Config = toml::from_str(&text).map_err(|e| ConfigWriteError::InvalidValue {
+            key: key.to_string(),
+            message: e.to_string(),
+        })?;
+        validate_color_contrast(
+            &cfg.gui_theme.selection_bg_color,
+            &cfg.gui_theme.selection_fg_color,
+            key,
+        )?;
+    }
 
     Ok(text)
 }
@@ -715,6 +929,7 @@ pub fn set_value(existing: Option<&str>, key: &str, raw: &str) -> Result<String,
 /// unset key reports its built-in default), formatted as the daemon sees it.
 pub fn get_value(cfg: &Config, key: &str) -> Result<String, ConfigWriteError> {
     let f = &cfg.triggers.five_hour;
+    let gui_theme = effective_gui_theme_config(&cfg.gui_theme);
     Ok(match key {
         "triggers.five_hour.enabled" => f.enabled.to_string(),
         "triggers.five_hour.threshold_percent" => fmt_f64(f.threshold_percent),
@@ -725,6 +940,7 @@ pub fn get_value(cfg: &Config, key: &str) -> Result<String, ConfigWriteError> {
         "statusline.show" => cfg.statusline.show.to_string(),
         "language" => lang_str(cfg.language).to_string(),
         "capsule.format" => capsule_format_str(cfg.capsule.format).to_string(),
+        "capsule.language" => lang_str(cfg.capsule.language).to_string(),
         "capsule.next_prompt_max_items" => cfg.capsule.next_prompt_limit().to_string(),
         "capsule.remaining_max_items" => cfg.capsule.remaining_limit().to_string(),
         "capsule.done_max_items" => cfg.capsule.done_limit().to_string(),
@@ -735,6 +951,16 @@ pub fn get_value(cfg: &Config, key: &str) -> Result<String, ConfigWriteError> {
         "theme.focus_border_color" => cfg.theme.focus_border_color.to_string(),
         "theme.selection_bg_color" => cfg.theme.selection_bg_color.to_string(),
         "theme.selection_fg_color" => cfg.theme.selection_fg_color.to_string(),
+        "gui_theme.preset" => gui_theme_preset_str(gui_theme.preset).to_string(),
+        "gui_theme.codex_color" => gui_theme.codex_color.to_string(),
+        "gui_theme.claude_color" => gui_theme.claude_color.to_string(),
+        "gui_theme.focus_border_color" => gui_theme.focus_border_color.to_string(),
+        "gui_theme.selection_bg_color" => gui_theme.selection_bg_color.to_string(),
+        "gui_theme.selection_fg_color" => gui_theme.selection_fg_color.to_string(),
+        "gui_theme.app_bg_color" => gui_theme.app_bg_color.to_string(),
+        "gui_theme.sidebar_bg_color" => gui_theme.sidebar_bg_color.to_string(),
+        "gui_theme.panel_bg_color" => gui_theme.panel_bg_color.to_string(),
+        "gui_theme.text_color" => gui_theme.text_color.to_string(),
         _ => return Err(ConfigWriteError::UnknownKey(key.to_string())),
     })
 }
@@ -779,11 +1005,27 @@ pub fn theme_preset_str(preset: ThemePreset) -> &'static str {
     }
 }
 
+pub fn gui_theme_preset_str(preset: GuiThemePreset) -> &'static str {
+    match preset {
+        GuiThemePreset::White => "white",
+        GuiThemePreset::Dark => "dark",
+        GuiThemePreset::Custom => "custom",
+    }
+}
+
 fn validate_theme_contrast(theme: &ThemeConfig, key: &str) -> Result<(), ConfigWriteError> {
-    let Some(bg) = theme.selection_bg_color.rgb() else {
+    validate_color_contrast(&theme.selection_bg_color, &theme.selection_fg_color, key)
+}
+
+fn validate_color_contrast(
+    bg_spec: &ColorSpec,
+    fg_spec: &ColorSpec,
+    key: &str,
+) -> Result<(), ConfigWriteError> {
+    let Some(bg) = bg_spec.rgb() else {
         return Ok(());
     };
-    let Some(fg) = theme.selection_fg_color.rgb() else {
+    let Some(fg) = fg_spec.rgb() else {
         return Ok(());
     };
     if contrast_ratio(bg, fg) >= 4.5 {
@@ -1134,7 +1376,17 @@ enabled = true
         for key in settable_keys() {
             assert!(get_value(&cfg, key).is_ok(), "key {key} not readable");
         }
-        assert_eq!(settable_keys().count(), 19);
+        assert_eq!(settable_keys().count(), 20);
+    }
+
+    #[test]
+    fn gui_settable_keys_match_get_value_domain() {
+        let cfg = Config::default();
+        for key in gui_settable_keys() {
+            assert!(get_value(&cfg, key).is_ok(), "key {key} not readable");
+            assert!(key_kind(key).is_some(), "no kind for {key}");
+        }
+        assert_eq!(gui_settable_keys().count(), 10);
     }
 
     #[test]
@@ -1171,6 +1423,7 @@ enabled = true
     fn defaults_include_capsule_format_and_theme() {
         let cfg = Config::default();
         assert_eq!(cfg.capsule.format, CapsuleFormat::Json);
+        assert_eq!(cfg.capsule.language, Language::En);
         assert_eq!(cfg.capsule.next_prompt_max_items, 5);
         assert_eq!(cfg.capsule.remaining_max_items, 5);
         assert_eq!(cfg.capsule.done_max_items, 5);
@@ -1181,31 +1434,65 @@ enabled = true
         assert_eq!(cfg.theme.focus_border_color.as_str(), "#FFA500");
         assert_eq!(cfg.theme.selection_bg_color.as_str(), "cyan");
         assert_eq!(cfg.theme.selection_fg_color.as_str(), "black");
+        assert_eq!(cfg.gui_theme.preset, GuiThemePreset::White);
+        assert_eq!(cfg.gui_theme.codex_color.as_str(), "#B996EB");
+        assert_eq!(cfg.gui_theme.claude_color.as_str(), "#E68C1E");
+        assert_eq!(cfg.gui_theme.app_bg_color.as_str(), "#F5F5F2");
     }
 
     #[test]
     fn default_value_reports_theme_and_capsule_defaults() {
         assert_eq!(default_value("capsule.format").unwrap(), "json");
+        assert_eq!(default_value("capsule.language").unwrap(), "en");
         assert_eq!(default_value("capsule.remaining_max_items").unwrap(), "5");
         assert_eq!(default_value("theme.preset").unwrap(), "default");
         assert_eq!(
             default_value("theme.focus_border_color").unwrap(),
             "#FFA500"
         );
+        assert_eq!(default_value("gui_theme.preset").unwrap(), "white");
+        assert_eq!(
+            default_value("gui_theme.sidebar_bg_color").unwrap(),
+            "#EEF0EC"
+        );
     }
 
     #[test]
     fn set_value_accepts_capsule_format_theme_and_color() {
         let text = set_value(None, "capsule.format", "md").unwrap();
+        let text = set_value(Some(&text), "capsule.language", "ko").unwrap();
         let text = set_value(Some(&text), "capsule.remaining_max_items", "3").unwrap();
         let text = set_value(Some(&text), "theme.preset", "high_contrast").unwrap();
         let text = set_value(Some(&text), "theme.codex_color", "#B996EB").unwrap();
         let cfg = parse(&text).unwrap();
 
         assert_eq!(cfg.capsule.format, CapsuleFormat::Md);
+        assert_eq!(cfg.capsule.language, Language::Ko);
         assert_eq!(cfg.capsule.remaining_max_items, 3);
         assert_eq!(cfg.theme.preset, ThemePreset::HighContrast);
         assert_eq!(cfg.theme.codex_color.as_str(), "#B996EB");
+    }
+
+    #[test]
+    fn capsule_language_is_editable_and_rejects_bad_code() {
+        assert_eq!(key_kind("capsule.language"), Some(KeyKind::Lang));
+
+        for (raw, want) in [
+            ("ko", Language::Ko),
+            ("ja", Language::Ja),
+            ("zh", Language::Zh),
+            ("en", Language::En),
+        ] {
+            let text = set_value(None, "capsule.language", raw).unwrap();
+            let cfg = parse(&text).unwrap();
+            assert_eq!(cfg.capsule.language, want);
+            assert_eq!(get_value(&cfg, "capsule.language").unwrap(), raw);
+        }
+
+        assert!(matches!(
+            set_value(None, "capsule.language", "fr").unwrap_err(),
+            ConfigWriteError::InvalidValue { .. }
+        ));
     }
 
     #[test]
@@ -1233,6 +1520,35 @@ enabled = true
         assert_eq!(cfg.theme.focus_border_color.as_str(), "white");
         assert_eq!(cfg.theme.selection_bg_color.as_str(), "white");
         assert_eq!(cfg.theme.selection_fg_color.as_str(), "black");
+    }
+
+    #[test]
+    fn setting_gui_theme_preset_writes_preset_colors() {
+        let text = set_value(None, "gui_theme.preset", "dark").unwrap();
+        let cfg = parse(&text).unwrap();
+
+        assert_eq!(cfg.gui_theme.preset, GuiThemePreset::Dark);
+        assert_eq!(cfg.gui_theme.codex_color.as_str(), "#BD93F9");
+        assert_eq!(cfg.gui_theme.claude_color.as_str(), "#FFB86C");
+        assert_eq!(cfg.gui_theme.focus_border_color.as_str(), "#FF79C6");
+        assert_eq!(cfg.gui_theme.selection_bg_color.as_str(), "#44475A");
+        assert_eq!(cfg.gui_theme.selection_fg_color.as_str(), "#F8F8F2");
+        assert_eq!(cfg.gui_theme.app_bg_color.as_str(), "#282A36");
+        assert_eq!(cfg.gui_theme.sidebar_bg_color.as_str(), "#21222C");
+        assert_eq!(cfg.gui_theme.panel_bg_color.as_str(), "#282A36");
+        assert_eq!(cfg.gui_theme.text_color.as_str(), "#F8F8F2");
+        assert_eq!(cfg.theme.preset, ThemePreset::Default);
+    }
+
+    #[test]
+    fn setting_gui_theme_color_switches_preset_to_custom() {
+        let text = set_value(None, "gui_theme.preset", "dark").unwrap();
+        let text = set_value(Some(&text), "gui_theme.codex_color", "#123456").unwrap();
+        let cfg = parse(&text).unwrap();
+
+        assert_eq!(cfg.gui_theme.preset, GuiThemePreset::Custom);
+        assert_eq!(cfg.gui_theme.codex_color.as_str(), "#123456");
+        assert_eq!(cfg.gui_theme.selection_bg_color.as_str(), "#44475A");
     }
 
     #[test]

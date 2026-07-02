@@ -16,7 +16,7 @@
 
 | コマンド | ターミナル相当 | 詳細 |
 |---|---|---|
-| `handoff` | `ai-handoff hook session-start --agent <self>` | 現在のプロジェクトと現在のエージェントに対応する最新の待機中カプセルを取得し、消費済みにします。 |
+| `handoff` | `ai-handoff handoff --agent <self>` | 現在のプロジェクトと現在のエージェントに対応する最新の待機中カプセルを取得し、消費済みにします。 |
 | `handoff config` | `ai-handoff config list` | 編集可能な config key を表示します。直接編集する場合は `ai-handoff config get <key>` と `ai-handoff config set <key> <value>` を使います。 |
 | `handoff doctor` | `ai-handoff doctor` | plugin 状態、hook trust、daemon 接続、IPC、store、重複 hook 問題を確認します。 |
 | `handoff checkpoint` | `ai-handoff checkpoint --message "work snapshot"` | 現在の作業からローカルカプセルを作成します。次のエージェントが何のために見る checkpoint なのかを短く書きます。 |
