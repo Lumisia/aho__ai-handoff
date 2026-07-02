@@ -54,6 +54,14 @@ ai-handoff install --yes
 
 PowerShell에서 실행합니다. CLI를 내려받아 사용자 PATH에 추가하고 설치 프로그램을 실행합니다.
 
+**GUI + TUI** — 데스크톱 앱과 CLI/TUI를 함께 설치합니다:
+
+```powershell
+Set-ExecutionPolicy Bypass -Scope Process -Force; & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Lumisia/aho__ai-handoff/master/scripts/install.ps1))) -Yes -WithGui
+```
+
+**TUI** — CLI/TUI만 설치합니다:
+
 ```powershell
 Set-ExecutionPolicy Bypass -Scope Process -Force; & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Lumisia/aho__ai-handoff/master/scripts/install.ps1))) -Yes
 ```

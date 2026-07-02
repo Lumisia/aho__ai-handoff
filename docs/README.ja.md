@@ -54,6 +54,14 @@ ai-handoff install --yes
 
 PowerShell で実行します。CLI をダウンロードしてユーザー PATH に追加し、インストーラーを実行します。
 
+**GUI + TUI** — デスクトップアプリと CLI/TUI をまとめてインストールします:
+
+```powershell
+Set-ExecutionPolicy Bypass -Scope Process -Force; & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Lumisia/aho__ai-handoff/master/scripts/install.ps1))) -Yes -WithGui
+```
+
+**TUI** — CLI/TUI のみをインストールします:
+
 ```powershell
 Set-ExecutionPolicy Bypass -Scope Process -Force; & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Lumisia/aho__ai-handoff/master/scripts/install.ps1))) -Yes
 ```

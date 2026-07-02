@@ -53,6 +53,14 @@ ai-handoff install --yes
 Run this in PowerShell. It downloads the CLI, adds it to your user PATH, and runs the installer.
 By default, `latest` means the highest stable `vX.Y.Z` GitHub Release, not GitHub's "Latest" badge.
 
+**GUI + TUI** — installs the desktop app together with the CLI/TUI:
+
+```powershell
+Set-ExecutionPolicy Bypass -Scope Process -Force; & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Lumisia/aho__ai-handoff/master/scripts/install.ps1))) -Yes -WithGui
+```
+
+**TUI** — installs the CLI/TUI only:
+
 ```powershell
 Set-ExecutionPolicy Bypass -Scope Process -Force; & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Lumisia/aho__ai-handoff/master/scripts/install.ps1))) -Yes
 ```
