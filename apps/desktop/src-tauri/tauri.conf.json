@@ -30,6 +30,11 @@
     "targets": "all",
     "icon": [
       "icons/icon.ico"
-    ]
+    ],
+    "windows": {
+      "nsis": {
+        "installerHooks": "./nsis-hooks.nsh"
+      }
+    }
   }
 }

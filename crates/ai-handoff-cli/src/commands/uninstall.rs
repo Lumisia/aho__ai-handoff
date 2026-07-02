@@ -194,6 +194,15 @@ fn cleanup_stale_managed_paths(
         remove_managed_dir_if_exists(&path, &mut removed)?;
     }
 
+    // The Start Menu search shortcut we drop next to NSIS's "AI Handoff.lnk"
+    // so the app is findable by typing "aho" (a file, not a directory).
+    if include_gui {
+        if let Some(root) = roaming_app_data {
+            let aho = root.join("Microsoft/Windows/Start Menu/Programs/aho.lnk");
+            remove_managed_file_if_exists(&aho, &mut removed)?;
+        }
+    }
+
     if temp_dir.is_dir() {
         for entry in std::fs::read_dir(temp_dir)? {
             let entry = entry?;
@@ -211,6 +220,14 @@ fn cleanup_stale_managed_paths(
 fn remove_managed_dir_if_exists(path: &Path, removed: &mut Vec<PathBuf>) -> std::io::Result<()> {
     if path.exists() {
         std::fs::remove_dir_all(path)?;
+        removed.push(path.to_path_buf());
+    }
+    Ok(())
+}
+
+fn remove_managed_file_if_exists(path: &Path, removed: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    if path.exists() {
+        std::fs::remove_file(path)?;
         removed.push(path.to_path_buf());
     }
     Ok(())
@@ -468,6 +485,10 @@ mod tests {
             std::fs::create_dir_all(path).unwrap();
             std::fs::write(path.join("marker.txt"), "owned").unwrap();
         }
+        // The top-level "aho" search shortcut is a file, not a directory.
+        let aho_lnk = roaming_app_data.join("Microsoft/Windows/Start Menu/Programs/aho.lnk");
+        std::fs::create_dir_all(aho_lnk.parent().unwrap()).unwrap();
+        std::fs::write(&aho_lnk, "lnk").unwrap();
         let untouched_temp = temp_dir.join("other-tool");
         std::fs::create_dir_all(&untouched_temp).unwrap();
 
@@ -493,12 +514,13 @@ mod tests {
         for path in &stale_dirs {
             assert!(!path.exists(), "stale path was not removed: {path:?}");
         }
+        assert!(!aho_lnk.exists(), "aho.lnk shortcut was not removed");
         for path in &configs {
             assert!(path.exists(), "config file must be preserved: {path:?}");
             assert_eq!(std::fs::read_to_string(path).unwrap(), "user data");
         }
         assert!(untouched_temp.exists());
-        assert_eq!(removed.len(), stale_dirs.len());
+        assert_eq!(removed.len(), stale_dirs.len() + 1);
     }
 
     #[test]

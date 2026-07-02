@@ -1698,27 +1698,34 @@ fn ensure_windows_search_shortcuts() {
         let Ok(target) = std::env::current_exe() else {
             return;
         };
-        let dir = PathBuf::from(appdata)
+        let programs = PathBuf::from(appdata)
             .join("Microsoft")
             .join("Windows")
             .join("Start Menu")
-            .join("Programs")
-            .join("AI Handoff");
+            .join("Programs");
+        // Older builds created a `Programs\AI Handoff` subfolder holding the
+        // shortcuts; a shortcut in a subfolder is not surfaced by Start-menu
+        // search as reliably as a top-level one, and it duplicated the NSIS
+        // "AI Handoff.lnk". Drop it, then place a single top-level `aho.lnk`
+        // right next to NSIS's "AI Handoff.lnk" so the app is searchable by
+        // typing "aho" exactly like it is by "AI Handoff".
+        let legacy_dir = programs.join("AI Handoff");
         let script = format!(
-            "$dir = {dir}\n\
+            "$programs = {programs}\n\
              $target = {target}\n\
-             New-Item -ItemType Directory -Force -Path $dir | Out-Null\n\
+             $legacy = {legacy}\n\
+             if (Test-Path $legacy) {{ Remove-Item -Recurse -Force $legacy }}\n\
+             New-Item -ItemType Directory -Force -Path $programs | Out-Null\n\
              $shell = New-Object -ComObject WScript.Shell\n\
-             foreach ($name in @('AI Handoff', 'aho')) {{\n\
-             $shortcut = $shell.CreateShortcut((Join-Path $dir ($name + '.lnk')))\n\
+             $shortcut = $shell.CreateShortcut((Join-Path $programs 'aho.lnk'))\n\
              $shortcut.TargetPath = $target\n\
              $shortcut.WorkingDirectory = Split-Path -Parent $target\n\
              $shortcut.IconLocation = $target + ',0'\n\
              $shortcut.Description = 'AI Handoff'\n\
-             $shortcut.Save()\n\
-             }}\n",
-            dir = ps_single_quote(&dir.to_string_lossy()),
+             $shortcut.Save()\n",
+            programs = ps_single_quote(&programs.to_string_lossy()),
             target = ps_single_quote(&target.to_string_lossy()),
+            legacy = ps_single_quote(&legacy_dir.to_string_lossy()),
         );
         let _ = hidden_command("powershell")
             .args([
