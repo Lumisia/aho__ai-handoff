@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import { readLogs } from "../api";
 import type { LogFile } from "../types";
+import type { Translator } from "../i18n";
 
-export default function Logs() {
+export default function Logs({ t }: { t: Translator }) {
   const [logs, setLogs] = useState<LogFile[]>([]);
   const [error, setError] = useState<string | null>(null);
 
@@ -13,7 +14,7 @@ export default function Logs() {
   }, []);
 
   if (error) {
-    return <section className="banner error">Failed to read logs: {error}</section>;
+    return <section className="banner error">{t("logs")}: {error}</section>;
   }
 
   return (
@@ -22,7 +23,7 @@ export default function Logs() {
         <article className="row" key={log.name}>
           <strong>{log.name}</strong>
           {log.result.error && <p>{log.result.error}</p>}
-          {!log.result.error && <pre>{log.result.text || "Empty log."}</pre>}
+          {!log.result.error && <pre>{log.result.text || "-"}</pre>}
         </article>
       ))}
     </div>

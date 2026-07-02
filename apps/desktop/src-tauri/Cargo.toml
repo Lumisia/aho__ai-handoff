@@ -15,4 +15,12 @@ tauri-build = { version = "2", features = [] }
 serde.workspace = true
 serde_json.workspace = true
 ai-handoff-core = { path = "../../../crates/ai-handoff-core" }
+ai-handoff-ipc = { path = "../../../crates/ai-handoff-ipc" }
+ai-handoff-tui = { path = "../../../crates/ai-handoff-tui" }
+ai-handoff-usage = { path = "../../../crates/ai-handoff-usage" }
+chrono.workspace = true
 tauri = { version = "2", features = [] }
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -766,6 +766,11 @@ setting.capsule_format:
   ko: "새 캡슐 저장 형식: JSON은 기계용, MD는 사람이 읽기 쉬운 인계 노트"
   ja: "新しいカプセル保存形式: JSON は機械向け、MD は読みやすい引き継ぎノート"
   zh: "新胶囊保存格式：JSON 适合机器数据，MD 适合可读交接笔记"
+setting.capsule_language:
+  en: "Sets the language used when creating capsules"
+  ko: "캡슐을 생성할 때 언어를 설정합니다."
+  ja: "カプセルを生成するときの言語を設定します。"
+  zh: "设置生成胶囊时使用的语言。"
 setting.capsule_next_prompt_max_items:
   en: "Maximum next-prompt items captured by hooks and checkpoint"
   ko: "hook/checkpoint가 저장할 다음 프롬프트 항목 최대 개수"
@@ -862,6 +867,11 @@ settings.category.display:
   ko: 표시
   ja: 表示
   zh: 显示
+settings.category.language:
+  en: Language
+  ko: 언어
+  ja: 言語
+  zh: 语言
 settings.category.security:
   en: Security
   ko: 보안
@@ -903,10 +913,15 @@ settings.category_desc.paths:
   ja: home、store、IPC、logs、account のパスを設定
   zh: 配置 home、store、IPC、logs、account 路径
 settings.category_desc.display:
-  en: Configure language, theme, compact mode, and charts
-  ko: 언어, 테마, compact mode, 차트 표시 설정
-  ja: 言語、テーマ、compact mode、チャート表示を設定
-  zh: 配置语言、主题、compact mode 和图表显示
+  en: Configure TUI theme, compact mode, and charts
+  ko: TUI 테마, compact mode, 차트 표시 설정
+  ja: TUIテーマ、compact mode、チャート表示を設定
+  zh: 配置 TUI 主题、compact mode 和图表显示
+settings.category_desc.language:
+  en: Configure UI and capsule creation languages
+  ko: UI와 캡슐 생성 언어 설정
+  ja: UI とカプセル生成言語を設定
+  zh: 配置 UI 和胶囊生成语言
 settings.category_desc.security:
   en: Configure masking, redaction, and sensitive-action policy
   ko: masking, redaction, 민감 작업 정책 설정
@@ -1493,3 +1508,103 @@ state.archived:
   ko: 보관됨
   ja: アーカイブ済み
   zh: 已归档
+setting_label.five_hour_enabled:
+  en: "5-hour trigger"
+  ko: "5시간 트리거"
+  ja: "5時間トリガー"
+  zh: "5 小时触发器"
+setting_label.threshold:
+  en: "5-hour threshold"
+  ko: "5시간 한도 기준"
+  ja: "5時間しきい値"
+  zh: "5 小时阈值"
+setting_label.mode:
+  en: "5-hour mode"
+  ko: "5시간 모드"
+  ja: "5時間モード"
+  zh: "5 小时模式"
+setting_label.burn_enabled:
+  en: "Burn-rate trigger"
+  ko: "소진 속도 트리거"
+  ja: "消費速度トリガー"
+  zh: "消耗速度触发器"
+setting_label.runway:
+  en: "Burn-rate runway"
+  ko: "소진 속도 남은 시간"
+  ja: "消費速度の残り時間"
+  zh: "消耗速度剩余时间"
+setting_label.autostart:
+  en: "Autostart daemon"
+  ko: "데몬 자동 시작"
+  ja: "デーモン自動起動"
+  zh: "守护进程自动启动"
+setting_label.statusline:
+  en: "Agent status line"
+  ko: "에이전트 상태줄"
+  ja: "エージェント状態行"
+  zh: "代理状态栏"
+setting_label.language:
+  en: "Language"
+  ko: "언어"
+  ja: "言語"
+  zh: "语言"
+setting_label.capsule_format:
+  en: "Capsule format"
+  ko: "캡슐 형식"
+  ja: "カプセル形式"
+  zh: "胶囊格式"
+setting_label.capsule_language:
+  en: "Capsule creation language"
+  ko: "캡슐 생성 언어"
+  ja: "カプセル生成言語"
+  zh: "胶囊生成语言"
+setting_label.capsule_next_prompt_max_items:
+  en: "Next prompt max items"
+  ko: "다음 프롬프트 최대 개수"
+  ja: "次プロンプト最大件数"
+  zh: "下一个提示最大数量"
+setting_label.capsule_remaining_max_items:
+  en: "Remaining work max items"
+  ko: "남은 작업 최대 개수"
+  ja: "残作業最大件数"
+  zh: "剩余工作最大数量"
+setting_label.capsule_done_max_items:
+  en: "Done max items"
+  ko: "완료 항목 최대 개수"
+  ja: "完了項目最大件数"
+  zh: "完成项最大数量"
+setting_label.capsule_risks_max_items:
+  en: "Risk max items"
+  ko: "위험 항목 최대 개수"
+  ja: "リスク項目最大件数"
+  zh: "风险项最大数量"
+setting_label.theme_preset:
+  en: "Theme preset"
+  ko: "테마 프리셋"
+  ja: "テーマプリセット"
+  zh: "主题预设"
+setting_label.theme_codex_color:
+  en: "Codex color"
+  ko: "코덱스 색상"
+  ja: "Codex色"
+  zh: "Codex 颜色"
+setting_label.theme_claude_color:
+  en: "Claude color"
+  ko: "클로드 색상"
+  ja: "Claude色"
+  zh: "Claude 颜色"
+setting_label.theme_focus_border_color:
+  en: "Focus border color"
+  ko: "포커스 외곽선 색상"
+  ja: "フォーカス枠色"
+  zh: "焦点边框颜色"
+setting_label.theme_selection_bg_color:
+  en: "Selection background"
+  ko: "선택 배경색"
+  ja: "選択背景色"
+  zh: "选中背景色"
+setting_label.theme_selection_fg_color:
+  en: "Selection text color"
+  ko: "선택 글자색"
+  ja: "選択文字色"
+  zh: "选中文字色"
