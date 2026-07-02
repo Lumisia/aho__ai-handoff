@@ -26,12 +26,33 @@ jobs:
         include:
           - os: ubuntu-latest
             target_name: linux-x86_64
+            rust_target: x86_64-unknown-linux-gnu
+            bin_name: ai-handoff
+            ext: tar.gz
+          - os: ubuntu-24.04-arm
+            target_name: linux-aarch64
+            rust_target: aarch64-unknown-linux-gnu
+            bin_name: ai-handoff
             ext: tar.gz
           - os: macos-14
             target_name: darwin-aarch64
+            rust_target: aarch64-apple-darwin
+            bin_name: ai-handoff
+            ext: tar.gz
+          - os: macos-15-intel
+            target_name: darwin-x86_64
+            rust_target: x86_64-apple-darwin
+            bin_name: ai-handoff
             ext: tar.gz
           - os: windows-latest
             target_name: windows-x86_64
+            rust_target: x86_64-pc-windows-msvc
+            bin_name: ai-handoff.exe
+            ext: zip
+          - os: windows-11-arm
+            target_name: windows-aarch64
+            rust_target: aarch64-pc-windows-msvc
+            bin_name: ai-handoff.exe
             ext: zip
     runs-on: ${{ matrix.os }}
     steps:
@@ -39,25 +60,37 @@ jobs:
         with:
           ref: ${{ inputs.tag || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --release -p ai-handoff-cli
+      - run: rustup target add ${{ matrix.rust_target }}
+      - run: cargo build --release -p ai-handoff-cli --target ${{ matrix.rust_target }}
 
       - name: Package (unix)
         if: runner.os != 'Windows'
         run: |
           artifact="ai-handoff-cli-${{ matrix.target_name }}.${{ matrix.ext }}"
-          tar -czf "$artifact" -C target/release ai-handoff
+          tar -czf "$artifact" -C target/${{ matrix.rust_target }}/release ${{ matrix.bin_name }}
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$artifact" > "$artifact.sha256"
+          else
+            shasum -a 256 "$artifact" > "$artifact.sha256"
+          fi
           echo "ARTIFACT=$artifact" >> "$GITHUB_ENV"
+          echo "CHECKSUM=$artifact.sha256" >> "$GITHUB_ENV"
 
       - name: Package (windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $artifact = "ai-handoff-cli-${{ matrix.target_name }}.${{ matrix.ext }}"
-          Compress-Archive -Path target/release/ai-handoff.exe -DestinationPath $artifact -Force
+          Compress-Archive -Path "target/${{ matrix.rust_target }}/release/${{ matrix.bin_name }}" -DestinationPath $artifact -Force
+          $hash = (Get-FileHash -Path $artifact -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $artifact" | Set-Content -Path "$artifact.sha256" -Encoding ascii
           "ARTIFACT=$artifact" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "CHECKSUM=$artifact.sha256" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
-          files: ${{ env.ARTIFACT }}
+          files: |
+            ${{ env.ARTIFACT }}
+            ${{ env.CHECKSUM }}
