@@ -492,6 +492,10 @@ pub struct App {
     settings_search: Option<String>,
     settings_search_editing: bool,
     settings_edit_buf: Option<String>,
+    /// Selected row inside the Update category (version / update / uninstall).
+    update_sel: usize,
+    /// The uninstall row needs a second Enter/y to confirm; armed here.
+    update_confirm_delete: bool,
     theme: TuiTheme,
     config_path: PathBuf,
     usage_focus: UsageFocus,
@@ -558,7 +562,14 @@ struct SettingCategory {
     desc_key: &'static str,
 }
 
-const SETTING_CATEGORIES: [SettingCategory; 10] = [
+/// Index of the synthetic "Update" category: it holds actions (version /
+/// update / uninstall) instead of config rows.
+const UPDATE_CATEGORY_IDX: usize = 10;
+/// Rows in the Update category: 0 = current version (read-only), 1 = update,
+/// 2 = uninstall.
+const UPDATE_ITEM_COUNT: usize = 3;
+
+const SETTING_CATEGORIES: [SettingCategory; 11] = [
     SettingCategory {
         key: "settings.category.all",
         desc_key: "settings.category_desc.all",
@@ -599,6 +610,10 @@ const SETTING_CATEGORIES: [SettingCategory; 10] = [
         key: "settings.category.advanced",
         desc_key: "settings.category_desc.advanced",
     },
+    SettingCategory {
+        key: "settings.category.update",
+        desc_key: "settings.category_desc.update",
+    },
 ];
 
 impl App {
@@ -636,6 +651,8 @@ impl App {
             settings_search: None,
             settings_search_editing: false,
             settings_edit_buf: None,
+            update_sel: 0,
+            update_confirm_delete: false,
             theme: TuiTheme::default(),
             config_path,
             usage_focus: UsageFocus::Chart,
@@ -926,6 +943,11 @@ impl App {
         }
         if self.focus_content {
             if self.tab == Tab::Settings {
+                if self.update_confirm_delete {
+                    self.update_confirm_delete = false;
+                    self.status = t!("status.uninstall_cancelled").into_owned();
+                    return;
+                }
                 if self.settings_edit_buf.take().is_some() {
                     self.status = t!("status.settings_edit_cancelled").into_owned();
                     return;
@@ -1081,14 +1103,23 @@ impl App {
             }
             KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ') => {
                 self.settings_focus = SettingsFocus::Detail;
-                self.select_first_setting_in_category();
-                self.show_setting_desc();
+                if self.settings_category_idx == UPDATE_CATEGORY_IDX {
+                    self.update_sel = 0;
+                    self.update_confirm_delete = false;
+                    self.show_update_item_desc();
+                } else {
+                    self.select_first_setting_in_category();
+                    self.show_setting_desc();
+                }
             }
             _ => {}
         }
     }
 
     fn on_settings_detail_key(&mut self, key: KeyEvent) {
+        if self.settings_category_idx == UPDATE_CATEGORY_IDX {
+            return self.on_settings_update_key(key);
+        }
         match key.code {
             KeyCode::Left => self.edit_current(EditAction::Prev),
             KeyCode::Up | KeyCode::Char('k') => {
@@ -1119,6 +1150,74 @@ impl App {
 
     fn selected_setting_kind(&self) -> Option<KeyKind> {
         self.settings.get(self.settings_idx).map(|row| row.kind)
+    }
+
+    /// Keys inside the Update category (version / update / uninstall rows).
+    fn on_settings_update_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.update_confirm_delete = false;
+                self.update_sel = self.update_sel.saturating_sub(1);
+                self.show_update_item_desc();
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.update_confirm_delete = false;
+                self.update_sel = (self.update_sel + 1).min(UPDATE_ITEM_COUNT - 1);
+                self.show_update_item_desc();
+            }
+            KeyCode::Char('y') if self.update_confirm_delete => self.run_self_uninstall(),
+            KeyCode::Char('n') if self.update_confirm_delete => {
+                self.update_confirm_delete = false;
+                self.status = t!("status.uninstall_cancelled").into_owned();
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => match self.update_sel {
+                0 => self.status = t!("settings.update.readonly").into_owned(),
+                1 => self.run_self_update(),
+                2 if self.update_confirm_delete => self.run_self_uninstall(),
+                2 => {
+                    // First Enter only arms; the bottom help bar asks for the
+                    // second Enter/y (Esc cancels).
+                    self.update_confirm_delete = true;
+                    self.status = t!("status.uninstall_confirm").into_owned();
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+
+    fn show_update_item_desc(&mut self) {
+        self.status = match self.update_sel {
+            0 => t!(
+                "settings.update.desc.version",
+                version = env!("CARGO_PKG_VERSION")
+            )
+            .into_owned(),
+            1 => t!("settings.update.desc.run").into_owned(),
+            _ => t!("settings.update.desc.uninstall").into_owned(),
+        };
+    }
+
+    /// Open a new window running `ai-handoff update` (the TUI keeps running;
+    /// the installer swaps the binary via rename-then-copy).
+    fn run_self_update(&mut self) {
+        match spawn_cli_window(&["update"]) {
+            Ok(()) => self.status = t!("status.update_started").into_owned(),
+            Err(e) => self.status = t!("status.update_failed", err = e).into_owned(),
+        }
+    }
+
+    /// Open a new window running `ai-handoff uninstall --yes` (TUI/CLI scope
+    /// only), then quit so the uninstaller can remove the binary.
+    fn run_self_uninstall(&mut self) {
+        self.update_confirm_delete = false;
+        match spawn_cli_window(&["uninstall", "--yes"]) {
+            Ok(()) => {
+                self.status = t!("status.uninstall_started").into_owned();
+                self.should_quit = true;
+            }
+            Err(e) => self.status = t!("status.uninstall_failed", err = e).into_owned(),
+        }
     }
 
     fn select_first_setting_in_category(&mut self) {
@@ -3693,6 +3792,8 @@ impl App {
             .map(|(idx, category)| {
                 let count = if idx == 0 {
                     self.settings.len()
+                } else if idx == UPDATE_CATEGORY_IDX {
+                    UPDATE_ITEM_COUNT
                 } else {
                     self.settings
                         .iter()
@@ -3718,6 +3819,11 @@ impl App {
                 .block(self.focus_block(t!("settings.categories").into_owned(), category_focused)),
             cols[0],
         );
+
+        if self.settings_category_idx == UPDATE_CATEGORY_IDX {
+            self.draw_settings_update(f, cols[1], detail_focused);
+            return;
+        }
 
         let active_indices = self.setting_indices_in_active_category();
         if active_indices.is_empty() {
@@ -3785,6 +3891,89 @@ impl App {
         f.render_widget(table, right[0]);
 
         let detail = Paragraph::new(self.settings_detail_lines())
+            .wrap(Wrap { trim: false })
+            .block(self.focus_block(t!("settings.detail_title"), detail_focused));
+        f.render_widget(detail, right[1]);
+    }
+
+    /// Right pane of the Update category: version (read-only), update, and a
+    /// red uninstall action with a two-step confirm surfaced in the help bar.
+    fn draw_settings_update(&self, f: &mut Frame, area: Rect, detail_focused: bool) {
+        let category = &SETTING_CATEGORIES[UPDATE_CATEGORY_IDX];
+        let right = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(8), Constraint::Length(9)])
+            .split(area);
+
+        let labels = [
+            (
+                t!("settings.update.version").into_owned(),
+                format!("v{}", env!("CARGO_PKG_VERSION")),
+                Style::default(),
+            ),
+            (
+                t!("settings.update.run").into_owned(),
+                String::new(),
+                Style::default(),
+            ),
+            (
+                t!("settings.update.uninstall").into_owned(),
+                String::new(),
+                Style::default().fg(Color::Red),
+            ),
+        ];
+        let rows = labels
+            .iter()
+            .enumerate()
+            .map(|(idx, (label, value, style))| {
+                let style = if idx == self.update_sel {
+                    if idx == 2 {
+                        self.selection_style().fg(Color::Red)
+                    } else {
+                        self.selection_style()
+                    }
+                } else {
+                    *style
+                };
+                Row::new([Cell::from(label.clone()), Cell::from(value.clone())]).style(style)
+            });
+        let title = format!("{} — {}", t!(category.key), t!(category.desc_key));
+        let table = Table::new(rows, [Constraint::Min(36), Constraint::Length(14)])
+            .header(
+                Row::new([
+                    t!("table.setting").into_owned(),
+                    t!("table.value").into_owned(),
+                ])
+                .style(Style::default().add_modifier(Modifier::BOLD)),
+            )
+            .block(self.focus_block(title, detail_focused));
+        f.render_widget(table, right[0]);
+
+        let mut lines = vec![
+            Line::from(vec![
+                Span::styled(
+                    t!("settings.update.version").into_owned(),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(format!(" v{}", env!("CARGO_PKG_VERSION"))),
+            ]),
+            Line::from(match self.update_sel {
+                0 => t!(
+                    "settings.update.desc.version",
+                    version = env!("CARGO_PKG_VERSION")
+                )
+                .into_owned(),
+                1 => t!("settings.update.desc.run").into_owned(),
+                _ => t!("settings.update.desc.uninstall").into_owned(),
+            }),
+        ];
+        if self.update_confirm_delete {
+            lines.push(Line::from(Span::styled(
+                t!("status.uninstall_confirm").into_owned(),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            )));
+        }
+        let detail = Paragraph::new(lines)
             .wrap(Wrap { trim: false })
             .block(self.focus_block(t!("settings.detail_title"), detail_focused));
         f.render_widget(detail, right[1]);
@@ -3961,6 +4150,43 @@ fn apply_autostart(on: bool) -> std::io::Result<()> {
             "autostart command exited with {status}"
         )))
     }
+}
+
+/// Run `ai-handoff <args>` in a NEW terminal window so the user can watch the
+/// installer/uninstaller output while (or after) the TUI runs.
+fn spawn_cli_window(args: &[&str]) -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // `cmd /C start "" cmd /K ""<exe>" args"`: the doubled leading quote is
+        // the cmd.exe idiom that survives a space-containing exe path, and /K
+        // keeps the window open so the final message stays readable.
+        let mut line = format!("\"\"{}\"", exe.display());
+        for arg in args {
+            line.push(' ');
+            line.push_str(arg);
+        }
+        line.push('"');
+        let mut command = std::process::Command::new("cmd");
+        command.arg("/C");
+        command.raw_arg(format!("start \"AI Handoff\" cmd /K {line}"));
+        command
+            .spawn()
+            .map_err(|e| format!("could not open a new window: {e}"))?;
+    }
+    #[cfg(not(windows))]
+    {
+        // No portable "new terminal" primitive; run detached in the background.
+        std::process::Command::new(exe)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| format!("could not launch ai-handoff: {e}"))?;
+    }
+    Ok(())
 }
 
 /// Translated name of an editable capsule field.
@@ -4837,8 +5063,67 @@ mod tests {
                 "settings.category.security",
                 "settings.category.agents",
                 "settings.category.advanced",
+                "settings.category.update",
             ]
         );
+        assert_eq!(
+            SETTING_CATEGORIES[UPDATE_CATEGORY_IDX].key,
+            "settings.category.update"
+        );
+    }
+
+    #[test]
+    fn update_category_arms_confirm_then_esc_cancels() {
+        let mut app = test_app();
+        app.tab = Tab::Settings;
+        app.focus_content = true;
+        app.settings_focus = SettingsFocus::Detail;
+        app.settings_category_idx = UPDATE_CATEGORY_IDX;
+
+        // Move to the uninstall row (version -> update -> uninstall).
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.update_sel, 2);
+
+        // First Enter only arms the confirm; nothing is executed and the help
+        // bar asks the "really uninstall?" question.
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.update_confirm_delete);
+        assert!(!app.should_quit);
+        assert_eq!(app.status, t!("status.uninstall_confirm").into_owned());
+
+        // Esc cancels instead of leaving the settings content.
+        app.on_key(key(KeyCode::Esc));
+        assert!(!app.update_confirm_delete);
+        assert!(app.focus_content);
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn update_category_selection_moves_and_version_row_is_read_only() {
+        let mut app = test_app();
+        app.tab = Tab::Settings;
+        app.focus_content = true;
+        app.settings_focus = SettingsFocus::Category;
+        app.settings_category_idx = UPDATE_CATEGORY_IDX;
+
+        // Entering the category lands on the read-only version row.
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.settings_focus, SettingsFocus::Detail);
+        assert_eq!(app.update_sel, 0);
+
+        // Enter on the version row does nothing but explain it is read-only.
+        app.on_key(key(KeyCode::Enter));
+        assert!(!app.update_confirm_delete);
+        assert_eq!(app.status, t!("settings.update.readonly").into_owned());
+
+        // Moving the selection disarms any pending confirm.
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.update_confirm_delete);
+        app.on_key(key(KeyCode::Up));
+        assert!(!app.update_confirm_delete);
     }
 
     #[test]

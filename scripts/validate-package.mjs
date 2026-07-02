@@ -6,6 +6,9 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const releaseWorkflow = readFileSync(join(root, '.github/workflows/release.yml'), 'utf8');
 const installSh = readFileSync(join(root, 'scripts/install.sh'), 'utf8');
 const installPs1 = readFileSync(join(root, 'scripts/install.ps1'), 'utf8');
+const tauriConf = JSON.parse(
+  readFileSync(join(root, 'apps/desktop/src-tauri/tauri.conf.json'), 'utf8'),
+);
 const required = [
   '.claude-plugin/plugin.json', '.codex-plugin/plugin.json',
   '.claude-plugin/marketplace.json', '.agents/plugins/marketplace.json',
@@ -57,10 +60,27 @@ for (const target of [
 if (!releaseWorkflow.includes('.sha256') || !releaseWorkflow.includes('Get-FileHash')) {
   throw new Error('release workflow must publish sha256 checksum files');
 }
+for (const target of ['windows-x86_64', 'windows-aarch64']) {
+  if (!releaseWorkflow.includes(`ai-handoff-gui-${target}-setup.exe`)) {
+    throw new Error(`release workflow missing Windows GUI artifact: ${target}`);
+  }
+}
 if (!installSh.includes('.sha256') || !installSh.includes('sha256sum') || !installSh.includes('shasum -a 256')) {
   throw new Error('install.sh must verify sha256 checksums');
 }
 if (!installPs1.includes('.sha256') || !installPs1.includes('Get-FileHash')) {
   throw new Error('install.ps1 must verify sha256 checksums');
+}
+if (installPs1.includes('-WithGui is not available')) {
+  throw new Error('install.ps1 -WithGui must install the Windows GUI artifact');
+}
+if (!installPs1.includes('Install-Gui')) {
+  throw new Error('install.ps1 must expose an Install-Gui helper');
+}
+if (tauriConf.bundle?.active !== true) {
+  throw new Error('Tauri desktop bundle must be active for release builds');
+}
+if (!tauriConf.bundle?.icon?.includes('icons/icon.ico')) {
+  throw new Error('Tauri desktop bundle must use icons/icon.ico');
 }
 process.stdout.write(`package valid: ${claude.name}@${claude.version} (marketplace: ${claudeMarket.name})\n`);

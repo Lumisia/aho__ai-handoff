@@ -4,15 +4,24 @@ import {
   Bot,
   Box,
   CircleHelp,
+  DownloadCloud,
   Languages,
   Palette,
   Play,
   RotateCcw,
   SlidersHorizontal,
+  Trash2,
   Zap,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { getConfigSettings, resetConfigValue, setConfigValue } from "../api";
+import {
+  getAppVersion,
+  getConfigSettings,
+  resetConfigValue,
+  runAppUninstall,
+  runAppUpdate,
+  setConfigValue,
+} from "../api";
 import type { ConfigRow } from "../types";
 import type { Translator } from "../i18n";
 
@@ -87,7 +96,11 @@ const categoryIcons: Record<string, LucideIcon> = {
   theme: Palette,
   agents: Bot,
   advanced: SlidersHorizontal,
+  update: DownloadCloud,
 };
+
+// Synthetic category: holds the version/update/uninstall actions, not rows.
+const UPDATE_CATEGORY = "update";
 
 const namedColors: Record<string, string> = {
   black: "#000000",
@@ -261,6 +274,97 @@ function SettingValueEditor({
   );
 }
 
+function UpdatePanel({ t }: { t: Translator }) {
+  const [version, setVersion] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    getAppVersion()
+      .then(setVersion)
+      .catch((err) => setError(err instanceof Error ? err.message : String(err)));
+  }, []);
+
+  async function runAction(action: () => Promise<{ message: string }>, doneKey: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      await action();
+      setMessage(t(doneKey));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="update-panel">
+      {error && <div className="banner error">{error}</div>}
+      {message && <div className="banner">{message}</div>}
+      <div className="update-row">
+        <div className="update-row-text">
+          <strong>{t("settingUpdateVersion")}</strong>
+          <span>{t("settingUpdateVersionHelp")}</span>
+        </div>
+        <code className="update-version">{version ? `v${version}` : "..."}</code>
+      </div>
+      <div className="update-row">
+        <div className="update-row-text">
+          <strong>{t("settingUpdateRun")}</strong>
+          <span>{t("settingUpdateRunHelp")}</span>
+        </div>
+        <button
+          disabled={busy}
+          onClick={() => void runAction(runAppUpdate, "settingUpdateStarted")}
+        >
+          <DownloadCloud size={15} />
+          <span>{t("settingUpdateRun")}</span>
+        </button>
+      </div>
+      <div className="update-row">
+        <div className="update-row-text">
+          <strong className="update-danger-text">{t("settingUpdateUninstall")}</strong>
+          <span>{t("settingUpdateUninstallHelp")}</span>
+        </div>
+        <button className="update-danger-button" disabled={busy} onClick={() => setConfirming(true)}>
+          <Trash2 size={15} />
+          <span>{t("settingUpdateUninstall")}</span>
+        </button>
+      </div>
+      {confirming && (
+        <div className="modal-backdrop" onMouseDown={() => setConfirming(false)}>
+          <section
+            className="confirm-modal"
+            role="alertdialog"
+            aria-modal="true"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <h3>{t("settingUpdateConfirmTitle")}</h3>
+            <p>{t("settingUpdateConfirmBody")}</p>
+            <div className="confirm-modal-actions">
+              <button disabled={busy} onClick={() => setConfirming(false)}>
+                {t("cancel")}
+              </button>
+              <button
+                className="update-danger-button"
+                disabled={busy}
+                onClick={() => {
+                  setConfirming(false);
+                  void runAction(runAppUninstall, "settingUninstallStarted");
+                }}
+              >
+                {t("settingUpdateUninstall")}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function SettingsView({
   onThemeChanged,
   t,
@@ -286,7 +390,7 @@ export default function SettingsView({
 
   const categories = useMemo(() => {
     const set = new Set(rows.map((row) => row.category));
-    return ["all", ...Array.from(set)];
+    return ["all", ...Array.from(set), UPDATE_CATEGORY];
   }, [rows]);
 
   const filtered = rows.filter((row) => {
@@ -345,7 +449,13 @@ export default function SettingsView({
             >
               <Icon size={16} />
               <span>{t(item)}</span>
-              <small>{item === "all" ? rows.length : rows.filter((row) => row.category === item).length}</small>
+              <small>
+                {item === UPDATE_CATEGORY
+                  ? ""
+                  : item === "all"
+                    ? rows.length
+                    : rows.filter((row) => row.category === item).length}
+              </small>
             </button>
           );
         })}
@@ -353,6 +463,8 @@ export default function SettingsView({
       <section className="settings-main">
         {error && <div className="banner error">{error}</div>}
         {loading && <section className="loading-screen">{t("loadSettings")}</section>}
+        {category === UPDATE_CATEGORY && <UpdatePanel t={t} />}
+        {category !== UPDATE_CATEGORY && (
         <div className="setting-table">
           <div className="table-row head">
             <span>{t("setting")}</span>
@@ -410,6 +522,7 @@ export default function SettingsView({
             </div>
           ))}
         </div>
+        )}
       </section>
     </div>
   );

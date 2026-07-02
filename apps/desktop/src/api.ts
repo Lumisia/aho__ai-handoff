@@ -297,3 +297,15 @@ export function ensureDaemonRunning(): Promise<MenuCommandResult> {
 export function openProjectGithub(): Promise<MenuCommandResult> {
   return invoke("open_project_github");
 }
+
+export function getAppVersion(): Promise<string> {
+  return invoke("get_app_version");
+}
+
+export function runAppUpdate(): Promise<MenuCommandResult> {
+  return invoke("run_app_update");
+}
+
+export function runAppUninstall(): Promise<MenuCommandResult> {
+  return invoke("run_app_uninstall");
+}

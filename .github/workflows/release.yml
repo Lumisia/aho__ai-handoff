@@ -94,3 +94,52 @@ jobs:
           files: |
             ${{ env.ARTIFACT }}
             ${{ env.CHECKSUM }}
+
+  desktop-windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target_name: windows-x86_64
+            rust_target: x86_64-pc-windows-msvc
+            gui_artifact: ai-handoff-gui-windows-x86_64-setup.exe
+          - os: windows-11-arm
+            target_name: windows-aarch64
+            rust_target: aarch64-pc-windows-msvc
+            gui_artifact: ai-handoff-gui-windows-aarch64-setup.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+      - run: rustup target add ${{ matrix.rust_target }}
+      - run: npm --prefix apps/desktop ci
+      - run: npm --prefix apps/desktop run tauri build -- --target ${{ matrix.rust_target }}
+
+      - name: Package Windows GUI
+        shell: pwsh
+        run: |
+          $bundleDir = "target/${{ matrix.rust_target }}/release/bundle/nsis"
+          $source = Get-ChildItem -Path $bundleDir -Filter "*-setup.exe" -File | Select-Object -First 1
+          if (-not $source) {
+            throw "No NSIS setup executable found in $bundleDir"
+          }
+          $artifact = "${{ matrix.gui_artifact }}"
+          Copy-Item -LiteralPath $source.FullName -Destination $artifact -Force
+          $hash = (Get-FileHash -Path $artifact -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $artifact" | Set-Content -Path "$artifact.sha256" -Encoding ascii
+          "ARTIFACT=$artifact" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "CHECKSUM=$artifact.sha256" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Upload GUI to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: |
+            ${{ env.ARTIFACT }}
+            ${{ env.CHECKSUM }}

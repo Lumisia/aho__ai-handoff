@@ -499,6 +499,91 @@ async fn open_project_github() -> Result<MenuCommandResult, String> {
     .await
 }
 
+#[tauri::command]
+fn get_app_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
+/// Start `ai-handoff update --gui` in a visible console window, then quit the
+/// app shortly after so the installer can replace the running GUI files.
+#[tauri::command]
+async fn run_app_update(app: tauri::AppHandle) -> Result<MenuCommandResult, String> {
+    let result = blocking_command("run_app_update", || {
+        let exe = cli_executable()?;
+        spawn_cli_console_window(&exe, &["update", "--gui"])?;
+        Ok(MenuCommandResult {
+            message: "update started".into(),
+        })
+    })
+    .await?;
+    exit_app_soon(app);
+    Ok(result)
+}
+
+/// Start `ai-handoff uninstall --gui --yes` (GUI removal always includes the
+/// TUI/CLI) in a visible console window, then quit the app so its files are
+/// no longer locked when the NSIS uninstaller runs.
+#[tauri::command]
+async fn run_app_uninstall(app: tauri::AppHandle) -> Result<MenuCommandResult, String> {
+    let result = blocking_command("run_app_uninstall", || {
+        let exe = cli_executable()?;
+        spawn_cli_console_window(&exe, &["uninstall", "--gui", "--yes"])?;
+        Ok(MenuCommandResult {
+            message: "uninstall started".into(),
+        })
+    })
+    .await?;
+    exit_app_soon(app);
+    Ok(result)
+}
+
+/// Quit shortly after the invoke response is delivered, giving the frontend a
+/// moment to show the "started" message.
+fn exit_app_soon(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(1200));
+        app.exit(0);
+    });
+}
+
+/// Run `ai-handoff <args>` in a NEW console window the user can watch. The
+/// CLI update/uninstall must outlive this process, so it cannot be a hidden
+/// child.
+fn spawn_cli_console_window(exe: &Path, args: &[&str]) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // `cmd /C start "" cmd /K ""<exe>" args"`: the doubled leading quote
+        // survives a space-containing exe path; /K keeps the window open so
+        // the final message stays readable. raw_arg avoids std's quote
+        // escaping, which cmd.exe does not understand.
+        let mut line = format!("\"\"{}\"", exe.display());
+        for arg in args {
+            line.push(' ');
+            line.push_str(arg);
+        }
+        line.push('"');
+        let mut command = Command::new("cmd");
+        command.arg("/C");
+        command.raw_arg(format!("start \"AI Handoff\" cmd /K {line}"));
+        command
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| format!("could not open a console window: {error}"))
+    }
+    #[cfg(not(windows))]
+    {
+        Command::new(exe)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| format!("could not launch ai-handoff: {error}"))
+    }
+}
+
 fn config_rows_for(path: &Path) -> Result<Vec<ConfigRow>, String> {
     let cfg = config::load_from(path);
     desktop_config_keys()
@@ -1692,7 +1777,10 @@ fn main() {
             open_logs_folder,
             reinstall_hooks,
             ensure_daemon_running,
-            open_project_github
+            open_project_github,
+            get_app_version,
+            run_app_update,
+            run_app_uninstall
         ])
         .run(tauri::generate_context!())
         .expect("error while running AI Handoff desktop app");

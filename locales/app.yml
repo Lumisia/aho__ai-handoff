@@ -101,6 +101,36 @@ status.field_error:
   ko: "%{key}: %{err}"
   ja: "%{key}: %{err}"
   zh: "%{key}: %{err}"
+status.update_started:
+  en: "update window opened — restart ai-handoff when it finishes"
+  ko: "업데이트 창을 열었습니다 — 완료 후 ai-handoff를 다시 시작하세요"
+  ja: "アップデートウィンドウを開きました — 完了後に ai-handoff を再起動してください"
+  zh: "已打开更新窗口 — 完成后请重启 ai-handoff"
+status.update_failed:
+  en: "update failed: %{err}"
+  ko: "업데이트 실패: %{err}"
+  ja: "アップデート失敗: %{err}"
+  zh: "更新失败: %{err}"
+status.uninstall_confirm:
+  en: "Really uninstall the TUI/CLI? Enter/y confirm · Esc cancel"
+  ko: "정말로 삭제하시겠습니까? Enter/y 확정 · Esc 취소"
+  ja: "本当に削除しますか？ Enter/y 確定 · Esc キャンセル"
+  zh: "确定要卸载吗？ Enter/y 确认 · Esc 取消"
+status.uninstall_started:
+  en: "uninstall window opened — the TUI will now close"
+  ko: "삭제 창을 열었습니다 — TUI를 종료합니다"
+  ja: "アンインストールウィンドウを開きました — TUI を終了します"
+  zh: "已打开卸载窗口 — TUI 即将关闭"
+status.uninstall_cancelled:
+  en: "uninstall cancelled"
+  ko: "삭제를 취소했습니다"
+  ja: "削除をキャンセルしました"
+  zh: "已取消卸载"
+status.uninstall_failed:
+  en: "uninstall failed: %{err}"
+  ko: "삭제 실패: %{err}"
+  ja: "削除失敗: %{err}"
+  zh: "卸载失败: %{err}"
 status.autostart_on:
   en: "autostart enabled (runs at logon)"
   ko: "자동 시작 켜짐 (로그온 시 실행)"
@@ -942,6 +972,51 @@ settings.category_desc.advanced:
   ko: 고급 사용자를 위한 raw key/value 설정
   ja: 上級ユーザー向けの raw key/value 設定
   zh: 面向高级用户的 raw key/value 配置
+settings.category.update:
+  en: Update
+  ko: 업데이트
+  ja: アップデート
+  zh: 更新
+settings.category_desc.update:
+  en: Check the version, update, or uninstall
+  ko: 버전 확인, 업데이트, 삭제
+  ja: バージョン確認、更新、アンインストール
+  zh: 查看版本、更新或卸载
+settings.update.version:
+  en: Current version
+  ko: 현재 버전
+  ja: 現在のバージョン
+  zh: 当前版本
+settings.update.run:
+  en: Update now
+  ko: 업데이트하기
+  ja: 今すぐアップデート
+  zh: 立即更新
+settings.update.uninstall:
+  en: Uninstall
+  ko: 삭제하기
+  ja: アンインストール
+  zh: 卸载
+settings.update.readonly:
+  en: "Current version is read-only."
+  ko: "현재 버전은 읽기 전용 항목입니다."
+  ja: "現在のバージョンは読み取り専用です。"
+  zh: "当前版本为只读项。"
+settings.update.desc.version:
+  en: "Installed AI Handoff version: v%{version} (read-only)."
+  ko: "설치된 AI Handoff 버전: v%{version} (읽기 전용)."
+  ja: "インストール済みの AI Handoff バージョン: v%{version}（読み取り専用）。"
+  zh: "已安装的 AI Handoff 版本：v%{version}（只读）。"
+settings.update.desc.run:
+  en: "Enter opens a new window that downloads and installs the latest release."
+  ko: "Enter를 누르면 새 창에서 최신 릴리즈를 내려받아 설치합니다."
+  ja: "Enter で新しいウィンドウを開き、最新リリースをダウンロードしてインストールします。"
+  zh: "按 Enter 打开新窗口，下载并安装最新版本。"
+settings.update.desc.uninstall:
+  en: "Removes the AI Handoff TUI/CLI from this machine (the GUI has its own uninstall in its settings)."
+  ko: "이 컴퓨터에서 AI Handoff TUI/CLI를 삭제합니다 (GUI는 GUI 설정에서 삭제)."
+  ja: "このマシンから AI Handoff TUI/CLI を削除します（GUI は GUI 設定から削除）。"
+  zh: "从本机移除 AI Handoff TUI/CLI（GUI 请在 GUI 设置中卸载）。"
 settings.empty_category:
   en: "No editable settings in this category yet."
   ko: "아직 이 카테고리에 편집 가능한 설정이 없습니다."

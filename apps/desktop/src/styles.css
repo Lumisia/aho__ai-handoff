@@ -2335,3 +2335,101 @@ body {
     padding: 18px 16px;
   }
 }
+
+/* ── Settings: Update category ─────────────────────────────────────────── */
+
+.update-panel {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+}
+
+.update-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border: 1px solid var(--border-strong-color);
+  border-radius: 8px;
+  background: var(--panel-bg-color);
+  padding: 14px 16px;
+}
+
+.update-row-text {
+  display: grid;
+  gap: 3px;
+}
+
+.update-row-text span {
+  color: var(--muted-color);
+  font-size: 12px;
+}
+
+.update-version {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.update-row button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.update-danger-text {
+  color: #c0392b;
+}
+
+.update-danger-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid #b65a4a;
+  background: #fff7f5;
+  color: #8c2e22;
+  border-radius: 6px;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+.update-danger-button:hover:not(:disabled) {
+  background: #fde8e4;
+}
+
+.gui-dark .update-danger-button {
+  background: rgba(192, 57, 43, 0.14);
+  color: #ff8a7a;
+}
+
+.gui-dark .update-danger-button:hover:not(:disabled) {
+  background: rgba(192, 57, 43, 0.26);
+}
+
+.confirm-modal {
+  width: min(440px, calc(100vw - 60px));
+  border: 1px solid var(--border-strong-color);
+  border-radius: 10px;
+  background: var(--app-bg-color);
+  box-shadow: 0 24px 70px rgba(31, 36, 43, 0.24);
+  padding: 20px 22px;
+}
+
+.confirm-modal h3 {
+  margin: 0 0 8px;
+  font-size: 16px;
+  color: #c0392b;
+}
+
+.confirm-modal p {
+  margin: 0 0 16px;
+  color: var(--muted-color);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.confirm-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}

@@ -63,6 +63,21 @@ pub enum Commands {
         keep_store: bool,
         #[arg(long)]
         purge_store: bool,
+        /// Also remove the desktop GUI app (GUI removal includes the TUI/CLI).
+        #[arg(long)]
+        gui: bool,
+        /// Remove everything: GUI + TUI/CLI + local store/log/ipc data.
+        #[arg(long)]
+        all: bool,
+        /// Skip interactive confirmation prompts.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Update the CLI/TUI (and optionally the GUI) to the latest release.
+    Update {
+        /// Also download and run the latest desktop GUI installer.
+        #[arg(long)]
+        gui: bool,
     },
     Statusline,
     /// View or edit the shared config (applies to Claude and Codex).
@@ -207,7 +222,17 @@ pub fn run_cli(cli: Cli) -> anyhow::Result<i32> {
         Some(Commands::Uninstall {
             keep_store,
             purge_store,
-        }) => commands::uninstall::run(keep_store, purge_store),
+            gui,
+            all,
+            yes,
+        }) => commands::uninstall::run(commands::uninstall::UninstallOptions {
+            keep_store,
+            purge_store,
+            gui,
+            all,
+            yes,
+        }),
+        Some(Commands::Update { gui }) => commands::update::run(gui),
         Some(Commands::Statusline) => commands::statusline::run(),
         Some(Commands::Autostart { action }) => commands::autostart::run_cli(action),
         Some(Commands::Config { action }) => commands::config::run(action),
@@ -391,6 +416,42 @@ mod tests {
             Some(Commands::Install { no_plugin, .. }) => assert!(no_plugin),
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_uninstall_scope_flags() {
+        let bare = Cli::try_parse_from(["ai-handoff", "uninstall"]).unwrap();
+        match bare.command {
+            Some(Commands::Uninstall { gui, all, yes, .. }) => {
+                assert!(!gui);
+                assert!(!all);
+                assert!(!yes);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let full =
+            Cli::try_parse_from(["ai-handoff", "uninstall", "--gui", "--all", "--yes"]).unwrap();
+        match full.command {
+            Some(Commands::Uninstall { gui, all, yes, .. }) => {
+                assert!(gui);
+                assert!(all);
+                assert!(yes);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_update_command() {
+        let bare = Cli::try_parse_from(["ai-handoff", "update"]).unwrap();
+        assert!(matches!(
+            bare.command,
+            Some(Commands::Update { gui: false })
+        ));
+
+        let gui = Cli::try_parse_from(["ai-handoff", "update", "--gui"]).unwrap();
+        assert!(matches!(gui.command, Some(Commands::Update { gui: true })));
     }
 
     #[test]

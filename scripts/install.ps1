@@ -34,10 +34,6 @@ if ($Only -and @('codex', 'claude', 'claude-code') -notcontains $Only) {
 # TLS 1.2 for Windows PowerShell 5.1 (PowerShell 7+ already defaults to it).
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
 
-if ($WithGui) {
-    Write-Warning '-WithGui is not available from this CLI installer yet.'
-}
-
 function Resolve-LatestReleaseTag {
     param([string]$RepoName)
 
@@ -90,6 +86,53 @@ Error: $($_.Exception.Message)
     return $latest.Tag
 }
 
+function Download-CheckedFile {
+    param(
+        [string]$Url,
+        [string]$OutFile
+    )
+
+    $checksumPath = "$OutFile.sha256"
+    Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing
+    Invoke-WebRequest -Uri "$Url.sha256" -OutFile $checksumPath -UseBasicParsing
+    $expectedHash = ((Get-Content -Path $checksumPath -Raw).Trim() -split '\s+')[0].ToLowerInvariant()
+    $actualHash = (Get-FileHash -Path $OutFile -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actualHash -ne $expectedHash) {
+        throw "Checksum mismatch for $(Split-Path -Leaf $OutFile). Expected $expectedHash, got $actualHash."
+    }
+}
+
+function Install-Gui {
+    param(
+        [string]$Url,
+        [string]$Artifact,
+        [string]$TmpDir,
+        [bool]$Silent
+    )
+
+    $installer = Join-Path $TmpDir $Artifact
+    Write-Host "Downloading $Url"
+    try {
+        Download-CheckedFile -Url $Url -OutFile $installer
+    }
+    catch {
+        throw @"
+Could not download $Artifact.
+A published GitHub Release with Windows GUI artifacts is required.
+URL: $Url
+Error: $($_.Exception.Message)
+"@
+    }
+
+    $installerArgs = @()
+    if ($Silent) { $installerArgs += '/S' }
+    Write-Host "Running GUI installer $Artifact"
+    $process = Start-Process -FilePath $installer -ArgumentList $installerArgs -Wait -PassThru
+    if ($process.ExitCode -ne 0) {
+        throw "GUI installer failed with exit code $($process.ExitCode)."
+    }
+}
+
 # --- Resolve the release artifact for this machine ----------------------------
 
 $archRaw = $env:PROCESSOR_ARCHITECTURE
@@ -102,12 +145,14 @@ switch ($archRaw) {
 }
 
 $artifact = "ai-handoff-cli-windows-$arch.zip"
+$guiArtifact = "ai-handoff-gui-windows-$arch-setup.exe"
 $releaseVersion = $Version
 if ($Version -eq 'latest') {
     $releaseVersion = Resolve-LatestReleaseTag -RepoName $repo
     Write-Host "Resolved latest release: $releaseVersion"
 }
 $url = "https://github.com/$repo/releases/download/$releaseVersion/$artifact"
+$guiUrl = "https://github.com/$repo/releases/download/$releaseVersion/$guiArtifact"
 
 # --- Paths --------------------------------------------------------------------
 
@@ -115,7 +160,6 @@ $ahHome = if ($env:AI_HANDOFF_HOME) { $env:AI_HANDOFF_HOME } else { Join-Path $e
 $binDir = Join-Path $ahHome 'bin'
 $tmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("ai-handoff-install-" + [System.Guid]::NewGuid().ToString('N'))
 $archive = Join-Path $tmpDir $artifact
-$checksum = "$archive.sha256"
 $exeName = 'ai-handoff.exe'
 $dest = Join-Path $binDir $exeName
 
@@ -125,8 +169,7 @@ try {
     # --- Download -------------------------------------------------------------
     Write-Host "Downloading $url"
     try {
-        Invoke-WebRequest -Uri $url -OutFile $archive -UseBasicParsing
-        Invoke-WebRequest -Uri "$url.sha256" -OutFile $checksum -UseBasicParsing
+        Download-CheckedFile -Url $url -OutFile $archive
     }
     catch {
         throw @"
@@ -136,11 +179,6 @@ URL: $url
 Error: $($_.Exception.Message)
 "@
     }
-    $expectedHash = ((Get-Content -Path $checksum -Raw).Trim() -split '\s+')[0].ToLowerInvariant()
-    $actualHash = (Get-FileHash -Path $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($actualHash -ne $expectedHash) {
-        throw "Checksum mismatch for $artifact. Expected $expectedHash, got $actualHash."
-    }
 
     # --- Extract --------------------------------------------------------------
     Expand-Archive -Path $archive -DestinationPath $tmpDir -Force
@@ -149,7 +187,20 @@ Error: $($_.Exception.Message)
         throw "artifact did not contain $exeName"
     }
 
-    Copy-Item -Path $found.FullName -Destination $dest -Force
+    # Clean up any leftover from a previous in-place update (best effort: the
+    # old exe may still be running).
+    Remove-Item -Path "$dest.old" -Force -ErrorAction SilentlyContinue
+
+    try {
+        Copy-Item -Path $found.FullName -Destination $dest -Force
+    }
+    catch {
+        # `ai-handoff update` runs this script while the destination exe is the
+        # running process, which locks the file against writes. A locked exe can
+        # still be renamed, so move it aside and copy fresh.
+        Move-Item -Path $dest -Destination "$dest.old" -Force
+        Copy-Item -Path $found.FullName -Destination $dest -Force
+    }
     Write-Host "Installed $dest"
 
     # --- Add bin dir to the user PATH (and this session) ----------------------
@@ -173,6 +224,10 @@ Error: $($_.Exception.Message)
 
     Write-Host "Running ai-handoff $($installArgs -join ' ')"
     & $dest @installArgs
+
+    if ($WithGui) {
+        Install-Gui -Url $guiUrl -Artifact $guiArtifact -TmpDir $tmpDir -Silent ([bool]$Yes)
+    }
 }
 finally {
     Remove-Item -Path $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
