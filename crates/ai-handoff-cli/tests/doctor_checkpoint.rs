@@ -79,6 +79,20 @@ fn doctor_flags_hardened_ipc_subdirs_as_broken() {
     ai_handoff_core::secure_fs::ensure_private_dir(&ai_handoff_core::paths::responses_dir())
         .unwrap();
 
+    // Some sandboxed Windows test environments cannot disable inheritance
+    // (icacls returns Access denied). In that case this fixture did not
+    // reproduce the old bug, so the doctor must not be expected to flag it.
+    if matches!(
+        ai_handoff_core::secure_fs::inherited_subdir_status(
+            &ai_handoff_core::paths::requests_dir()
+        )
+        .status,
+        ai_handoff_core::secure_fs::PermissionStatus::Ok
+    ) {
+        std::env::remove_var("AI_HANDOFF_HOME");
+        return;
+    }
+
     let mut out = Vec::new();
     doctor::run_io(true, &mut out);
     let report: serde_json::Value = serde_json::from_slice(&out).unwrap();

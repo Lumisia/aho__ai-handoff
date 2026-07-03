@@ -11,6 +11,23 @@ Save a handoff capsule immediately so the other agent can pick up where you left
 Use this any time you want to preserve current progress without waiting for the
 automatic 5-hour threshold.
 
+## Automatic threshold prompt
+
+When ai-handoff injects a five-hour threshold prompt, treat it as an interruption
+inside the current task, not as the task's end state.
+
+- If the user answers `Yes` / `네` / `はい` / `是`, write the capsule JSON to a
+  temporary file, run `ai-handoff checkpoint --agent <self> --file <path-to.json>`,
+  report the saved checkpoint briefly, then resume the original work exactly
+  where it stopped.
+- If the user answers `No` / `아니오` / `いいえ` / `否`, do not create a capsule;
+  resume the original work.
+- If the user answers `Other` / `기타` / `その他` / `其他`, follow the user's
+  free-text instruction. Create or skip the capsule as instructed, then resume
+  the original work.
+- In automatic mode, do not ask. Create the checkpoint from the current work
+  state, then resume the original work.
+
 ## Usage
 
     ai-handoff checkpoint --agent <self> --file <path-to.json>

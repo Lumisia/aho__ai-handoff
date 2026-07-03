@@ -210,6 +210,7 @@ pub enum GuiThemePreset {
     #[default]
     White,
     Dark,
+    DarkGreen,
     Custom,
 }
 
@@ -217,12 +218,16 @@ pub fn gui_theme_config_for_preset(preset: GuiThemePreset) -> GuiThemeConfig {
     let (codex, claude, focus, selection_bg, selection_fg, app_bg, sidebar_bg, panel_bg, text) =
         match preset {
             GuiThemePreset::White | GuiThemePreset::Custom => (
-                "#B996EB", "#E68C1E", "#FFA500", "cyan", "black", "#F5F5F2", "#EEF0EC", "#FFFFFF",
-                "#20242A",
+                "#6F7380", "#8A7252", "#2F6F50", "#244F3B", "#FFFFFF", "#F6F7F5", "#EEF1ED",
+                "#FFFFFF", "#17201C",
             ),
             GuiThemePreset::Dark => (
-                "#BD93F9", "#FFB86C", "#FF79C6", "#44475A", "#F8F8F2", "#282A36", "#21222C",
-                "#282A36", "#F8F8F2",
+                "#8D918D", "#8D918D", "#8B8374", "#3B3E3D", "#F1EFE7", "#121314", "#171918",
+                "#1D2020", "#E8E6DC",
+            ),
+            GuiThemePreset::DarkGreen => (
+                "#A9ADB8", "#C3A77B", "#68A782", "#315F49", "#F4F7F4", "#171B19", "#1D231F",
+                "#202622", "#EDF2ED",
             ),
         };
     GuiThemeConfig {
@@ -255,9 +260,7 @@ fn legacy_dark_gui_theme_config() -> GuiThemeConfig {
 }
 
 fn gui_theme_colors_eq(a: &GuiThemeConfig, b: &GuiThemeConfig) -> bool {
-    a.codex_color == b.codex_color
-        && a.claude_color == b.claude_color
-        && a.focus_border_color == b.focus_border_color
+    a.focus_border_color == b.focus_border_color
         && a.selection_bg_color == b.selection_bg_color
         && a.selection_fg_color == b.selection_fg_color
         && a.app_bg_color == b.app_bg_color
@@ -273,6 +276,7 @@ fn gui_theme_colors_eq(a: &GuiThemeConfig, b: &GuiThemeConfig) -> bool {
 pub fn effective_gui_theme_config(theme: &GuiThemeConfig) -> GuiThemeConfig {
     let white = gui_theme_config_for_preset(GuiThemePreset::White);
     let dark = gui_theme_config_for_preset(GuiThemePreset::Dark);
+    let dark_green = gui_theme_config_for_preset(GuiThemePreset::DarkGreen);
     let legacy_dark = legacy_dark_gui_theme_config();
 
     match theme.preset {
@@ -286,7 +290,9 @@ pub fn effective_gui_theme_config(theme: &GuiThemeConfig) -> GuiThemeConfig {
             }
         }
         GuiThemePreset::Dark => {
-            if gui_theme_colors_eq(theme, &white)
+            if gui_theme_colors_eq(theme, &dark_green) {
+                dark_green
+            } else if gui_theme_colors_eq(theme, &white)
                 || gui_theme_colors_eq(theme, &dark)
                 || gui_theme_colors_eq(theme, &legacy_dark)
             {
@@ -297,7 +303,26 @@ pub fn effective_gui_theme_config(theme: &GuiThemeConfig) -> GuiThemeConfig {
                 custom
             }
         }
-        GuiThemePreset::Custom => theme.clone(),
+        GuiThemePreset::DarkGreen => {
+            if gui_theme_colors_eq(theme, &white) || gui_theme_colors_eq(theme, &dark_green) {
+                dark_green
+            } else {
+                let mut custom = theme.clone();
+                custom.preset = GuiThemePreset::Custom;
+                custom
+            }
+        }
+        GuiThemePreset::Custom => {
+            if gui_theme_colors_eq(theme, &white) {
+                white
+            } else if gui_theme_colors_eq(theme, &dark) {
+                dark
+            } else if gui_theme_colors_eq(theme, &dark_green) {
+                dark_green
+            } else {
+                theme.clone()
+            }
+        }
     }
 }
 
@@ -774,8 +799,12 @@ impl ValueKind {
                 }
             },
             ValueKind::GuiThemePreset => match raw {
-                "white" | "dark" | "custom" => value(raw),
-                _ => return Err(invalid("expected one of `white`, `dark`, `custom`")),
+                "white" | "dark" | "dark_green" | "custom" => value(raw),
+                _ => {
+                    return Err(invalid(
+                        "expected one of `white`, `dark`, `dark_green`, `custom`",
+                    ))
+                }
             },
             ValueKind::Color => {
                 ColorSpec::parse(raw).map_err(|message| ConfigWriteError::InvalidValue {
@@ -892,19 +921,12 @@ pub fn set_value(existing: Option<&str>, key: &str, raw: &str) -> Result<String,
         let preset = match raw {
             "white" => GuiThemePreset::White,
             "dark" => GuiThemePreset::Dark,
+            "dark_green" => GuiThemePreset::DarkGreen,
             "custom" => GuiThemePreset::Custom,
             _ => unreachable!("gui theme preset was validated above"),
         };
         if preset != GuiThemePreset::Custom {
             let preset_theme = gui_theme_config_for_preset(preset);
-            table.insert(
-                "codex_color",
-                value(preset_theme.codex_color.as_str().to_string()),
-            );
-            table.insert(
-                "claude_color",
-                value(preset_theme.claude_color.as_str().to_string()),
-            );
             table.insert(
                 "focus_border_color",
                 value(preset_theme.focus_border_color.as_str().to_string()),
@@ -1050,6 +1072,7 @@ pub fn gui_theme_preset_str(preset: GuiThemePreset) -> &'static str {
     match preset {
         GuiThemePreset::White => "white",
         GuiThemePreset::Dark => "dark",
+        GuiThemePreset::DarkGreen => "dark_green",
         GuiThemePreset::Custom => "custom",
     }
 }
@@ -1506,9 +1529,9 @@ enabled = true
         assert_eq!(cfg.theme.selection_bg_color.as_str(), "cyan");
         assert_eq!(cfg.theme.selection_fg_color.as_str(), "black");
         assert_eq!(cfg.gui_theme.preset, GuiThemePreset::White);
-        assert_eq!(cfg.gui_theme.codex_color.as_str(), "#B996EB");
-        assert_eq!(cfg.gui_theme.claude_color.as_str(), "#E68C1E");
-        assert_eq!(cfg.gui_theme.app_bg_color.as_str(), "#F5F5F2");
+        assert_eq!(cfg.gui_theme.codex_color.as_str(), "#6F7380");
+        assert_eq!(cfg.gui_theme.claude_color.as_str(), "#8A7252");
+        assert_eq!(cfg.gui_theme.app_bg_color.as_str(), "#F6F7F5");
     }
 
     #[test]
@@ -1524,7 +1547,7 @@ enabled = true
         assert_eq!(default_value("gui_theme.preset").unwrap(), "white");
         assert_eq!(
             default_value("gui_theme.sidebar_bg_color").unwrap(),
-            "#EEF0EC"
+            "#EEF1ED"
         );
     }
 
@@ -1599,15 +1622,22 @@ enabled = true
         let cfg = parse(&text).unwrap();
 
         assert_eq!(cfg.gui_theme.preset, GuiThemePreset::Dark);
-        assert_eq!(cfg.gui_theme.codex_color.as_str(), "#BD93F9");
-        assert_eq!(cfg.gui_theme.claude_color.as_str(), "#FFB86C");
-        assert_eq!(cfg.gui_theme.focus_border_color.as_str(), "#FF79C6");
-        assert_eq!(cfg.gui_theme.selection_bg_color.as_str(), "#44475A");
-        assert_eq!(cfg.gui_theme.selection_fg_color.as_str(), "#F8F8F2");
-        assert_eq!(cfg.gui_theme.app_bg_color.as_str(), "#282A36");
-        assert_eq!(cfg.gui_theme.sidebar_bg_color.as_str(), "#21222C");
-        assert_eq!(cfg.gui_theme.panel_bg_color.as_str(), "#282A36");
-        assert_eq!(cfg.gui_theme.text_color.as_str(), "#F8F8F2");
+        assert_eq!(cfg.gui_theme.focus_border_color.as_str(), "#8B8374");
+        assert_eq!(cfg.gui_theme.selection_bg_color.as_str(), "#3B3E3D");
+        assert_eq!(cfg.gui_theme.selection_fg_color.as_str(), "#F1EFE7");
+        assert_eq!(cfg.gui_theme.app_bg_color.as_str(), "#121314");
+        assert_eq!(cfg.gui_theme.sidebar_bg_color.as_str(), "#171918");
+        assert_eq!(cfg.gui_theme.panel_bg_color.as_str(), "#1D2020");
+        assert_eq!(cfg.gui_theme.text_color.as_str(), "#E8E6DC");
+
+        let text = set_value(None, "gui_theme.preset", "dark_green").unwrap();
+        let cfg = parse(&text).unwrap();
+
+        assert_eq!(cfg.gui_theme.preset, GuiThemePreset::DarkGreen);
+        assert_eq!(cfg.gui_theme.focus_border_color.as_str(), "#68A782");
+        assert_eq!(cfg.gui_theme.selection_bg_color.as_str(), "#315F49");
+        assert_eq!(cfg.gui_theme.app_bg_color.as_str(), "#171B19");
+        assert_eq!(cfg.gui_theme.panel_bg_color.as_str(), "#202622");
         assert_eq!(cfg.theme.preset, ThemePreset::Default);
     }
 
@@ -1619,7 +1649,7 @@ enabled = true
 
         assert_eq!(cfg.gui_theme.preset, GuiThemePreset::Custom);
         assert_eq!(cfg.gui_theme.codex_color.as_str(), "#123456");
-        assert_eq!(cfg.gui_theme.selection_bg_color.as_str(), "#44475A");
+        assert_eq!(cfg.gui_theme.selection_bg_color.as_str(), "#3B3E3D");
     }
 
     #[test]

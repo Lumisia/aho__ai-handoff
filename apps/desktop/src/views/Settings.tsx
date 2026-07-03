@@ -48,8 +48,6 @@ const settingLabelKeys: Record<string, string> = {
   "theme.selection_bg_color": "settingLabelSelectionBgColor",
   "theme.selection_fg_color": "settingLabelSelectionFgColor",
   "gui_theme.preset": "settingLabelGuiThemePreset",
-  "gui_theme.codex_color": "settingLabelGuiCodexColor",
-  "gui_theme.claude_color": "settingLabelGuiClaudeColor",
   "gui_theme.focus_border_color": "settingLabelGuiFocusBorderColor",
   "gui_theme.selection_bg_color": "settingLabelGuiSelectionBgColor",
   "gui_theme.selection_fg_color": "settingLabelGuiSelectionFgColor",
@@ -76,8 +74,6 @@ const settingHelpKeys: Record<string, string> = {
   "capsule.done_max_items": "settingHelpCapsuleDoneMax",
   "capsule.risks_max_items": "settingHelpCapsuleRisksMax",
   "gui_theme.preset": "settingHelpGuiThemePreset",
-  "gui_theme.codex_color": "settingHelpGuiCodexColor",
-  "gui_theme.claude_color": "settingHelpGuiClaudeColor",
   "gui_theme.focus_border_color": "settingHelpGuiFocusBorderColor",
   "gui_theme.selection_bg_color": "settingHelpGuiSelectionBgColor",
   "gui_theme.selection_fg_color": "settingHelpGuiSelectionFgColor",
@@ -132,7 +128,10 @@ function settingHelp(row: ConfigRow, t: Translator) {
 }
 
 function displaySettingValue(row: ConfigRow, value = row.value) {
-  if (row.kind === "gui_theme_preset" && value === "dark") return "Dracula";
+  if (row.kind === "gui_theme_preset" && value === "white") return "White";
+  if (row.kind === "gui_theme_preset" && value === "dark") return "Dark";
+  if (row.kind === "gui_theme_preset" && value === "dark_green") return "Dark green";
+  if (row.kind === "gui_theme_preset" && value === "custom") return "Custom";
   return value;
 }
 
@@ -149,7 +148,7 @@ function optionsFor(row: ConfigRow) {
     case "theme_preset":
       return ["default", "high_contrast", "mono", "custom"];
     case "gui_theme_preset":
-      return ["white", "dark", "custom"];
+      return ["white", "dark", "dark_green", "custom"];
     default:
       return null;
   }
@@ -157,7 +156,7 @@ function optionsFor(row: ConfigRow) {
 
 function colorInputValue(value: string) {
   if (/^#[0-9a-fA-F]{6}$/.test(value)) return value;
-  return namedColors[value.toLowerCase()] ?? "#FF79C6";
+  return namedColors[value.toLowerCase()] ?? "#2F6F50";
 }
 
 function SettingValueEditor({
@@ -260,7 +259,7 @@ function SettingValueEditor({
                   onKeyDown={(event) => {
                     if (event.key === "Enter") void commit(draft);
                   }}
-                  placeholder="#FF79C6"
+                  placeholder="#2F6F50"
                 />
               </div>
               <button className="full-width" disabled={busy || !draft.trim()} onClick={() => void commit(draft)}>

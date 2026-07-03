@@ -607,7 +607,10 @@ fn config_rows_for(path: &Path) -> Result<Vec<ConfigRow>, String> {
 fn desktop_config_keys() -> Vec<&'static str> {
     config::settable_keys()
         .filter(|key| !key.starts_with("theme."))
-        .chain(config::gui_settable_keys())
+        .chain(
+            config::gui_settable_keys()
+                .filter(|key| *key != "gui_theme.codex_color" && *key != "gui_theme.claude_color"),
+        )
         .collect()
 }
 
@@ -702,8 +705,6 @@ fn description_for_key(key: &str) -> &'static str {
         "theme.selection_bg_color" => "TUI background color for selected rows and tabs.",
         "theme.selection_fg_color" => "TUI text color for selected rows and tabs.",
         "gui_theme.preset" => "Base visual preset used by the desktop GUI.",
-        "gui_theme.codex_color" => "GUI color for Codex labels, marks, and capsules.",
-        "gui_theme.claude_color" => "GUI color for Claude labels, marks, and capsules.",
         "gui_theme.focus_border_color" => "GUI color for focused panes and keyboard focus.",
         "gui_theme.selection_bg_color" => "GUI background color for selected rows and tabs.",
         "gui_theme.selection_fg_color" => "GUI text color for selected rows and tabs.",
@@ -1196,6 +1197,7 @@ fn gui_theme_preset_name(preset: config::GuiThemePreset) -> &'static str {
     match preset {
         config::GuiThemePreset::White => "white",
         config::GuiThemePreset::Dark => "dark",
+        config::GuiThemePreset::DarkGreen => "dark_green",
         config::GuiThemePreset::Custom => "custom",
     }
 }
@@ -1865,7 +1867,8 @@ mod tests {
         assert!(rows.iter().any(|row| row.key == "capsule.language"
             && row.value == "en"
             && row.category == "language"));
-        assert!(rows.iter().any(|row| row.key == "gui_theme.codex_color"));
+        assert!(!rows.iter().any(|row| row.key == "gui_theme.codex_color"));
+        assert!(!rows.iter().any(|row| row.key == "gui_theme.claude_color"));
         assert!(!rows.iter().any(|row| row.key == "theme.codex_color"));
 
         set_config_at(&path, "capsule.format", "md").unwrap();
@@ -2134,31 +2137,27 @@ mod tests {
         let dark = config::parse(&dark).unwrap();
         let report = theme_report_from_config(&dark);
         assert_eq!(report.preset, "dark");
-        assert_eq!(report.codex_color, "#BD93F9");
-        assert_eq!(report.claude_color, "#FFB86C");
-        assert_eq!(report.selection_bg_color, "#44475A");
-        assert_eq!(report.app_bg_color, "#282A36");
+        assert_eq!(report.codex_color, "#8D918D");
+        assert_eq!(report.claude_color, "#8D918D");
+        assert_eq!(report.selection_bg_color, "#3B3E3D");
+        assert_eq!(report.app_bg_color, "#121314");
 
         let custom = config::set_value(None, "gui_theme.preset", "custom").unwrap();
-        let custom = config::set_value(Some(&custom), "gui_theme.codex_color", "42").unwrap();
-        let custom = config::set_value(Some(&custom), "gui_theme.claude_color", "orange").unwrap();
         let custom =
-            config::set_value(Some(&custom), "gui_theme.focus_border_color", "#123456").unwrap();
+            config::set_value(Some(&custom), "gui_theme.focus_border_color", "42").unwrap();
         let custom =
-            config::set_value(Some(&custom), "gui_theme.selection_bg_color", "white").unwrap();
+            config::set_value(Some(&custom), "gui_theme.selection_bg_color", "black").unwrap();
         let custom =
-            config::set_value(Some(&custom), "gui_theme.selection_fg_color", "black").unwrap();
+            config::set_value(Some(&custom), "gui_theme.selection_fg_color", "white").unwrap();
         let custom = config::parse(&custom).unwrap();
         let report = theme_report_from_config(&custom);
-        assert_eq!(report.codex_color, "#00D787");
-        assert_eq!(report.claude_color, "#FFA500");
-        assert_eq!(report.focus_border_color, "#123456");
-        assert_eq!(report.selection_bg_color, "#FFFFFF");
-        assert_eq!(report.selection_fg_color, "#000000");
+        assert_eq!(report.focus_border_color, "#00D787");
+        assert_eq!(report.selection_bg_color, "#000000");
+        assert_eq!(report.selection_fg_color, "#FFFFFF");
     }
 
     #[test]
-    fn theme_report_maps_legacy_dark_tuple_to_dracula() {
+    fn theme_report_maps_legacy_dark_tuple_to_current_dark() {
         let legacy = config::parse(
             "[gui_theme]\n\
              preset = \"dark\"\n\
@@ -2176,14 +2175,39 @@ mod tests {
         let report = theme_report_from_config(&legacy);
 
         assert_eq!(report.preset, "dark");
-        assert_eq!(report.codex_color, "#BD93F9");
-        assert_eq!(report.claude_color, "#FFB86C");
-        assert_eq!(report.focus_border_color, "#FF79C6");
-        assert_eq!(report.selection_bg_color, "#44475A");
-        assert_eq!(report.selection_fg_color, "#F8F8F2");
-        assert_eq!(report.app_bg_color, "#282A36");
-        assert_eq!(report.sidebar_bg_color, "#21222C");
-        assert_eq!(report.panel_bg_color, "#282A36");
+        assert_eq!(report.codex_color, "#8D918D");
+        assert_eq!(report.claude_color, "#8D918D");
+        assert_eq!(report.focus_border_color, "#8B8374");
+        assert_eq!(report.selection_bg_color, "#3B3E3D");
+        assert_eq!(report.selection_fg_color, "#F1EFE7");
+        assert_eq!(report.app_bg_color, "#121314");
+        assert_eq!(report.sidebar_bg_color, "#171918");
+        assert_eq!(report.panel_bg_color, "#1D2020");
+    }
+
+    #[test]
+    fn theme_report_maps_previous_green_dark_tuple_to_dark_green() {
+        let legacy = config::parse(
+            "[gui_theme]\n\
+             preset = \"dark\"\n\
+             codex_color = \"#A9ADB8\"\n\
+             claude_color = \"#C3A77B\"\n\
+             focus_border_color = \"#68A782\"\n\
+             selection_bg_color = \"#315F49\"\n\
+             selection_fg_color = \"#F4F7F4\"\n\
+             app_bg_color = \"#171B19\"\n\
+             sidebar_bg_color = \"#1D231F\"\n\
+             panel_bg_color = \"#202622\"\n\
+             text_color = \"#EDF2ED\"\n",
+        )
+        .unwrap();
+        let report = theme_report_from_config(&legacy);
+
+        assert_eq!(report.preset, "dark_green");
+        assert_eq!(report.focus_border_color, "#68A782");
+        assert_eq!(report.selection_bg_color, "#315F49");
+        assert_eq!(report.app_bg_color, "#171B19");
+        assert_eq!(report.panel_bg_color, "#202622");
     }
 
     fn check(id: &str, status: dashboard::CheckStatus, message: &str) -> dashboard::CheckRow {

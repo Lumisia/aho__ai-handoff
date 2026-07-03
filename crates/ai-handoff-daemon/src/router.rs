@@ -1,6 +1,7 @@
 use crate::{
     dedupe::{dedupe_key, Deduper},
     store::{find_pending, mark_consumed, save_capsule, save_project_label},
+    trigger_mark,
 };
 use ai_handoff_core::{
     capsule::{
@@ -11,7 +12,7 @@ use ai_handoff_core::{
     fingerprint::fingerprint,
     hook_event::{normalize, HookEventKind},
     redaction::redact,
-    sensor::{claude_used_percent_for_trigger, used_percent_from_jsonl},
+    sensor::{claude_trigger_usage, codex_trigger_usage_from_jsonl},
     trigger::{evaluate_trigger, TriggerAction, TriggerMode},
 };
 use ai_handoff_ipc::{
@@ -128,18 +129,18 @@ impl Handler for Router {
                 Self::ok(req, json!({}), json!({}))
             }
             HookEventKind::PostToolUse => {
-                let used = match normalized.agent {
+                let now_ms = Utc::now().timestamp_millis();
+                let usage = match normalized.agent {
                     // Claude usage comes from statusline samples (a sample
                     // whose 5h window is still open is a valid lower bound);
                     // the Claude transcript JSONL has no rate-limit payload.
-                    AgentKind::ClaudeCode => {
-                        claude_used_percent_for_trigger(Utc::now().timestamp_millis())
-                    }
+                    AgentKind::ClaudeCode => claude_trigger_usage(now_ms),
                     AgentKind::Codex => normalized
                         .transcript_path
                         .as_deref()
-                        .and_then(used_percent_from_jsonl),
+                        .and_then(|path| codex_trigger_usage_from_jsonl(path, now_ms)),
                 };
+                let used = usage.map(|sample| sample.used_percent);
                 let cfg = ai_handoff_core::config::load();
                 let resolved = ai_handoff_core::config::resolve(&cfg, &project_id);
                 let mode = if resolved.enabled {
@@ -156,12 +157,19 @@ impl Handler for Router {
                     &resolved.burn,
                 );
                 let mut fired = false;
+                let mut suppressed = false;
+                let mut trigger_expires_at_ms = None;
                 let stdout = match outcome.action {
                     TriggerAction::None => json!({}),
                     action => {
-                        let mark =
-                            session_mark_key("trigger", &req.agent, &normalized, &project_id);
-                        if self.mark_seen(&mark) {
+                        let mark = trigger_mark::check_and_record(
+                            &normalized.agent,
+                            now_ms,
+                            usage.and_then(|sample| sample.resets_at_ms),
+                        );
+                        trigger_expires_at_ms = Some(mark.expires_at_ms);
+                        if !mark.fired {
+                            suppressed = true;
                             json!({})
                         } else {
                             fired = true;
@@ -170,8 +178,11 @@ impl Handler for Router {
                                 used.unwrap_or_default(),
                                 resolved.threshold,
                                 &req.agent,
+                                cfg.capsule.language,
                             );
                             json!({
+                                "decision": "block",
+                                "reason": trigger_block_reason(action),
                                 "hookSpecificOutput": {
                                     "hookEventName": "PostToolUse",
                                     "additionalContext": context,
@@ -187,6 +198,8 @@ impl Handler for Router {
                         "used_percent": used,
                         "trigger_reason": outcome.reason,
                         "trigger_fired": fired,
+                        "trigger_suppressed": suppressed,
+                        "trigger_expires_at_ms": trigger_expires_at_ms,
                     }),
                 )
             }
@@ -304,6 +317,15 @@ fn agent_cli_name(agent: &str) -> &str {
     }
 }
 
+fn trigger_block_reason(action: TriggerAction) -> &'static str {
+    match action {
+        TriggerAction::Create => {
+            "ai-handoff five-hour usage threshold reached; create a checkpoint before continuing"
+        }
+        _ => "ai-handoff five-hour usage threshold reached; ask the user before continuing",
+    }
+}
+
 /// Context injected when the five-hour trigger fires. Instructs the agent to
 /// checkpoint (auto) or ask the user first (ask), then resume the interrupted
 /// work — the capsule must never end the turn.
@@ -312,8 +334,10 @@ fn render_trigger_context(
     used_percent: f64,
     threshold: f64,
     agent: &str,
+    language: config::Language,
 ) -> String {
     let agent = agent_cli_name(agent);
+    let copy = trigger_prompt_copy(language);
     let header = format!(
         "[ai-handoff] Five-hour usage {used_percent:.0}% reached the configured threshold {threshold:.0}%."
     );
@@ -324,9 +348,97 @@ fn render_trigger_context(
         TriggerAction::Create => format!(
             "{header}\nCreate a handoff capsule NOW without asking the user. {checkpoint_steps}"
         ),
-        _ => format!(
-            "{header}\nPause briefly and ask the user, in the user's language: \"캡슐을 만드시겠습니까?\" (Create a handoff capsule?).\nIf the user agrees: {checkpoint_steps}\nIf the user declines: resume the interrupted work without creating a capsule and do not ask again this session."
-        ),
+        _ => render_trigger_question_context(agent, &header, &checkpoint_steps, copy),
+    }
+}
+
+/// Agent-specific question instructions for ask mode.
+fn render_trigger_question_context(
+    agent: &str,
+    header: &str,
+    checkpoint_steps: &str,
+    copy: TriggerPromptCopy,
+) -> String {
+    if agent == "claude-code" {
+        format!(
+            "{header}\nUse AskUserQuestion now. Question: \"{}\"\nOptions:\n- {}: {}\n- {}: {}\n- {}: {}\nIf the user selects {}, ask one follow-up chat question for their free-text instruction before deciding whether to create the capsule. Then follow that instruction.\nFor {}: {checkpoint_steps}\nFor {}: resume the interrupted work without creating a capsule.\nAfter the selected path finishes, resume the interrupted work exactly where it stopped.",
+            copy.question,
+            copy.yes,
+            copy.yes_desc,
+            copy.no,
+            copy.no_desc,
+            copy.other,
+            copy.other_desc,
+            copy.other,
+            copy.yes,
+            copy.no,
+        )
+    } else {
+        format!(
+            "{header}\nAsk the user in plain chat and wait for the answer: \"{}\"\nOptions:\n- {}: {}\n- {}: {}\n- {}: {}\nIf the user chooses {}, ask one follow-up chat question for their free-text instruction before deciding whether to create the capsule. Then follow that instruction.\nFor {}: {checkpoint_steps}\nFor {}: resume the interrupted work without creating a capsule.\nAfter the selected path finishes, resume the interrupted work exactly where it stopped.",
+            copy.question,
+            copy.yes,
+            copy.yes_desc,
+            copy.no,
+            copy.no_desc,
+            copy.other,
+            copy.other_desc,
+            copy.other,
+            copy.yes,
+            copy.no,
+        )
+    }
+}
+
+#[derive(Clone, Copy)]
+struct TriggerPromptCopy {
+    question: &'static str,
+    yes: &'static str,
+    no: &'static str,
+    other: &'static str,
+    yes_desc: &'static str,
+    no_desc: &'static str,
+    other_desc: &'static str,
+}
+
+fn trigger_prompt_copy(language: config::Language) -> TriggerPromptCopy {
+    match language {
+        config::Language::Ko => TriggerPromptCopy {
+            question: "5시간 한도 임계치에 도달했습니다. 캡슐을 저장하시겠습니까?",
+            yes: "네",
+            no: "아니오",
+            other: "기타",
+            yes_desc: "캡슐 JSON을 작성하고 checkpoint를 실행한 뒤 원래 작업을 계속합니다.",
+            no_desc: "캡슐을 만들지 않고 원래 작업을 계속합니다.",
+            other_desc: "사용자의 추가 지시에 따라 캡슐 생성 여부를 정한 뒤 원래 작업을 계속합니다.",
+        },
+        config::Language::Ja => TriggerPromptCopy {
+            question: "5時間制限のしきい値に達しました。カプセルを保存しますか？",
+            yes: "はい",
+            no: "いいえ",
+            other: "その他",
+            yes_desc: "カプセルJSONを作成してcheckpointを実行し、元の作業を続けます。",
+            no_desc: "カプセルを作成せず、元の作業を続けます。",
+            other_desc: "ユーザーの追加指示に従ってカプセル作成の有無を決め、元の作業を続けます。",
+        },
+        config::Language::Zh => TriggerPromptCopy {
+            question: "已达到 5 小时限制阈值。要保存交接胶囊吗？",
+            yes: "是",
+            no: "否",
+            other: "其他",
+            yes_desc: "写入胶囊 JSON 并执行 checkpoint，然后继续原来的任务。",
+            no_desc: "不创建胶囊，继续原来的任务。",
+            other_desc: "按用户的补充指示决定是否创建胶囊，然后继续原来的任务。",
+        },
+        config::Language::En => TriggerPromptCopy {
+            question: "The five-hour usage threshold was reached. Save a handoff capsule?",
+            yes: "Yes",
+            no: "No",
+            other: "Other",
+            yes_desc: "write the capsule JSON, run checkpoint, then continue the original work.",
+            no_desc: "continue the original work without creating a capsule.",
+            other_desc: "ask for the user's custom instruction, then create or skip the capsule accordingly.",
+        },
     }
 }
 
@@ -803,7 +915,7 @@ mod tests {
         std::env::set_var("AI_HANDOFF_HOME", home.path());
         std::fs::write(
             home.path().join("config.toml"),
-            "[triggers.five_hour]\nenabled = true\nthreshold_percent = 50\nmode = \"ask\"\n",
+            "[triggers.five_hour]\nenabled = true\nthreshold_percent = 50\nmode = \"ask\"\n[capsule]\nlanguage = \"ko\"\n",
         )
         .unwrap();
         // Fresh Claude statusline sample above threshold.
@@ -829,9 +941,20 @@ mod tests {
         let context = resp.hook_stdout["hookSpecificOutput"]["additionalContext"]
             .as_str()
             .expect("trigger context");
-        assert!(context.contains("캡슐을 만드시겠습니까?"));
+        assert_eq!(resp.hook_stdout["decision"], "block");
+        assert!(resp.hook_stdout["reason"]
+            .as_str()
+            .unwrap()
+            .contains("five-hour usage threshold"));
+        assert!(context.contains("AskUserQuestion"));
+        assert!(context.contains("네"));
+        assert!(context.contains("아니오"));
+        assert!(context.contains("기타"));
+        assert!(context.contains("ai-handoff checkpoint --agent claude-code"));
         assert!(context.contains("resume the interrupted work"));
         assert_eq!(resp.diagnostics["trigger_fired"], true);
+        assert_eq!(resp.diagnostics["trigger_suppressed"], false);
+        assert!(resp.diagnostics["trigger_expires_at_ms"].as_i64().is_some());
 
         // Second PostToolUse in the same session: suppressed.
         let again = request(
@@ -844,6 +967,62 @@ mod tests {
         let resp2 = router.handle(&again);
         assert_eq!(resp2.hook_stdout, json!({}));
         assert_eq!(resp2.diagnostics["trigger_fired"], false);
+        assert_eq!(resp2.diagnostics["trigger_suppressed"], true);
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn post_tool_use_trigger_mark_survives_new_router_instance_for_codex() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[triggers.five_hour]\nenabled = true\nthreshold_percent = 50\nmode = \"ask\"\n[capsule]\nlanguage = \"en\"\n",
+        )
+        .unwrap();
+        let transcript = home.path().join("codex.jsonl");
+        std::fs::write(
+            &transcript,
+            "{\"payload\":{\"rate_limits\":{\"primary\":{\"used_percent\":75.0,\"resets_at\":4102444800}}}}\n",
+        )
+        .unwrap();
+
+        let req = request(
+            "turn-codex-trigger",
+            "post-tool-use",
+            "codex",
+            cwd.path(),
+            json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "session_id": "s-codex-a",
+                "transcript_path": transcript.to_string_lossy()
+            }),
+        );
+        let first = Router::new().handle(&req);
+        let context = first.hook_stdout["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .expect("codex context");
+        assert!(context.contains("Ask the user in plain chat"));
+        assert!(!context.contains("AskUserQuestion"));
+        assert_eq!(first.diagnostics["trigger_fired"], true);
+
+        let second = request(
+            "turn-codex-trigger-2",
+            "post-tool-use",
+            "codex",
+            cwd.path(),
+            json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "session_id": "s-codex-b",
+                "transcript_path": transcript.to_string_lossy()
+            }),
+        );
+        let suppressed = Router::new().handle(&second);
+        assert_eq!(suppressed.hook_stdout, json!({}));
+        assert_eq!(suppressed.diagnostics["trigger_fired"], false);
+        assert_eq!(suppressed.diagnostics["trigger_suppressed"], true);
         std::env::remove_var("AI_HANDOFF_HOME");
     }
 

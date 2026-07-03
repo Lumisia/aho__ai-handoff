@@ -3,16 +3,14 @@ import { getAccountReport } from "../api";
 import type { AccountReport, AccountWindow, CheckRow, DashboardSnapshot } from "../types";
 import type { Translator } from "../i18n";
 
-function StatusCard({ row }: { row: CheckRow }) {
+function StatusRow({ row }: { row: CheckRow }) {
   return (
-    <article className={`card ${row.status}`}>
-      <div className="card-head">
-        <span>{row.label}</span>
-        <strong>{row.status}</strong>
-      </div>
-      <p>{row.message}</p>
+    <div className={`overview-status-row ${row.status}`}>
+      <span className="overview-status-dot" aria-hidden="true" />
+      <strong>{row.label}</strong>
+      <span className="overview-status-message">{row.message}</span>
       {row.path && <code>{row.path}</code>}
-    </article>
+    </div>
   );
 }
 
@@ -33,15 +31,13 @@ function LimitBar({
 }) {
   const used = value ? Math.max(0, Math.min(100, value.used_percent)) : 0;
   return (
-    <article className="limit-card">
-      <div>
-        <strong>{label}</strong>
-        <span>{value ? `${pct(value.remaining_percent)} ${t("left")}` : t("noSample")}</span>
-      </div>
-      <div className={`usage-bar ${agent}`}>
+    <div className={`limit-row ${agent}`}>
+      <strong>{label}</strong>
+      <div className="usage-bar" aria-hidden="true">
         <span style={{ width: `${used}%` }} />
       </div>
-    </article>
+      <span>{value ? `${pct(value.remaining_percent)} ${t("left")}` : t("noSample")}</span>
+    </div>
   );
 }
 
@@ -65,46 +61,33 @@ export default function Overview({ snapshot, t }: { snapshot: DashboardSnapshot;
     snapshot.ipc,
     snapshot.store,
   ];
+  const issueCount = topRows.filter((row) => row.status !== "ok").length;
 
   return (
-    <div className="view">
-      <section className="metrics">
-        <div>
-          <span>{t("pending")}</span>
-          <strong>{snapshot.capsules.pending_count}</strong>
+    <div className="overview-view">
+      <section className="overview-section">
+        <div className="overview-section-title">
+          <h3>{t("agentLimits")}</h3>
+          <span>{t("agentLimitsHelp")}</span>
         </div>
-        <div>
-          <span>{t("totalCapsules")}</span>
-          <strong>{snapshot.capsules.items.length}</strong>
-        </div>
-        <div>
-          <span>{t("skippedFiles")}</span>
-          <strong>{snapshot.capsules.skipped}</strong>
-        </div>
-        <div>
-          <span>{t("autostart")}</span>
-          <strong>{snapshot.install_state.autostart}</strong>
-        </div>
-      </section>
-      <section className="panel">
-        <div className="panel-title">
-          <div>
-            <h3>{t("agentLimits")}</h3>
-            <p>{t("agentLimitsHelp")}</p>
-          </div>
-        </div>
-        {loadingAccounts && <section className="loading-screen compact-loading">{t("loadingAccounts")}</section>}
+        {loadingAccounts && <div className="overview-inline-loading">{t("loadingAccounts")}</div>}
         <div className="overview-limits">
           <LimitBar agent="claude" label={`${t("claude")} 5h`} value={accounts?.claude.five_hour} t={t} />
-          <LimitBar agent="claude" label={`${t("claude")} weekly`} value={accounts?.claude.weekly} t={t} />
+          <LimitBar agent="claude" label={`${t("claude")} ${t("weekly")}`} value={accounts?.claude.weekly} t={t} />
           <LimitBar agent="codex" label={`${t("codex")} 5h`} value={accounts?.codex.five_hour} t={t} />
-          <LimitBar agent="codex" label={`${t("codex")} weekly`} value={accounts?.codex.weekly} t={t} />
+          <LimitBar agent="codex" label={`${t("codex")} ${t("weekly")}`} value={accounts?.codex.weekly} t={t} />
         </div>
       </section>
-      <section className="grid">
+      <section className="overview-section">
+        <div className="overview-section-title">
+          <h3>{t("systemStatus")}</h3>
+          {issueCount > 0 && <span>{`${issueCount} ${t("attention")}`}</span>}
+        </div>
+        <div className="overview-status-list">
         {topRows.map((row) => (
-          <StatusCard key={row.id} row={row} />
+          <StatusRow key={row.id} row={row} />
         ))}
+        </div>
       </section>
     </div>
   );

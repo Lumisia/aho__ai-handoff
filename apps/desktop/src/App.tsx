@@ -91,6 +91,27 @@ function targetAgent(target: string) {
   return target.toLowerCase().includes("claude") ? "Claude" : "Codex";
 }
 
+function hexLuminance(value?: string | null) {
+  if (!value) return null;
+  const match = value.trim().match(/^#?([0-9a-fA-F]{6})$/);
+  if (!match) return null;
+  const channels = [0, 2, 4].map((offset) => {
+    const raw = parseInt(match[1].slice(offset, offset + 2), 16) / 255;
+    return raw <= 0.03928 ? raw / 12.92 : ((raw + 0.055) / 1.055) ** 2.4;
+  });
+  return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
+}
+
+function isDarkGuiTheme(theme: ThemeReport | null) {
+  if (!theme) return false;
+  if (theme.preset === "dark" || theme.preset === "dark_green") return true;
+  if (theme.preset === "white") return false;
+  const appLuminance = hexLuminance(theme.app_bg_color);
+  const panelLuminance = hexLuminance(theme.panel_bg_color);
+  const surface = appLuminance ?? panelLuminance;
+  return surface !== null && surface < 0.18;
+}
+
 function shortDate(value: string) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value.slice(0, 10);
@@ -123,7 +144,7 @@ function AgentLogo({ agent }: { agent: AgentName }) {
   const cls = agent === "Codex" ? "agent-logo codex" : "agent-logo claude";
   return (
     <span className={cls} aria-hidden="true">
-      {agent === "Codex" ? <OpenAIIcon size={16} /> : <ClaudeIcon.Color size={16} />}
+      {agent === "Codex" ? <OpenAIIcon size={16} /> : <ClaudeIcon size={16} />}
     </span>
   );
 }
@@ -319,6 +340,33 @@ function CapsuleContextMenu({
           );
         })}
       </section>
+    </div>
+  );
+}
+
+function displayAutostart(value: string, t: Translator) {
+  const normalized = value.trim().toLowerCase();
+  if (["enabled", "on", "true", "yes", "registered"].includes(normalized)) return t("stateOn");
+  if (["disabled", "off", "false", "no", "missing", "none"].includes(normalized)) return t("stateOff");
+  return value;
+}
+
+function OverviewHeaderStats({ snapshot, t }: { snapshot: DashboardSnapshot; t: Translator }) {
+  const items = [
+    { label: t("pending"), value: snapshot.capsules.pending_count },
+    { label: t("capsules"), value: snapshot.capsules.items.length },
+    { label: t("skippedFiles"), value: snapshot.capsules.skipped },
+    { label: t("autostart"), value: displayAutostart(snapshot.install_state.autostart, t) },
+  ];
+
+  return (
+    <div className="overview-header-stats" aria-label={t("overview")}>
+      {items.map((item) => (
+        <span key={item.label}>
+          <span>{item.label}</span>
+          <strong>{item.value}</strong>
+        </span>
+      ))}
     </div>
   );
 }
@@ -729,8 +777,6 @@ export default function App() {
     "--sidebar-width": `${sidebarWidth}px`,
     ...(theme
       ? {
-          "--codex-color": theme.codex_color,
-          "--claude-color": theme.claude_color,
           "--focus-border-color": theme.focus_border_color,
           "--selection-bg-color": theme.selection_bg_color,
           "--selection-fg-color": theme.selection_fg_color,
@@ -744,7 +790,7 @@ export default function App() {
 
   const pageTitle =
     active === "capsules" ? t("capsules") : t(navTabs.find((tab) => tab.id === active)?.labelKey ?? "overview");
-  const guiDark = theme?.preset === "dark";
+  const guiDark = isDarkGuiTheme(theme);
 
   return (
     <div
@@ -823,6 +869,7 @@ export default function App() {
           <div>
             <h2>{pageTitle}</h2>
           </div>
+          {snapshot && active === "overview" && <OverviewHeaderStats snapshot={snapshot} t={t} />}
         </header>
         {error && (
           <section className="banner error">

@@ -1,6 +1,7 @@
 pub mod dedupe;
 pub mod router;
 pub mod store;
+pub mod trigger_mark;
 
 use std::time::Duration;
 
