@@ -34,16 +34,15 @@ pub fn ensure_inherited_subdir(path: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(path)?;
     #[cfg(windows)]
     {
-        let output = no_window_command("icacls")
+        // Best effort, mirroring harden_dir: inside an agent sandbox the
+        // restricted token may lack WRITE_DAC even on dirs it just created,
+        // and a hard error here would fail the hook that only needed the dir
+        // to exist. The real repair is guaranteed by the unsandboxed daemon
+        // startup and `ai-handoff install` paths, where icacls succeeds.
+        let _ = no_window_command("icacls")
             .arg(path)
             .arg("/inheritance:e")
-            .output()?;
-        if !output.status.success() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                String::from_utf8_lossy(&output.stderr).trim().to_string(),
-            ));
-        }
+            .output();
     }
     #[cfg(unix)]
     {

@@ -26,6 +26,34 @@ pub struct UninstallOptions {
     pub yes: bool,
 }
 
+/// Where the GUI/agent leftover cleanup looks. Injected (instead of read from
+/// the environment inside the cleanup) so tests never touch the real user
+/// profile's AppData/Temp.
+pub struct StaleCleanupRoots {
+    pub local_app_data: Option<PathBuf>,
+    pub roaming_app_data: Option<PathBuf>,
+    pub temp_dir: Option<PathBuf>,
+}
+
+impl StaleCleanupRoots {
+    pub fn from_env() -> Self {
+        Self {
+            local_app_data: env_path("LOCALAPPDATA"),
+            roaming_app_data: env_path("APPDATA"),
+            temp_dir: Some(std::env::temp_dir()),
+        }
+    }
+
+    /// No cleanup roots at all — for tests that exercise unrelated logic.
+    pub fn none() -> Self {
+        Self {
+            local_app_data: None,
+            roaming_app_data: None,
+            temp_dir: None,
+        }
+    }
+}
+
 pub fn run(opts: UninstallOptions) -> anyhow::Result<i32> {
     let base_dirs = directories::BaseDirs::new().context("could not determine user home")?;
     let exe = std::env::current_exe().context("could not determine current executable")?;
@@ -37,7 +65,14 @@ pub fn run(opts: UninstallOptions) -> anyhow::Result<i32> {
     );
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
-    let code = run_with_targets(&targets, opts, &mut stdin.lock(), &mut stdout.lock(), true)?;
+    let code = run_with_targets(
+        &targets,
+        opts,
+        &StaleCleanupRoots::from_env(),
+        &mut stdin.lock(),
+        &mut stdout.lock(),
+        true,
+    )?;
     // The GUI app (NSIS uninstaller + WebView/Start Menu leftovers) goes last so
     // the config/hook cleanup above is already durable if it fails.
     if opts.gui || opts.all {
@@ -52,6 +87,7 @@ pub fn run(opts: UninstallOptions) -> anyhow::Result<i32> {
 pub fn run_with_targets(
     targets: &InstallTargets,
     opts: UninstallOptions,
+    cleanup_roots: &StaleCleanupRoots,
     input: &mut dyn Read,
     out: &mut dyn Write,
     delete_task: bool,
@@ -72,7 +108,8 @@ pub fn run_with_targets(
         delete_autostart(&st)?;
     }
     super::launcher::remove_aho_launcher(&st)?;
-    let removed_leftovers = cleanup_stale_managed_paths_for_targets(targets, include_gui)?;
+    let removed_leftovers =
+        cleanup_stale_managed_paths_for_targets(targets, cleanup_roots, include_gui);
     if !removed_leftovers.is_empty() {
         writeln!(
             out,
@@ -138,19 +175,17 @@ fn purge_local_data(targets: &InstallTargets) -> std::io::Result<()> {
 
 fn cleanup_stale_managed_paths_for_targets(
     targets: &InstallTargets,
+    roots: &StaleCleanupRoots,
     include_gui: bool,
-) -> std::io::Result<Vec<PathBuf>> {
+) -> Vec<PathBuf> {
     let Some(user_home) = user_home_from_targets(targets) else {
-        return Ok(Vec::new());
+        return Vec::new();
     };
-    let local_app_data = env_path("LOCALAPPDATA");
-    let roaming_app_data = env_path("APPDATA");
-    let temp_dir = std::env::temp_dir();
     cleanup_stale_managed_paths(
         &user_home,
-        local_app_data.as_deref(),
-        roaming_app_data.as_deref(),
-        &temp_dir,
+        roots.local_app_data.as_deref(),
+        roots.roaming_app_data.as_deref(),
+        roots.temp_dir.as_deref(),
         include_gui,
     )
 }
@@ -167,13 +202,17 @@ fn env_path(key: &str) -> Option<PathBuf> {
     std::env::var_os(key).map(PathBuf::from)
 }
 
+/// Best-effort leftover sweep. A locked path (the GUI's WebView cache while
+/// the app is closing, an ah-bi temp dir held by another process) must not
+/// abort the whole uninstall — the NSIS uninstaller and the next run get
+/// another chance at anything skipped here.
 fn cleanup_stale_managed_paths(
     user_home: &Path,
     local_app_data: Option<&Path>,
     roaming_app_data: Option<&Path>,
-    temp_dir: &Path,
+    temp_dir: Option<&Path>,
     include_gui: bool,
-) -> std::io::Result<Vec<PathBuf>> {
+) -> Vec<PathBuf> {
     let mut candidates = vec![
         user_home.join(".codex/plugins/cache/claude-codex-auto-handoff"),
         user_home.join(".codex/.tmp/marketplaces/claude-codex-auto-handoff"),
@@ -191,7 +230,7 @@ fn cleanup_stale_managed_paths(
 
     let mut removed = Vec::new();
     for path in candidates {
-        remove_managed_dir_if_exists(&path, &mut removed)?;
+        remove_managed_dir_if_exists(&path, &mut removed);
     }
 
     // The Start Menu search shortcut we drop next to NSIS's "AI Handoff.lnk"
@@ -199,38 +238,35 @@ fn cleanup_stale_managed_paths(
     if include_gui {
         if let Some(root) = roaming_app_data {
             let aho = root.join("Microsoft/Windows/Start Menu/Programs/aho.lnk");
-            remove_managed_file_if_exists(&aho, &mut removed)?;
+            remove_managed_file_if_exists(&aho, &mut removed);
         }
     }
 
-    if temp_dir.is_dir() {
-        for entry in std::fs::read_dir(temp_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            let name = entry.file_name();
-            if path.is_dir() && name.to_str().is_some_and(|name| name.starts_with("ah-bi-")) {
-                remove_managed_dir_if_exists(&path, &mut removed)?;
+    if let Some(temp_dir) = temp_dir {
+        if let Ok(entries) = std::fs::read_dir(temp_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = entry.file_name();
+                if path.is_dir() && name.to_str().is_some_and(|name| name.starts_with("ah-bi-")) {
+                    remove_managed_dir_if_exists(&path, &mut removed);
+                }
             }
         }
     }
 
-    Ok(removed)
+    removed
 }
 
-fn remove_managed_dir_if_exists(path: &Path, removed: &mut Vec<PathBuf>) -> std::io::Result<()> {
-    if path.exists() {
-        std::fs::remove_dir_all(path)?;
+fn remove_managed_dir_if_exists(path: &Path, removed: &mut Vec<PathBuf>) {
+    if path.exists() && std::fs::remove_dir_all(path).is_ok() {
         removed.push(path.to_path_buf());
     }
-    Ok(())
 }
 
-fn remove_managed_file_if_exists(path: &Path, removed: &mut Vec<PathBuf>) -> std::io::Result<()> {
-    if path.exists() {
-        std::fs::remove_file(path)?;
+fn remove_managed_file_if_exists(path: &Path, removed: &mut Vec<PathBuf>) {
+    if path.exists() && std::fs::remove_file(path).is_ok() {
         removed.push(path.to_path_buf());
     }
-    Ok(())
 }
 
 /// Run the desktop GUI's own uninstaller (Windows NSIS, silent). The desktop
@@ -401,6 +437,7 @@ mod tests {
         let code = run_with_targets(
             &targets,
             UninstallOptions::default(),
+            &StaleCleanupRoots::none(),
             &mut input,
             &mut output,
             false,
@@ -428,12 +465,24 @@ mod tests {
         let mut input: &[u8] = b"";
         let mut output = Vec::new();
 
+        // Isolated cleanup roots: `--all` must never sweep the REAL AppData /
+        // Temp from a test (it deleted the developer's live GUI data and hit
+        // file locks before).
+        let cleanup_local = dir.path().join("local");
+        let cleanup_roaming = dir.path().join("roaming");
+        let cleanup_temp = dir.path().join("temp");
+        std::fs::create_dir_all(&cleanup_temp).unwrap();
         let code = run_with_targets(
             &targets,
             UninstallOptions {
                 all: true,
                 yes: true,
                 ..Default::default()
+            },
+            &StaleCleanupRoots {
+                local_app_data: Some(cleanup_local),
+                roaming_app_data: Some(cleanup_roaming),
+                temp_dir: Some(cleanup_temp),
             },
             &mut input,
             &mut output,
@@ -506,10 +555,9 @@ mod tests {
             &user_home,
             Some(&local_app_data),
             Some(&roaming_app_data),
-            &temp_dir,
+            Some(&temp_dir),
             true,
-        )
-        .unwrap();
+        );
 
         for path in &stale_dirs {
             assert!(!path.exists(), "stale path was not removed: {path:?}");
@@ -544,10 +592,9 @@ mod tests {
             &user_home,
             Some(&local_app_data),
             Some(&roaming_app_data),
-            &temp_dir,
+            Some(&temp_dir),
             false,
-        )
-        .unwrap();
+        );
 
         assert!(!codex_cache.exists());
         for path in &gui_paths {

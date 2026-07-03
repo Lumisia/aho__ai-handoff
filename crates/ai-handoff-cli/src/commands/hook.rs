@@ -165,20 +165,7 @@ pub(crate) fn try_start_daemon() -> std::io::Result<()> {
     }
 
     let exe = std::env::current_exe()?;
-    let mut command = std::process::Command::new(exe);
-    command
-        .args(["daemon", "run"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-
-    #[cfg(windows)]
-    {
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-
-    let _child = command.spawn()?;
+    spawn_daemon_detached(&exe)?;
     let deadline = Instant::now() + Duration::from_millis(2500);
     while Instant::now() < deadline {
         if ping_daemon(Duration::from_millis(100)) {
@@ -190,4 +177,53 @@ pub(crate) fn try_start_daemon() -> std::io::Result<()> {
         std::io::ErrorKind::TimedOut,
         "daemon did not become reachable",
     ))
+}
+
+/// Start `<exe> daemon run` without inheriting THIS process's handle table.
+///
+/// A plain std spawn on Windows passes `bInheritHandles=TRUE`, so the stdout
+/// pipe the calling shell (or an agent's hook runner) attached to this hook
+/// leaks into the long-lived daemon. The caller then never sees EOF until the
+/// daemon's idle exit — a cold-start hook measured 62s against a 10s hook
+/// timeout. `Start-Process` goes through ShellExecuteEx, which starts the
+/// daemon with a fresh handle table, so the hook's pipes close when the hook
+/// exits.
+#[cfg(windows)]
+fn spawn_daemon_detached(exe: &std::path::Path) -> std::io::Result<()> {
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let script = format!(
+        "Start-Process -FilePath '{}' -ArgumentList 'daemon','run' -WindowStyle Hidden",
+        exe.to_string_lossy().replace('\'', "''"),
+    );
+    let status = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            &script,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "Start-Process for the daemon exited with {status}"
+        )))
+    }
+}
+
+#[cfg(not(windows))]
+fn spawn_daemon_detached(exe: &std::path::Path) -> std::io::Result<()> {
+    std::process::Command::new(exe)
+        .args(["daemon", "run"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
 }
