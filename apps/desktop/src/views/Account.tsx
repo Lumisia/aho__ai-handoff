@@ -180,6 +180,7 @@ function AgentPanel({
         <LimitBar agent={agent} label="5h" value={data.five_hour} t={t} />
         <LimitBar agent={agent} label="Weekly" value={data.weekly} t={t} />
       </div>
+      {data.usage_source === "none" && <div className="empty">{t("noSampleHint")}</div>}
 
       <div className="path-strip">
         <span>{t("vaultRoot")}</span>

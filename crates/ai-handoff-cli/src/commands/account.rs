@@ -3,14 +3,14 @@
 //! The mutating actions (add / switch / launch / delete) live in the TUI Account
 //! tab, since they touch credentials and should require an explicit local action.
 
-use ai_handoff_core::account::{self, AccountStatus, Agent, Identity};
+use ai_handoff_core::account::{self, AccountSlot, AccountStatus, Agent, Identity};
 
 use crate::AccountAction;
 
 pub fn run(action: AccountAction) -> anyhow::Result<i32> {
     match action {
         AccountAction::List { json } => list(json),
-        AccountAction::Status { json } => status(json),
+        AccountAction::Status { json, fetch } => status(json, fetch),
         AccountAction::Doctor { json } => doctor(json),
     }
 }
@@ -60,10 +60,14 @@ fn list(json: bool) -> anyhow::Result<i32> {
     Ok(0)
 }
 
-fn status(json: bool) -> anyhow::Result<i32> {
+fn status(json: bool, fetch: bool) -> anyhow::Result<i32> {
     let codex = (account::codex_identity(), account::codex_status());
     let claude_id = account::claude_identity();
-    let claude_status = claude_usage_status(claude_id.as_ref()).or_else(account::claude_status);
+    let claude_status = if fetch {
+        claude_fetched_status(claude_id.as_ref()).or_else(account::claude_status)
+    } else {
+        account::claude_status()
+    };
     let claude = (claude_id, claude_status);
     if json {
         let payload = serde_json::json!({
@@ -78,23 +82,28 @@ fn status(json: bool) -> anyhow::Result<i32> {
     Ok(0)
 }
 
-fn claude_usage_status(id: Option<&Identity>) -> Option<AccountStatus> {
+fn claude_fetched_status(id: Option<&Identity>) -> Option<AccountStatus> {
     let slots = account::list_slots(Agent::Claude);
-    let selected = slots
-        .iter()
-        .find(|s| s.active)
-        .or_else(|| {
-            id.and_then(|identity| identity.email.as_deref())
-                .and_then(|email| {
-                    slots
-                        .iter()
-                        .find(|s| s.meta.email.as_deref() == Some(email) || s.meta.label == email)
-                })
-        })
-        .or_else(|| slots.first())?;
+    let selected = select_status_slot(&slots, id)?;
     ai_handoff_tui::account_api::fetch_slot_usage(Agent::Claude, &selected.meta.label)
         .ok()
         .map(account_status_from_usage)
+}
+
+fn select_status_slot<'a>(
+    slots: &'a [AccountSlot],
+    live: Option<&Identity>,
+) -> Option<&'a AccountSlot> {
+    slots.iter().find(|s| s.active).or_else(|| {
+        let email = live?.email.as_deref()?;
+        slots.iter().find(|s| {
+            s.meta
+                .email
+                .as_deref()
+                .is_some_and(|e| e.eq_ignore_ascii_case(email))
+                || s.meta.label.eq_ignore_ascii_case(email)
+        })
+    })
 }
 
 fn doctor(json: bool) -> anyhow::Result<i32> {
@@ -248,8 +257,63 @@ fn reset(resets_at: Option<i64>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ai_handoff_core::account::RateWindow;
+    use ai_handoff_core::account::{AccountMeta, AccountSlot, RateWindow};
     use ai_handoff_tui::account_api::UsageData;
+    use std::path::PathBuf;
+
+    fn slot(label: &str, email: Option<&str>, active: bool) -> AccountSlot {
+        AccountSlot {
+            meta: AccountMeta {
+                schema_version: 1,
+                agent: "claude".into(),
+                label: label.into(),
+                email: email.map(String::from),
+                plan_hint: None,
+                account_id: None,
+                workspace_id: None,
+                created_at: None,
+                last_verified_at: None,
+                source: None,
+                identity_key: None,
+            },
+            dir: PathBuf::new(),
+            active,
+        }
+    }
+
+    fn id(email: &str) -> Identity {
+        Identity {
+            email: Some(email.into()),
+            account_id: None,
+            plan_type: None,
+        }
+    }
+
+    #[test]
+    fn select_status_slot_requires_active_or_identity_match() {
+        let slots = vec![
+            slot("a@x.com", Some("a@x.com"), false),
+            slot("b@x.com", Some("b@x.com"), false),
+        ];
+        assert!(select_status_slot(&slots, None).is_none());
+        assert!(select_status_slot(&slots, Some(&id("c@x.com"))).is_none());
+        assert_eq!(
+            select_status_slot(&slots, Some(&id("B@X.com")))
+                .unwrap()
+                .meta
+                .label,
+            "b@x.com"
+        );
+
+        let with_active = vec![
+            slot("a@x.com", Some("a@x.com"), false),
+            slot("b@x.com", Some("b@x.com"), true),
+        ];
+        assert_eq!(
+            select_status_slot(&with_active, None).unwrap().meta.label,
+            "b@x.com"
+        );
+    }
 
     #[test]
     fn account_status_from_usage_maps_plan_and_windows() {

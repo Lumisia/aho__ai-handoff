@@ -106,6 +106,7 @@ export interface AccountAgentReport {
   plan?: string | null;
   five_hour?: AccountWindow | null;
   weekly?: AccountWindow | null;
+  usage_source: "provider_api" | "local_sample" | "none";
   slots: AccountSlotRow[];
 }
 

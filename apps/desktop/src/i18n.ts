@@ -32,6 +32,8 @@ const labels: Record<Language, Record<string, string>> = {
     stateOn: "on",
     stateOff: "off",
     noSample: "no sample",
+    noSampleHint:
+      "No recent usage sample. Send one message in the agent, or press Refresh while a saved slot is active.",
     left: "left",
     totalTokens: "Total tokens",
     estimatedCost: "Estimated cost",
@@ -245,6 +247,8 @@ const labels: Record<Language, Record<string, string>> = {
     stateOn: "켜짐",
     stateOff: "꺼짐",
     noSample: "샘플 없음",
+    noSampleHint:
+      "최근 사용량 샘플 없음. 에이전트에서 메시지를 한 번 보내거나, 활성 저장 슬롯이 있을 때 새로고침하세요.",
     left: "남음",
     totalTokens: "전체 토큰",
     estimatedCost: "추정 비용",
@@ -458,6 +462,8 @@ const labels: Record<Language, Record<string, string>> = {
     stateOn: "オン",
     stateOff: "オフ",
     noSample: "サンプルなし",
+    noSampleHint:
+      "最近の使用量サンプルがありません。エージェントで一度メッセージを送るか、アクティブな保存スロットがある状態で更新してください。",
     left: "残り",
     totalTokens: "総トークン",
     estimatedCost: "推定コスト",
@@ -671,6 +677,8 @@ const labels: Record<Language, Record<string, string>> = {
     stateOn: "开启",
     stateOff: "关闭",
     noSample: "无样本",
+    noSampleHint:
+      "暂无最近用量样本。请在代理中发送一条消息，或在有活动保存槽位时点击刷新。",
     left: "剩余",
     totalTokens: "总 token",
     estimatedCost: "预估费用",

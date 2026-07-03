@@ -383,6 +383,11 @@ overview.limit_no_account:
   ko: 활성 계정 없음
   ja: アクティブなアカウントなし
   zh: 无活动账户
+overview.limit_no_sample:
+  en: no recent sample
+  ko: 최근 샘플 없음
+  ja: 最近のサンプルなし
+  zh: 暂无最近样本
 overview.limit_error:
   en: "unavailable (%{err})"
   ko: "조회 실패 (%{err})"

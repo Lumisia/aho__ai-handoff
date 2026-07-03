@@ -92,6 +92,7 @@ struct AccountAgentReport {
     plan: Option<String>,
     five_hour: Option<AccountWindow>,
     weekly: Option<AccountWindow>,
+    usage_source: String,
     slots: Vec<AccountSlotRow>,
 }
 
@@ -886,51 +887,61 @@ fn tokens_to_usage(tokens: Tokens) -> UsageTokens {
 }
 
 fn account_report(force: bool) -> AccountReport {
+    let (codex_status, codex_source) =
+        agent_status_resolved(Agent::Codex, account::codex_status(), force);
+    let (claude_status, claude_source) =
+        agent_status_resolved(Agent::Claude, account::claude_status(), force);
     AccountReport {
-        codex: account_agent_report(
-            Agent::Codex,
-            agent_status_with_fallback(Agent::Codex, account::codex_status(), force),
-        ),
-        claude: account_agent_report(
-            Agent::Claude,
-            agent_status_with_fallback(Agent::Claude, account::claude_status(), force),
-        ),
+        codex: account_agent_report(Agent::Codex, codex_status, codex_source),
+        claude: account_agent_report(Agent::Claude, claude_status, claude_source),
     }
 }
 
-/// Local status (statusline samples / rollout logs) is only available while a
-/// session has recently run. When it is missing ??or the user forces a refresh
-/// ??fall back to the account's own usage endpoint so the panel still shows
-/// live 5h/weekly limits.
-fn agent_status_with_fallback(
+/// Which saved slot an explicit user refresh may query. `None` means local-only:
+/// no provider call, and no live credential is sent to a network endpoint.
+fn remote_refresh_slot(agent: Agent, force: bool) -> Option<String> {
+    if !force {
+        return None;
+    }
+    account::list_slots(agent)
+        .into_iter()
+        .find(|slot| slot.active)
+        .map(|slot| slot.meta.label)
+}
+
+/// Default is local-only (statusline samples / rollout logs). Only a
+/// user-forced refresh with an active saved slot queries provider APIs, and
+/// only with that slot's own credential.
+fn agent_status_resolved(
     agent: Agent,
     local: Option<account::AccountStatus>,
     force: bool,
-) -> Option<account::AccountStatus> {
-    let missing_windows = local
+) -> (Option<account::AccountStatus>, &'static str) {
+    if let Some(label) = remote_refresh_slot(agent, force) {
+        if let Ok(usage) = ai_handoff_tui::account_api::fetch_slot_usage(agent, &label) {
+            let status = account::AccountStatus {
+                plan_type: usage
+                    .plan
+                    .clone()
+                    .or_else(|| local.as_ref().and_then(|s| s.plan_type.clone())),
+                five_hour: usage.five_hour,
+                weekly: usage.weekly,
+                captured_at: Some(chrono::Utc::now().timestamp_millis()),
+            };
+            return (Some(status), "provider_api");
+        }
+    }
+    let has_window = local
         .as_ref()
-        .map(|status| status.five_hour.is_none() && status.weekly.is_none())
-        .unwrap_or(true);
-    if !force && !missing_windows {
-        return local;
-    }
-    match ai_handoff_tui::account_api::fetch_live_usage(agent) {
-        Ok(usage) => Some(account::AccountStatus {
-            plan_type: usage
-                .plan
-                .clone()
-                .or_else(|| local.as_ref().and_then(|s| s.plan_type.clone())),
-            five_hour: usage.five_hour,
-            weekly: usage.weekly,
-            captured_at: Some(chrono::Utc::now().timestamp_millis()),
-        }),
-        Err(_) => local,
-    }
+        .map(|status| status.five_hour.is_some() || status.weekly.is_some())
+        .unwrap_or(false);
+    (local, if has_window { "local_sample" } else { "none" })
 }
 
 fn account_agent_report(
     agent: Agent,
     status: Option<account::AccountStatus>,
+    usage_source: &'static str,
 ) -> AccountAgentReport {
     let slots = account::list_slots(agent)
         .into_iter()
@@ -968,6 +979,7 @@ fn account_agent_report(
             .as_ref()
             .and_then(|status| status.weekly.as_ref())
             .map(account_window),
+        usage_source: usage_source.to_string(),
         slots,
     }
 }
@@ -1040,7 +1052,7 @@ fn poll_account_login_at(agent: Agent, home: &Path) -> Result<AccountLoginPoll, 
             report: None,
         });
     }
-    let label = account::capture_login_as_active(agent, home, "official-cli-login")
+    let label = account::capture_login(agent, home, "official-cli-login")
         .map_err(|error| error.to_string())?;
     Ok(AccountLoginPoll {
         done: true,
@@ -2049,6 +2061,38 @@ mod tests {
     }
 
     #[test]
+    fn remote_refresh_requires_force_and_active_slot() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let codex_home = tempfile::tempdir().unwrap();
+        let claude_home = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        std::env::set_var("CODEX_HOME", codex_home.path());
+        std::env::set_var("CLAUDE_CONFIG_DIR", claude_home.path());
+
+        assert_eq!(remote_refresh_slot(Agent::Claude, true), None);
+
+        let claude_dir = account::slot_dir(Agent::Claude, "dev@example.com");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let cred = br#"{"claudeAiOauth":{"accessToken":"secret-token","subscriptionType":"pro"}}"#;
+        std::fs::write(claude_dir.join(".credentials.json"), cred).unwrap();
+        std::fs::write(claude_home.path().join(".credentials.json"), cred).unwrap();
+
+        assert_eq!(remote_refresh_slot(Agent::Claude, false), None);
+        assert_eq!(
+            remote_refresh_slot(Agent::Claude, true).as_deref(),
+            Some("dev@example.com")
+        );
+
+        let report = account_report(false);
+        assert_eq!(report.claude.usage_source, "none");
+
+        std::env::remove_var("AI_HANDOFF_HOME");
+        std::env::remove_var("CODEX_HOME");
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+    }
+
+    #[test]
     fn account_cli_specs_use_vendor_programs_and_profile_env() {
         let codex_login = account_login_spec(Agent::Codex, PathBuf::from("C:/tmp/codex"));
         assert_eq!(codex_login.env_var, "CODEX_HOME");
@@ -2087,8 +2131,8 @@ mod tests {
         let report = poll.report.expect("account report");
         assert_eq!(report.claude.slots.len(), 1);
         assert_eq!(report.claude.slots[0].label, "claude-account");
-        assert!(report.claude.slots[0].active);
-        assert_eq!(report.claude.active.as_deref(), Some("claude-account"));
+        assert!(!report.claude.slots[0].active);
+        assert_eq!(report.claude.active, None);
         assert_eq!(
             report.claude.slots[0].source.as_deref(),
             Some("official-cli-login")
@@ -2291,6 +2335,7 @@ mod tests {
                 plan: None,
                 five_hour: None,
                 weekly: None,
+                usage_source: "none".into(),
                 slots: vec![AccountSlotRow {
                     label: "work".into(),
                     email: None,
@@ -2309,6 +2354,7 @@ mod tests {
                 plan: None,
                 five_hour: None,
                 weekly: None,
+                usage_source: "none".into(),
                 slots: vec![],
             },
         }

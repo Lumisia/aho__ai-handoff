@@ -1,44 +1,20 @@
-//! Per-account usage from the Codex backend.
+//! Per-account usage from provider backends.
 //!
-//! 5-hour / weekly limits and reset credits are **per account**, so — exactly
-//! like codex-auth and codex-quota — we call the usage endpoint with *each*
-//! account's own token rather than reading the active account's local logs
-//! (which would show the same numbers for every slot):
-//!
-//! ```text
-//! GET https://chatgpt.com/backend-api/wham/usage
-//!   Authorization: Bearer <access_token>
-//!   ChatGPT-Account-Id: <account_id>
-//! -> { plan_type, rate_limit: { primary_window, secondary_window },
-//!      rate_limit_reset_credits: { available_count } }
-//! ```
-//!
-//! Reset-credit expiration details are fetched from:
-//!
-//! ```text
-//! GET https://chatgpt.com/backend-api/wham/rate-limit-reset-credits
-//!   Authorization: Bearer <access_token>
-//!   ChatGPT-Account-Id: <account_id>
-//! -> { credits: [{ granted_at, expires_at }] }
-//! ```
-//!
-//! The token comes from the slot's stored `auth.json` and is used only to set
-//! the header here — never logged, displayed, or returned.
+//! Saved slots have their own credentials. Slot usage must use the selected
+//! slot's token, not the currently active CLI account or local session logs.
+//! Live overview usage is handled elsewhere from local samples only.
 
 use std::cmp::Ordering;
 use std::time::Duration;
 
 use ai_handoff_core::account::{self, Agent, RateWindow};
-use base64::Engine;
 use chrono::DateTime;
 use serde_json::Value;
 
 const USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const RESET_CREDITS_URL: &str = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
 const CLAUDE_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
-const CLAUDE_CURRENT_SESSION_URL_PREFIX: &str = "https://claude.ai/api/organizations";
 
-/// One account's usage snapshot from the backend.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct UsageData {
     pub plan: Option<String>,
@@ -48,14 +24,12 @@ pub struct UsageData {
     pub reset_credit_details: Vec<ResetCredit>,
 }
 
-/// One reset credit returned by `wham/rate-limit-reset-credits`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ResetCredit {
     pub granted_at: String,
     pub expires_at: String,
 }
 
-/// Fetch usage for a saved slot, using that slot's stored token.
 pub fn fetch_slot_usage(agent: Agent, label: &str) -> Result<UsageData, String> {
     match agent {
         Agent::Codex => {
@@ -66,23 +40,6 @@ pub fn fetch_slot_usage(agent: Agent, label: &str) -> Result<UsageData, String> 
         Agent::Claude => {
             let (token, plan) =
                 account::claude_slot_oauth(label).ok_or("no usable token in this account")?;
-            fetch_claude_usage(&token, plan)
-        }
-    }
-}
-
-/// Fetch usage for the live (active) account, using its own credential file.
-/// Backs the GUI/CLI status views when no local sample is available (Claude
-/// statusline samples only exist while a session is running).
-pub fn fetch_live_usage(agent: Agent) -> Result<UsageData, String> {
-    match agent {
-        Agent::Codex => {
-            let (token, account_id) =
-                account::codex_request_auth().ok_or("not signed in to Codex")?;
-            fetch_usage(&token, account_id.as_deref())
-        }
-        Agent::Claude => {
-            let (token, plan) = account::claude_live_oauth().ok_or("not signed in to Claude")?;
             fetch_claude_usage(&token, plan)
         }
     }
@@ -114,15 +71,13 @@ fn fetch_usage(access_token: &str, account_id: Option<&str>) -> Result<UsageData
             Ok(usage)
         }
         Err(ureq::Error::Status(401, _)) | Err(ureq::Error::Status(403, _)) => {
-            Err("auth expired — re-add this account".to_string())
+            Err("auth expired; re-add this account".to_string())
         }
         Err(ureq::Error::Status(code, _)) => Err(format!("http {code}")),
         Err(_) => Err("network error".to_string()),
     }
 }
 
-/// Parse the `wham/usage` response (field names verified against codex-auth /
-/// codex-quota and codex-rs's backend models).
 fn parse_usage(body: &Value) -> UsageData {
     let rate_limit = body.get("rate_limit");
     let window = |name: &str| -> Option<RateWindow> {
@@ -161,15 +116,12 @@ fn fetch_claude_usage(access_token: &str, plan: Option<String>) -> Result<UsageD
         .timeout_read(Duration::from_secs(8))
         .user_agent("claude-code")
         .build();
-    match fetch_claude_oauth_usage(&agent, access_token, plan.clone()) {
+    match fetch_claude_oauth_usage(&agent, access_token, plan) {
         Ok(usage) if claude_usage_has_windows(&usage) => Ok(usage),
-        Ok(_) => fetch_claude_current_session_usage(&agent, access_token, plan)
-            .map_err(|err| format!("usage response missing limits; fallback: {err}")),
-        Err(err) if err.allows_fallback() => {
-            let primary = err.message();
-            fetch_claude_current_session_usage(&agent, access_token, plan)
-                .map_err(|fallback| format!("{primary}; fallback: {fallback}"))
-        }
+        Ok(_) => Err(
+            "usage response missing limits; open Claude Code and send a message to record a sample"
+                .to_string(),
+        ),
         Err(err) => Err(err.message()),
     }
 }
@@ -206,46 +158,6 @@ fn fetch_claude_oauth_usage(
     }
 }
 
-fn fetch_claude_current_session_usage(
-    agent: &ureq::Agent,
-    access_token: &str,
-    plan: Option<String>,
-) -> Result<UsageData, String> {
-    let url = claude_current_session_url(access_token).ok_or("no Claude org id in token")?;
-    match agent
-        .get(&url)
-        .set("Authorization", &format!("Bearer {access_token}"))
-        .set("Accept", "application/json")
-        .set("Content-Type", "application/json")
-        .set("Origin", "https://claude.ai")
-        .set("Referer", "https://claude.ai/new")
-        .set(
-            "User-Agent",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
-        )
-        .call()
-    {
-        Ok(resp) => {
-            let body: Value = resp.into_json().map_err(|_| "bad response".to_string())?;
-            let usage = parse_claude_usage(&body, plan);
-            if claude_usage_has_windows(&usage) {
-                Ok(usage)
-            } else {
-                Err("current_session response missing limits".to_string())
-            }
-        }
-        Err(ureq::Error::Status(401, _)) | Err(ureq::Error::Status(403, _)) => {
-            Err("auth expired — re-add this account".to_string())
-        }
-        Err(ureq::Error::Status(429, resp)) => {
-            let retry = resp.header("retry-after").unwrap_or("later");
-            Err(format!("rate limited — retry {retry}"))
-        }
-        Err(ureq::Error::Status(code, _)) => Err(format!("http {code}")),
-        Err(_) => Err("network error".to_string()),
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ClaudeUsageFetchError {
     AuthExpired,
@@ -254,14 +166,10 @@ enum ClaudeUsageFetchError {
 }
 
 impl ClaudeUsageFetchError {
-    fn allows_fallback(&self) -> bool {
-        matches!(self, Self::Other(_))
-    }
-
     fn message(self) -> String {
         match self {
-            Self::AuthExpired => "auth expired — re-add this account".to_string(),
-            Self::RateLimited(retry) => format!("rate limited — retry {retry}"),
+            Self::AuthExpired => "auth expired; re-add this account".to_string(),
+            Self::RateLimited(retry) => format!("rate limited; retry {retry}"),
             Self::Other(message) => message,
         }
     }
@@ -269,41 +177,6 @@ impl ClaudeUsageFetchError {
 
 fn claude_usage_has_windows(usage: &UsageData) -> bool {
     usage.five_hour.is_some() || usage.weekly.is_some()
-}
-
-fn claude_current_session_url(access_token: &str) -> Option<String> {
-    let org_uuid = claude_org_uuid_from_token(access_token)?;
-    Some(format!(
-        "{CLAUDE_CURRENT_SESSION_URL_PREFIX}/{org_uuid}/usage_report/current_session"
-    ))
-}
-
-fn claude_org_uuid_from_token(access_token: &str) -> Option<String> {
-    let payload = access_token.split('.').nth(1)?;
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload.trim())
-        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(payload.trim()))
-        .ok()?;
-    let claims: Value = serde_json::from_slice(&bytes).ok()?;
-    let org = claims
-        .get("organizationUUID")
-        .or_else(|| claims.get("organization_uuid"))
-        .or_else(|| claims.get("org_uuid"))
-        .or_else(|| claims.get("orgUuid"))
-        .or_else(|| claims.get("lastActiveOrg"))
-        .and_then(Value::as_str)?;
-    if claude_org_id_is_safe(org) {
-        Some(org.to_string())
-    } else {
-        None
-    }
-}
-
-fn claude_org_id_is_safe(org: &str) -> bool {
-    !org.is_empty()
-        && org
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
 }
 
 fn parse_claude_usage(body: &Value, plan: Option<String>) -> UsageData {
@@ -400,7 +273,7 @@ fn fetch_reset_credit_details(
             Ok(parse_reset_credit_details(&body))
         }
         Err(ureq::Error::Status(401, _)) | Err(ureq::Error::Status(403, _)) => {
-            Err("auth expired — re-add this account".to_string())
+            Err("auth expired; re-add this account".to_string())
         }
         Err(ureq::Error::Status(code, _)) => Err(format!("http {code}")),
         Err(_) => Err("network error".to_string()),
@@ -445,15 +318,6 @@ fn cmp_credit_datetime(a: &str, b: &str) -> Ordering {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::Engine;
-
-    fn b64url(s: &str) -> String {
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(s.as_bytes())
-    }
-
-    fn fake_jwt(claims: &str) -> String {
-        format!("{}.{}.{}", b64url("{}"), b64url(claims), "sig")
-    }
 
     #[test]
     fn parse_usage_reads_windows_plan_and_credits() {
@@ -469,10 +333,10 @@ mod tests {
         assert_eq!(u.plan.as_deref(), Some("team"));
         let five = u.five_hour.expect("5h");
         assert_eq!(five.used_percent, 100.0);
-        assert_eq!(five.window_minutes, 300); // 18000s / 60
+        assert_eq!(five.window_minutes, 300);
         assert_eq!(five.resets_at, Some(1782478701));
         let weekly = u.weekly.expect("weekly");
-        assert_eq!(weekly.window_minutes, 10080); // 604800s / 60
+        assert_eq!(weekly.window_minutes, 10080);
         assert_eq!(u.reset_credits, Some(2));
     }
 
@@ -506,7 +370,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_claude_usage_reads_current_session_rate_limits() {
+    fn parse_claude_usage_reads_nested_rate_limits() {
         let body = serde_json::json!({
             "rate_limits": {
                 "five_hour_limit": {
@@ -531,33 +395,6 @@ mod tests {
         assert_eq!(weekly.used_percent, 94.0);
         assert_eq!(weekly.window_minutes, 10080);
         assert_eq!(weekly.resets_at, Some(1783468800));
-    }
-
-    #[test]
-    fn claude_org_uuid_from_token_reads_organization_uuid() {
-        let token = fake_jwt(r#"{"organizationUUID":"123e4567-e89b-12d3-a456-426614174000"}"#);
-
-        assert_eq!(
-            claude_org_uuid_from_token(&token).as_deref(),
-            Some("123e4567-e89b-12d3-a456-426614174000")
-        );
-    }
-
-    #[test]
-    fn claude_org_uuid_from_token_reads_last_active_org() {
-        let token = fake_jwt(r#"{"lastActiveOrg":"123e4567-e89b-12d3-a456-426614174001"}"#);
-
-        assert_eq!(
-            claude_org_uuid_from_token(&token).as_deref(),
-            Some("123e4567-e89b-12d3-a456-426614174001")
-        );
-    }
-
-    #[test]
-    fn claude_org_uuid_from_token_rejects_unsafe_path_segments() {
-        let token = fake_jwt(r#"{"organizationUUID":"../secret"}"#);
-
-        assert!(claude_org_uuid_from_token(&token).is_none());
     }
 
     #[test]

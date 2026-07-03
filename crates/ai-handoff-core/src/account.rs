@@ -9,9 +9,9 @@
 //!   rollout line carries `payload.rate_limits` (`primary` = 5h, `secondary` =
 //!   weekly), verified against real rollout files and `codex-rs`.
 //! - Codex account email / plan / id: the `id_token` JWT inside
-//!   `~/.codex/auth.json` (`tokens.id_token`), decoded locally. The raw token
-//!   is never returned except by [`codex_request_auth`], used only by the
-//!   network module; it is never logged.
+//!   `~/.codex/auth.json` (`tokens.id_token`), decoded locally. Raw tokens are
+//!   only read from saved slot files by the TUI's network module; they are
+//!   never logged.
 //! - Claude account email: `~/.claude.json` `oauthAccount.emailAddress`
 //!   (config, not a credential file).
 //!
@@ -96,6 +96,9 @@ pub struct AccountMeta {
     pub last_verified_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// Stable identity key (schema v2). Never contains a raw token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_key: Option<String>,
 }
 
 /// One saved account slot: its metadata, on-disk directory (also usable as the
@@ -300,33 +303,14 @@ fn identity_from_auth(value: &Value) -> Option<Identity> {
     })
 }
 
-/// The `(access_token, account_id)` needed for an authenticated backend call.
-///
-/// **Secret material.** The only caller is the network module that fetches the
-/// reset-credit count; the token must never be logged, displayed, or passed to
-/// any agent. Returns `None` when not signed in.
-pub fn codex_request_auth() -> Option<(String, Option<String>)> {
-    request_auth_from_path(&codex_home()?.join("auth.json"))
-}
-
-/// The `(access_token, account_id)` stored in a saved slot — used to fetch that
-/// account's own usage. Codex only (Claude's `.credentials.json` has no bearer
-/// token of this shape, so this returns `None` for Claude).
+/// The `(access_token, account_id)` stored in a saved Codex slot.
 pub fn slot_request_auth(agent: Agent, label: &str) -> Option<(String, Option<String>)> {
     request_auth_from_path(&slot_dir(agent, label).join(cred_filename(agent)))
 }
 
+/// The `(access_token, plan)` stored in a saved Claude slot.
 pub fn claude_slot_oauth(label: &str) -> Option<(String, Option<String>)> {
     claude_oauth_from_path(&slot_dir(Agent::Claude, label).join(cred_filename(Agent::Claude)))
-}
-
-/// The live (active) Claude OAuth `(access_token, plan)` from
-/// `~/.claude/.credentials.json`.
-///
-/// **Secret material.** Only for the usage fetcher; the token must never be
-/// logged, displayed, or passed to any agent. Returns `None` when not signed in.
-pub fn claude_live_oauth() -> Option<(String, Option<String>)> {
-    claude_oauth_from_path(&live_auth_path(Agent::Claude)?)
 }
 
 /// Read `(access_token, account_id)` from a Codex `auth.json` at `path`.
@@ -489,10 +473,82 @@ fn read_meta(dir: &Path) -> Option<AccountMeta> {
     serde_json::from_slice(&std::fs::read(dir.join("account.json")).ok()?).ok()
 }
 
+/// Stable identity for a credential, independent of the display label.
+/// Claude priority: org UUID > email > hash. Codex priority: account id >
+/// email > hash. The hash fallback is the first 12 hex chars of SHA-256.
+fn identity_key(agent: Agent, identity: Option<&Identity>, cred_bytes: &[u8]) -> String {
+    let hash_key = || {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(cred_bytes);
+        let hex = format!("{:x}", h.finalize());
+        format!("{}:token:{}", agent.dir(), &hex[..12])
+    };
+    let email_key = |email: &str| format!("{}:email:{}", agent.dir(), email.to_ascii_lowercase());
+    match agent {
+        Agent::Claude => claude_org_from_cred_bytes(cred_bytes)
+            .map(|org| format!("claude:org:{org}"))
+            .or_else(|| identity.and_then(|i| i.email.as_deref()).map(email_key))
+            .unwrap_or_else(hash_key),
+        Agent::Codex => identity
+            .and_then(|i| i.account_id.as_deref())
+            .map(|id| format!("codex:account:{id}"))
+            .or_else(|| identity.and_then(|i| i.email.as_deref()).map(email_key))
+            .unwrap_or_else(hash_key),
+    }
+}
+
+fn claude_org_from_cred_bytes(bytes: &[u8]) -> Option<String> {
+    let value: Value = serde_json::from_slice(bytes).ok()?;
+    let oauth = value.get("claudeAiOauth").or_else(|| value.get("oauth"))?;
+    let token = oauth
+        .get("accessToken")
+        .or_else(|| oauth.get("access_token"))
+        .or_else(|| oauth.get("oauth_access_token"))?
+        .as_str()?;
+    claude_org_uuid_from_access_token(token)
+}
+
+/// Decode the org UUID claim from a Claude OAuth access token locally.
+pub fn claude_org_uuid_from_access_token(access_token: &str) -> Option<String> {
+    let claims = decode_jwt_claims(access_token)?;
+    let org = claims
+        .get("organizationUUID")
+        .or_else(|| claims.get("organization_uuid"))
+        .or_else(|| claims.get("org_uuid"))
+        .or_else(|| claims.get("orgUuid"))
+        .or_else(|| claims.get("lastActiveOrg"))
+        .and_then(Value::as_str)?;
+    let safe = !org.is_empty()
+        && org
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'));
+    safe.then(|| org.to_string())
+}
+
+fn slot_identity_key(agent: Agent, meta: &AccountMeta, cred_bytes: &[u8]) -> String {
+    if let Some(key) = meta.identity_key.clone() {
+        return key;
+    }
+    let identity = Identity {
+        email: meta.email.clone(),
+        account_id: meta.account_id.clone(),
+        plan_type: meta.plan_hint.clone(),
+    };
+    identity_key(agent, Some(&identity), cred_bytes)
+}
+
 /// List saved account slots, marking which one matches the live credential.
 pub fn list_slots(agent: Agent) -> Vec<AccountSlot> {
     let root = accounts_root(agent);
     let live = live_auth_path(agent).and_then(|p| std::fs::read(p).ok());
+    let live_key = live.as_ref().map(|bytes| {
+        let identity = match agent {
+            Agent::Codex => codex_identity(),
+            Agent::Claude => claude_identity(),
+        };
+        identity_key(agent, identity.as_ref(), bytes)
+    });
     let mut slots = Vec::new();
     let Ok(entries) = std::fs::read_dir(&root) else {
         return slots;
@@ -522,8 +578,12 @@ pub fn list_slots(agent: Agent) -> Vec<AccountSlot> {
             created_at: None,
             last_verified_at: None,
             source: None,
+            identity_key: None,
         });
-        let active = live.as_ref().map(|l| *l == cred).unwrap_or(false);
+        let active = live.as_ref().is_some_and(|l| *l == cred)
+            || live_key
+                .as_ref()
+                .is_some_and(|key| *key == slot_identity_key(agent, &meta, &cred));
         slots.push(AccountSlot { meta, dir, active });
     }
     slots.sort_by(|a, b| a.meta.label.cmp(&b.meta.label));
@@ -550,14 +610,15 @@ pub fn save_slot(
     identity: Option<&Identity>,
     source: &str,
 ) -> std::io::Result<String> {
+    let key = identity_key(agent, identity, cred_bytes);
     let base_label = sanitize(&label_from_identity(agent, identity));
-    let label = resolve_slot_label(agent, &base_label, cred_bytes, identity);
+    let label = resolve_slot_label(agent, &base_label, cred_bytes, identity, &key);
     let dir = slot_dir(agent, &label);
     std::fs::create_dir_all(&dir)?;
     atomic_write(&dir.join(cred_filename(agent)), cred_bytes)?;
     let now = now_rfc3339();
     let meta = AccountMeta {
-        schema_version: 1,
+        schema_version: 2,
         agent: agent.dir().to_string(),
         label: label.clone(),
         email: identity.and_then(|i| i.email.clone()),
@@ -567,6 +628,7 @@ pub fn save_slot(
         created_at: Some(now.clone()),
         last_verified_at: Some(now),
         source: Some(source.to_string()),
+        identity_key: Some(key),
     };
     let json = serde_json::to_vec_pretty(&meta).map_err(std::io::Error::other)?;
     atomic_write(&dir.join("account.json"), &json)?;
@@ -578,72 +640,42 @@ fn resolve_slot_label(
     base_label: &str,
     cred_bytes: &[u8],
     identity: Option<&Identity>,
+    key: &str,
 ) -> String {
-    if slot_can_be_reused(agent, base_label, cred_bytes, identity) {
+    if slot_can_be_reused(agent, base_label, cred_bytes, key) {
         return base_label.to_string();
     }
 
     if let Some(email) = identity.and_then(|i| i.email.as_deref()) {
         let email_label = sanitize(email);
-        if email_label != base_label
-            && slot_can_be_reused(agent, &email_label, cred_bytes, identity)
-        {
+        if email_label != base_label && slot_can_be_reused(agent, &email_label, cred_bytes, key) {
             return email_label;
         }
     }
 
     for n in 2.. {
         let label = format!("{base_label}-{n}");
-        if slot_can_be_reused(agent, &label, cred_bytes, identity) {
+        if slot_can_be_reused(agent, &label, cred_bytes, key) {
             return label;
         }
     }
     unreachable!("unbounded suffix search must find a slot label")
 }
 
-fn slot_can_be_reused(
-    agent: Agent,
-    label: &str,
-    cred_bytes: &[u8],
-    identity: Option<&Identity>,
-) -> bool {
+fn slot_can_be_reused(agent: Agent, label: &str, cred_bytes: &[u8], key: &str) -> bool {
     let dir = slot_dir(agent, label);
     if !dir.exists() {
         return true;
     }
-    if std::fs::read(dir.join(cred_filename(agent)))
-        .map(|existing| existing == cred_bytes)
-        .unwrap_or(false)
-    {
+    let Ok(existing) = std::fs::read(dir.join(cred_filename(agent))) else {
+        return true;
+    };
+    if existing == cred_bytes {
         return true;
     }
     read_meta(&dir)
         .as_ref()
-        .is_some_and(|meta| meta_matches_identity(meta, identity))
-}
-
-fn meta_matches_identity(meta: &AccountMeta, identity: Option<&Identity>) -> bool {
-    let Some(identity) = identity else {
-        return false;
-    };
-    let mut matched_field = false;
-    if let Some(email) = identity.email.as_deref() {
-        if let Some(existing) = meta.email.as_deref() {
-            matched_field = true;
-            if !existing.eq_ignore_ascii_case(email) {
-                return false;
-            }
-        }
-    }
-    if let Some(account_id) = identity.account_id.as_deref() {
-        if let Some(existing) = meta.account_id.as_deref() {
-            matched_field = true;
-            if existing != account_id {
-                return false;
-            }
-        }
-    }
-    matched_field
+        .is_some_and(|meta| slot_identity_key(agent, meta, &existing) == key)
 }
 
 fn label_from_identity(agent: Agent, identity: Option<&Identity>) -> String {
@@ -674,18 +706,6 @@ pub fn capture_login(agent: Agent, profile_home: &Path, source: &str) -> std::io
         Agent::Claude => claude_identity_from_dir(profile_home),
     };
     save_slot(agent, &bytes, identity.as_ref(), source)
-}
-
-/// Capture a completed vendor-CLI login, then make that saved slot the active
-/// local credential. This is the "add account" path used by the UIs.
-pub fn capture_login_as_active(
-    agent: Agent,
-    profile_home: &Path,
-    source: &str,
-) -> std::io::Result<String> {
-    let label = capture_login(agent, profile_home, source)?;
-    switch_slot(agent, &label)?;
-    Ok(label)
 }
 
 /// Whether an official login into `profile_home` has finished writing a usable
@@ -996,7 +1016,7 @@ mod tests {
     }
 
     #[test]
-    fn capture_login_as_active_switches_claude_to_saved_slot() {
+    fn capture_login_saves_slot_without_switching_live() {
         let _guard = crate::test_support::env_lock();
         let home = tempfile::tempdir().unwrap();
         let live = tempfile::tempdir().unwrap();
@@ -1014,18 +1034,129 @@ mod tests {
         .unwrap();
         std::fs::write(live.path().join(".claude.json"), b"{}").unwrap();
 
-        let label =
-            capture_login_as_active(Agent::Claude, profile.path(), "official-cli-login").unwrap();
+        let label = capture_login(Agent::Claude, profile.path(), "official-cli-login").unwrap();
 
         assert_eq!(label, "dev@example.com");
+        assert!(!live.path().join(".credentials.json").exists());
+        let slots = list_slots(Agent::Claude);
+        assert_eq!(slots.len(), 1);
+        assert!(!slots[0].active);
+        assert_eq!(slots[0].meta.email.as_deref(), Some("dev@example.com"));
+
+        std::env::remove_var("AI_HANDOFF_HOME");
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn switch_slot_rejects_claude_keychain_file_switch() {
+        let _guard = crate::test_support::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let live = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        std::env::set_var("CLAUDE_CONFIG_DIR", live.path());
+
+        let dir = slot_dir(Agent::Claude, "dev@example.com");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(".credentials.json"),
+            br#"{"claudeAiOauth":{"accessToken":"secret-token","subscriptionType":"pro"}}"#,
+        )
+        .unwrap();
+
+        let error = switch_slot(Agent::Claude, "dev@example.com")
+            .expect_err("macOS Claude file switching should be blocked");
+
+        assert!(error.to_string().contains("Keychain"));
+        assert!(!live.path().join(".credentials.json").exists());
+
+        std::env::remove_var("AI_HANDOFF_HOME");
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+    }
+
+    #[test]
+    fn identity_key_prefers_org_then_email_then_hash_for_claude() {
+        let token = fake_jwt(r#"{"organizationUUID":"org-123"}"#);
+        let cred = format!(r#"{{"claudeAiOauth":{{"accessToken":"{token}"}}}}"#);
         assert_eq!(
-            std::fs::read(live.path().join(".credentials.json")).unwrap(),
-            credential
+            identity_key(Agent::Claude, None, cred.as_bytes()),
+            "claude:org:org-123"
         );
+
+        let email_id = Identity {
+            email: Some("Dev@Example.com".into()),
+            account_id: None,
+            plan_type: None,
+        };
+        let opaque = br#"{"claudeAiOauth":{"accessToken":"opaque-token"}}"#;
+        assert_eq!(
+            identity_key(Agent::Claude, Some(&email_id), opaque),
+            "claude:email:dev@example.com"
+        );
+
+        let key = identity_key(Agent::Claude, None, opaque);
+        assert!(key.starts_with("claude:token:"));
+        assert_eq!(key.len(), "claude:token:".len() + 12);
+        assert!(!key.contains("opaque-token"));
+    }
+
+    #[test]
+    fn claude_org_uuid_rejects_unsafe_segments() {
+        let token = fake_jwt(r#"{"organizationUUID":"../secret"}"#);
+        assert!(claude_org_uuid_from_access_token(&token).is_none());
+    }
+
+    #[test]
+    fn save_slot_reuses_slot_after_token_refresh_same_org() {
+        let _guard = crate::test_support::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+
+        let old = format!(
+            r#"{{"claudeAiOauth":{{"accessToken":"{}"}}}}"#,
+            fake_jwt(r#"{"organizationUUID":"org-123"}"#)
+        );
+        let new = format!(
+            r#"{{"claudeAiOauth":{{"accessToken":"{}"}}}}"#,
+            fake_jwt(r#"{"organizationUUID":"org-123","iat":2}"#)
+        );
+
+        let first = save_slot(Agent::Claude, old.as_bytes(), None, "test").unwrap();
+        let second = save_slot(Agent::Claude, new.as_bytes(), None, "test").unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(list_slots(Agent::Claude).len(), 1);
+        assert_eq!(
+            std::fs::read(slot_dir(Agent::Claude, &first).join(".credentials.json")).unwrap(),
+            new.as_bytes()
+        );
+
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn list_slots_marks_active_by_identity_after_token_refresh() {
+        let _guard = crate::test_support::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let live = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        std::env::set_var("CLAUDE_CONFIG_DIR", live.path());
+
+        let saved = format!(
+            r#"{{"claudeAiOauth":{{"accessToken":"{}"}}}}"#,
+            fake_jwt(r#"{"organizationUUID":"org-123"}"#)
+        );
+        save_slot(Agent::Claude, saved.as_bytes(), None, "test").unwrap();
+
+        let refreshed = format!(
+            r#"{{"claudeAiOauth":{{"accessToken":"{}"}}}}"#,
+            fake_jwt(r#"{"organizationUUID":"org-123","iat":2}"#)
+        );
+        std::fs::write(live.path().join(".credentials.json"), refreshed.as_bytes()).unwrap();
+
         let slots = list_slots(Agent::Claude);
         assert_eq!(slots.len(), 1);
         assert!(slots[0].active);
-        assert_eq!(slots[0].meta.email.as_deref(), Some("dev@example.com"));
 
         std::env::remove_var("AI_HANDOFF_HOME");
         std::env::remove_var("CLAUDE_CONFIG_DIR");
@@ -1101,7 +1232,7 @@ mod tests {
     }
 
     #[test]
-    fn save_slot_preserves_existing_slot_when_label_collides_with_different_email() {
+    fn save_slot_updates_same_account_id_even_when_email_changes() {
         let _guard = crate::test_support::env_lock();
         let home = tempfile::tempdir().unwrap();
         std::env::set_var("AI_HANDOFF_HOME", home.path());
@@ -1121,13 +1252,10 @@ mod tests {
         let second = save_slot(Agent::Codex, b"gmail-credential", Some(&gmail), "test").unwrap();
 
         assert_eq!(first, "shared-account");
-        assert_eq!(second, "h2171@gmail.com");
+        assert_eq!(second, "shared-account");
         let slots = list_slots(Agent::Codex);
-        assert_eq!(slots.len(), 2);
-        assert_eq!(
-            std::fs::read(slot_dir(Agent::Codex, &first).join("auth.json")).unwrap(),
-            b"naver-credential"
-        );
+        assert_eq!(slots.len(), 1);
+        assert_eq!(slots[0].meta.email.as_deref(), Some("h2171@gmail.com"));
         assert_eq!(
             std::fs::read(slot_dir(Agent::Codex, &second).join("auth.json")).unwrap(),
             b"gmail-credential"

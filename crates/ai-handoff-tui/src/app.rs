@@ -460,7 +460,7 @@ impl AccountData {
     fn load_live() -> Self {
         AccountData {
             codex: AgentAccount {
-                status: None, // Codex usage is fetched per-account from the backend.
+                status: account::codex_status(),
                 slots: account::list_slots(Agent::Codex),
             },
             claude: AgentAccount {
@@ -741,9 +741,6 @@ impl App {
     /// The event loop. Returns when the user quits.
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
         while !self.should_quit {
-            if self.tab == Tab::Overview {
-                self.ensure_overview_limit_usage();
-            }
             terminal.draw(|f| self.draw(f))?;
             if event::poll(Duration::from_millis(250))? {
                 if let Event::Key(key) = event::read()? {
@@ -805,8 +802,7 @@ impl App {
         if account::login_complete(poll.agent, &poll.home) {
             let (agent, home) = (poll.agent, poll.home.clone());
             self.login_poll = None;
-            let status = match account::capture_login_as_active(agent, &home, "official-cli-login")
-            {
+            let status = match account::capture_login(agent, &home, "official-cli-login") {
                 Ok(label) => t!("status.account_captured", label = label).into_owned(),
                 Err(e) => t!("status.account_capture_failed", err = e.to_string()).into_owned(),
             };
@@ -1918,23 +1914,6 @@ impl App {
         });
     }
 
-    fn ensure_overview_limit_usage(&mut self) {
-        let labels = [Agent::Claude, Agent::Codex]
-            .into_iter()
-            .filter_map(|agent| {
-                self.account
-                    .agent(agent)
-                    .slots
-                    .iter()
-                    .find(|slot| slot.active)
-                    .map(|slot| (agent, slot.meta.label.clone()))
-            })
-            .collect::<Vec<_>>();
-        for (agent, label) in labels {
-            self.acc_ensure_slot_usage(agent, label, false);
-        }
-    }
-
     /// The flattened, visible rows of the account tree (both agents, always
     /// expanded: header → saved accounts → "+ capture current").
     fn acc_rows(&self) -> Vec<AccRow> {
@@ -3035,41 +3014,14 @@ impl App {
 
     fn overview_agent_limits(&self, agent: Agent) -> OverviewAgentLimits {
         let data = self.account.agent(agent);
-        let active = data.slots.iter().find(|slot| slot.active);
         let mut limits = OverviewAgentLimits::default();
 
-        if let Some(slot) = active {
-            match self
-                .acc_usage
-                .get(&Self::usage_key(agent, &slot.meta.label))
-            {
-                Some(UsageState::Loaded(usage)) => {
-                    limits.five_hour = usage.five_hour.clone();
-                    limits.weekly = usage.weekly.clone();
-                }
-                Some(UsageState::Loading) => {
-                    limits.note = Some(t!("overview.limit_loading").into_owned());
-                }
-                Some(UsageState::Error(err)) => {
-                    limits.note = Some(t!("overview.limit_error", err = err.clone()).into_owned());
-                }
-                None => {
-                    limits.note = Some(t!("overview.limit_loading").into_owned());
-                }
-            }
-        } else {
-            limits.note = Some(t!("overview.limit_no_account").into_owned());
+        if let Some(status) = data.status.as_ref() {
+            limits.five_hour = status.five_hour.clone();
+            limits.weekly = status.weekly.clone();
         }
-
-        if agent == Agent::Claude {
-            if let Some(status) = data.status.as_ref() {
-                if limits.five_hour.is_none() {
-                    limits.five_hour = status.five_hour.clone();
-                }
-                if limits.weekly.is_none() {
-                    limits.weekly = status.weekly.clone();
-                }
-            }
+        if limits.five_hour.is_none() && limits.weekly.is_none() {
+            limits.note = Some(t!("overview.limit_no_sample").into_owned());
         }
 
         limits
@@ -4607,6 +4559,7 @@ mod tests {
                 created_at: None,
                 last_verified_at: None,
                 source: None,
+                identity_key: None,
             },
             dir: std::path::PathBuf::from(format!("/p/{label}")),
             active,
@@ -4658,6 +4611,7 @@ mod tests {
                     created_at: None,
                     last_verified_at: None,
                     source: None,
+                    identity_key: None,
                 },
                 dir: std::path::PathBuf::from("/p/acc-work"),
                 active: false,
@@ -4695,6 +4649,20 @@ mod tests {
         assert_eq!(app.acc_focus, AccFocus::Detail);
         app.on_key(key(KeyCode::Left)); // back to the tree
         assert_eq!(app.acc_focus, AccFocus::Tree);
+    }
+
+    #[test]
+    fn account_slot_selection_queues_usage_fetch() {
+        let mut app = account_app();
+        app.tab = Tab::Account;
+        app.focus_content = true;
+        app.acc_focus = AccFocus::Tree;
+        app.acc_sel = 0;
+
+        app.on_key(key(KeyCode::Down));
+
+        let key = App::usage_key(Agent::Codex, "dev@example.com");
+        assert!(matches!(app.acc_usage.get(&key), Some(UsageState::Loading)));
     }
 
     #[test]
@@ -4843,7 +4811,20 @@ mod tests {
     fn overview_limit_lines_show_active_agent_windows() {
         let mut app = test_app();
         app.account.claude = AgentAccount {
-            status: None,
+            status: Some(account::AccountStatus {
+                plan_type: Some("pro".into()),
+                five_hour: Some(RateWindow {
+                    used_percent: 78.0,
+                    window_minutes: 300,
+                    resets_at: None,
+                }),
+                weekly: Some(RateWindow {
+                    used_percent: 54.0,
+                    window_minutes: 10080,
+                    resets_at: None,
+                }),
+                captured_at: None,
+            }),
             slots: vec![account::AccountSlot {
                 meta: account::AccountMeta {
                     schema_version: 1,
@@ -4856,13 +4837,27 @@ mod tests {
                     created_at: None,
                     last_verified_at: None,
                     source: None,
+                    identity_key: None,
                 },
                 dir: std::path::PathBuf::from("/p/claude-active"),
                 active: true,
             }],
         };
         app.account.codex = AgentAccount {
-            status: None,
+            status: Some(account::AccountStatus {
+                plan_type: Some("team".into()),
+                five_hour: Some(RateWindow {
+                    used_percent: 90.0,
+                    window_minutes: 300,
+                    resets_at: None,
+                }),
+                weekly: Some(RateWindow {
+                    used_percent: 30.0,
+                    window_minutes: 10080,
+                    resets_at: None,
+                }),
+                captured_at: None,
+            }),
             slots: vec![account::AccountSlot {
                 meta: account::AccountMeta {
                     schema_version: 1,
@@ -4875,44 +4870,12 @@ mod tests {
                     created_at: None,
                     last_verified_at: None,
                     source: None,
+                    identity_key: None,
                 },
                 dir: std::path::PathBuf::from("/p/codex-active"),
                 active: true,
             }],
         };
-        app.acc_usage.insert(
-            App::usage_key(Agent::Claude, "claude-active"),
-            UsageState::Loaded(crate::account_api::UsageData {
-                five_hour: Some(RateWindow {
-                    used_percent: 78.0,
-                    window_minutes: 300,
-                    resets_at: None,
-                }),
-                weekly: Some(RateWindow {
-                    used_percent: 54.0,
-                    window_minutes: 10080,
-                    resets_at: None,
-                }),
-                ..Default::default()
-            }),
-        );
-        app.acc_usage.insert(
-            App::usage_key(Agent::Codex, "codex-active"),
-            UsageState::Loaded(crate::account_api::UsageData {
-                five_hour: Some(RateWindow {
-                    used_percent: 90.0,
-                    window_minutes: 300,
-                    resets_at: None,
-                }),
-                weekly: Some(RateWindow {
-                    used_percent: 30.0,
-                    window_minutes: 10080,
-                    resets_at: None,
-                }),
-                ..Default::default()
-            }),
-        );
-
         let lines = app.overview_limit_lines();
 
         assert_eq!(lines.len(), 4);

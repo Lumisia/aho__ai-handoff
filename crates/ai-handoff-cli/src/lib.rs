@@ -143,10 +143,13 @@ pub enum AccountAction {
         #[arg(long)]
         json: bool,
     },
-    /// Show the signed-in account + live plan/limits for both agents.
+    /// Show the signed-in account + local plan/limits for both agents.
     Status {
         #[arg(long)]
         json: bool,
+        /// Fetch Claude usage through the active saved slot's credential.
+        #[arg(long)]
+        fetch: bool,
     },
     /// Diagnose account setup (sign-in, vault slots, vendor CLIs on PATH).
     Doctor {
@@ -464,8 +467,17 @@ mod tests {
         }
         match Cli::parse_from(["ai-handoff", "account", "status"]).command {
             Some(Commands::Account {
-                action: AccountAction::Status { json },
-            }) => assert!(!json),
+                action: AccountAction::Status { json, fetch },
+            }) => {
+                assert!(!json);
+                assert!(!fetch);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+        match Cli::parse_from(["ai-handoff", "account", "status", "--fetch"]).command {
+            Some(Commands::Account {
+                action: AccountAction::Status { fetch, .. },
+            }) => assert!(fetch),
             other => panic!("unexpected command: {other:?}"),
         }
         match Cli::parse_from(["ai-handoff", "account", "doctor"]).command {
