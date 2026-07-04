@@ -1,53 +1,61 @@
+import ClaudeIcon from "@lobehub/icons/es/Claude";
+import OpenAIIcon from "@lobehub/icons/es/OpenAI";
 import { useEffect, useMemo, useState } from "react";
 import { getUsageReport } from "../api";
+import TokenUsageChart, {
+  agentForKey,
+  formatCost,
+  formatTokens,
+  rowsForUsageMode,
+  type UsageBreakdownMode,
+  type UsageChartView,
+} from "../components/TokenUsageChart";
 import type { UsageGroup, UsageReport } from "../types";
 import type { Translator } from "../i18n";
 
-type Mode = "day" | "project" | "model" | "source";
-
-const modes: Array<{ id: Mode; labelKey: string }> = [
-  { id: "day", labelKey: "day" },
-  { id: "project", labelKey: "project" },
-  { id: "model", labelKey: "model" },
-  { id: "source", labelKey: "source" },
-];
-
-function formatTokens(tokens: number) {
-  if (tokens >= 1_000_000_000) return `${(tokens / 1_000_000_000).toFixed(2)}B`;
-  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(2)}M`;
-  if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(1)}K`;
-  return String(tokens);
-}
-
-function formatCost(cost: number) {
-  return `$${cost.toFixed(2)}`;
-}
-
-function rowsFor(report: UsageReport, mode: Mode) {
-  switch (mode) {
-    case "day":
-      return report.by_day;
-    case "project":
-      return report.by_project;
-    case "model":
-      return report.by_model;
-    case "source":
-      return report.by_source;
-  }
-}
-
 function UsageBar({ group, max }: { group: UsageGroup; max: number }) {
   const pct = max > 0 ? Math.max(2, Math.round((group.tokens.total / max) * 100)) : 0;
+  const agent = agentForKey(group.key);
   return (
-    <div className={`usage-bar ${group.key}`}>
+    <div className={`usage-bar ${agent}`}>
       <span style={{ width: `${pct}%` }} />
     </div>
   );
 }
 
+function ModelIcon({ name }: { name: string }) {
+  const agent = agentForKey(name);
+  if (agent === "claude") {
+    return (
+      <span className="model-icon claude" aria-hidden="true">
+        <ClaudeIcon size={15} />
+      </span>
+    );
+  }
+  if (agent === "codex") {
+    return (
+      <span className="model-icon codex" aria-hidden="true">
+        <OpenAIIcon size={15} />
+      </span>
+    );
+  }
+  return <span className="model-icon other" aria-hidden="true" />;
+}
+
+function UsageKey({ row, mode }: { row: UsageGroup; mode: UsageBreakdownMode }) {
+  if (mode !== "model") return <span>{row.key}</span>;
+  return (
+    <span className="usage-key-with-icon">
+      <ModelIcon name={row.key} />
+      <span>{row.key}</span>
+    </span>
+  );
+}
+
 export default function Usage({ t }: { t: Translator }) {
   const [report, setReport] = useState<UsageReport | null>(null);
-  const [mode, setMode] = useState<Mode>("day");
+  const [mode, setMode] = useState<UsageBreakdownMode>("day");
+  const [chartView, setChartView] = useState<UsageChartView>("3d");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -67,7 +75,12 @@ export default function Usage({ t }: { t: Translator }) {
     }
   }
 
-  const rows = report ? rowsFor(report, mode) : [];
+  const rows = useMemo(() => {
+    if (!report) return [];
+    const base = rowsForUsageMode(report, mode);
+    if (mode === "day") return base;
+    return [...base].sort((a, b) => a.tokens.total - b.tokens.total || a.key.localeCompare(b.key));
+  }, [mode, report]);
   const max = useMemo(() => Math.max(0, ...rows.map((row) => row.tokens.total)), [rows]);
 
   if (error) {
@@ -98,32 +111,18 @@ export default function Usage({ t }: { t: Translator }) {
           <strong>{formatTokens(report.total.unpriced_tokens)}</strong>
         </div>
       </section>
-      <section className="agent-bars">
-        {report.by_source.map((source) => (
-          <article key={source.key}>
-            <div>
-              <strong>{source.key}</strong>
-              <span>{formatTokens(source.tokens.total)}</span>
-            </div>
-            <UsageBar group={source} max={report.total.tokens.total} />
-          </article>
-        ))}
-      </section>
+      <TokenUsageChart
+        report={report}
+        mode={mode}
+        view={chartView}
+        onModeChange={setMode}
+        onViewChange={setChartView}
+        t={t}
+      />
       <section className="panel">
         <div className="panel-title">
           <h3>{t("breakdown")}</h3>
           <div className="actions">
-            <div className="segmented">
-              {modes.map((item) => (
-                <button
-                  key={item.id}
-                  className={mode === item.id ? "active" : ""}
-                  onClick={() => setMode(item.id)}
-                >
-                  {t(item.labelKey)}
-                </button>
-              ))}
-            </div>
             <button className="ghost" onClick={() => void loadUsage(true)}>
               {t("refresh")}
             </button>
@@ -139,7 +138,7 @@ export default function Usage({ t }: { t: Translator }) {
           {rows.map((row) => (
             <div className="usage-row" key={row.key}>
               <div className="table-row">
-                <span>{row.key}</span>
+                <UsageKey row={row} mode={mode} />
                 <strong>{formatTokens(row.tokens.total)}</strong>
                 <span>{formatCost(row.cost_usd)}</span>
                 <span>{row.events}</span>

@@ -56,8 +56,22 @@ struct UsageReport {
     total: UsageGroup,
     by_source: Vec<UsageGroup>,
     by_day: Vec<UsageGroup>,
+    by_day_source: Vec<UsageDaySource>,
+    recent_by_source: Vec<UsageGroup>,
+    recent_by_model: Vec<UsageGroup>,
+    recent_by_project: Vec<UsageGroup>,
     by_model: Vec<UsageGroup>,
     by_project: Vec<UsageGroup>,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+struct UsageDaySource {
+    day: String,
+    source: String,
+    tokens: UsageTokens,
+    cost_usd: f64,
+    unpriced_tokens: u64,
+    events: u64,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -894,6 +908,21 @@ fn usage_report_from_events_for_today(
             }))
         })
         .collect();
+    let by_day_source = (0..DAY_BREAKDOWN_WINDOW_DAYS)
+        .flat_map(|offset| {
+            let day = (today - chrono::Duration::days(offset))
+                .format("%Y-%m-%d")
+                .to_string();
+            let day_events = recent_events
+                .iter()
+                .filter(|event| event.day.as_str() == day.as_str())
+                .cloned()
+                .collect::<Vec<_>>();
+            aggregate::group_by(&day_events, Dimension::Source)
+                .into_iter()
+                .map(move |group| usage_day_source(day.clone(), group))
+        })
+        .collect();
 
     UsageReport {
         total: group_to_usage(aggregate::totals(events)),
@@ -902,6 +931,19 @@ fn usage_report_from_events_for_today(
             .map(group_to_usage)
             .collect(),
         by_day,
+        by_day_source,
+        recent_by_source: aggregate::group_by(&recent_events, Dimension::Source)
+            .into_iter()
+            .map(group_to_usage)
+            .collect(),
+        recent_by_model: aggregate::group_by(&recent_events, Dimension::Model)
+            .into_iter()
+            .map(group_to_usage)
+            .collect(),
+        recent_by_project: aggregate::group_by(&recent_events, Dimension::Project)
+            .into_iter()
+            .map(group_to_usage)
+            .collect(),
         by_model: aggregate::group_by(events, Dimension::Model)
             .into_iter()
             .map(group_to_usage)
@@ -910,6 +952,17 @@ fn usage_report_from_events_for_today(
             .into_iter()
             .map(group_to_usage)
             .collect(),
+    }
+}
+
+fn usage_day_source(day: String, group: Group) -> UsageDaySource {
+    UsageDaySource {
+        day,
+        source: group.key,
+        tokens: tokens_to_usage(group.tokens),
+        cost_usd: group.cost_usd,
+        unpriced_tokens: group.unpriced_tokens,
+        events: group.events,
     }
 }
 
@@ -2057,6 +2110,24 @@ mod tests {
         assert_eq!(report.by_day[0].tokens.total, 10);
         assert_eq!(report.total.tokens.total, 129);
         assert!(report.by_source.iter().any(|group| group.key == "codex"));
+        assert_eq!(
+            report
+                .recent_by_source
+                .iter()
+                .find(|group| group.key == "codex")
+                .map(|group| group.tokens.total),
+            Some(10)
+        );
+        assert!(report
+            .by_day_source
+            .iter()
+            .any(|group| group.day == "2026-06-30"
+                && group.source == "codex"
+                && group.tokens.total == 10));
+        assert!(!report
+            .by_day_source
+            .iter()
+            .any(|group| group.day == "2026-04-01"));
     }
 
     #[test]

@@ -73,10 +73,23 @@ export interface UsageGroup {
   events: number;
 }
 
+export interface UsageDaySource {
+  day: string;
+  source: string;
+  tokens: UsageTokens;
+  cost_usd: number;
+  unpriced_tokens: number;
+  events: number;
+}
+
 export interface UsageReport {
   total: UsageGroup;
   by_source: UsageGroup[];
   by_day: UsageGroup[];
+  by_day_source: UsageDaySource[];
+  recent_by_source: UsageGroup[];
+  recent_by_model: UsageGroup[];
+  recent_by_project: UsageGroup[];
   by_model: UsageGroup[];
   by_project: UsageGroup[];
 }

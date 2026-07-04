@@ -16,7 +16,6 @@ import type {
   AccountSlotRow,
   AccountWindow,
   DashboardSnapshot,
-  ResetCreditRow,
   SlotUsageReport,
 } from "../types";
 import type { Translator } from "../i18n";
@@ -47,15 +46,40 @@ function compactDate(value: string) {
   });
 }
 
-function creditSummary(credits: ResetCreditRow[] | undefined) {
-  const first = credits?.[0];
-  if (!first) return null;
-  return `${compactDate(first.granted_at)} / ${compactDate(first.expires_at)}`;
-}
-
 function slotSubline(slot: AccountSlotRow, t: Translator) {
   const plan = slot.plan ? `${t("plan")}: ${slot.plan}` : `${t("plan")}: unknown`;
   return slot.source ? `${plan} - ${slot.source}` : plan;
+}
+
+function resetCreditCount(usage?: SlotUsageReport | null) {
+  const detailCount = usage?.reset_credit_details?.length ?? 0;
+  const explicitCount = usage?.reset_credits;
+  if (explicitCount === null || explicitCount === undefined) return detailCount;
+  return Math.max(explicitCount, detailCount);
+}
+
+function resetCreditLabel(count: number, t: Translator) {
+  return `${t("resetCredits")} ${count}${t("resetCreditCountSuffix")}`;
+}
+
+function ResetCreditsBlock({ usage, t }: { usage?: SlotUsageReport | null; t: Translator }) {
+  const details = usage?.reset_credit_details ?? [];
+  const count = resetCreditCount(usage);
+  if (count <= 0 && details.length === 0) return null;
+  return (
+    <div className="reset-credit-block">
+      <strong className="reset-credit-title">{resetCreditLabel(count, t)}</strong>
+      {details.length > 0 && (
+        <div className="credit-list">
+          {details.map((credit, index) => (
+            <small key={`${credit.granted_at}-${credit.expires_at}-${index}`}>
+              {compactDate(credit.granted_at)} / {compactDate(credit.expires_at)}
+            </small>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function LimitBar({
@@ -113,7 +137,6 @@ function AgentPanel({
   const activeUsage = activeSlot ? usage[activeSlot.label] : null;
   const displayFiveHour = activeUsage?.five_hour ?? data.five_hour;
   const displayWeekly = activeUsage?.weekly ?? data.weekly;
-  const activeCredits = agent === "codex" ? creditSummary(activeUsage?.reset_credit_details) : null;
   const activeDisplay = activeSlot?.email ?? activeSlot?.label ?? data.active;
   const activePlan = activeUsage?.plan ?? activeSlot?.plan ?? data.plan;
 
@@ -220,11 +243,7 @@ function AgentPanel({
       <div className="account-limit-stack">
         <LimitBar agent={agent} label="5h" value={displayFiveHour} t={t} />
         <LimitBar agent={agent} label={t("weekly")} value={displayWeekly} t={t} />
-        {activeCredits && (
-          <div className="account-credit-summary">
-            {t("resetCredits")} - {activeCredits}
-          </div>
-        )}
+        <ResetCreditsBlock usage={activeUsage} t={t} />
       </div>
 
       {message && <div className="banner">{message}</div>}
@@ -242,31 +261,6 @@ function AgentPanel({
                   {slot.active && <span>{t("active")}</span>}
                 </div>
                 <small>{slotSubline(slot, t)}</small>
-                {slotUsage && (
-                  <div className="slot-usage">
-                    <div className="slot-usage-meta">
-                      <span>
-                        {t("plan")}: {slotUsage.plan ?? slot.plan ?? "unknown"}
-                      </span>
-                      {slotUsage.reset_credits !== null && slotUsage.reset_credits !== undefined && (
-                        <span>
-                          {t("resetCredits")}: {slotUsage.reset_credits}
-                        </span>
-                      )}
-                    </div>
-                    <LimitBar agent={agent} label="5h" value={slotUsage.five_hour} t={t} />
-                    <LimitBar agent={agent} label={t("weekly")} value={slotUsage.weekly} t={t} />
-                    {slotUsage.reset_credit_details.length > 0 && (
-                      <div className="credit-list">
-                        {slotUsage.reset_credit_details.slice(0, 3).map((credit) => (
-                          <small key={`${credit.granted_at}-${credit.expires_at}`}>
-                            {compactDate(credit.granted_at)} / {compactDate(credit.expires_at)}
-                          </small>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
               </div>
               <div className="account-actions slot-actions">
                 <button className="ghost" disabled={usageBusy === slot.label} onClick={() => refreshUsage(slot.label)}>
@@ -279,6 +273,18 @@ function AgentPanel({
                   {t("delete")}
                 </button>
               </div>
+              {slotUsage && (
+                <div className="slot-usage">
+                  <div className="slot-usage-meta">
+                    <span>
+                      {t("plan")}: {slotUsage.plan ?? slot.plan ?? "unknown"}
+                    </span>
+                  </div>
+                  <LimitBar agent={agent} label="5h" value={slotUsage.five_hour} t={t} />
+                  <LimitBar agent={agent} label={t("weekly")} value={slotUsage.weekly} t={t} />
+                  <ResetCreditsBlock usage={slotUsage} t={t} />
+                </div>
+              )}
             </article>
           );
         })}

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
-import { getAccountReport } from "../api";
-import type { AccountReport, AccountWindow, CheckRow, DashboardSnapshot } from "../types";
+import { getAccountReport, getUsageReport } from "../api";
+import TokenUsageChart, { type UsageBreakdownMode, type UsageChartView } from "../components/TokenUsageChart";
+import type { AccountReport, AccountWindow, CheckRow, DashboardSnapshot, UsageReport } from "../types";
 import type { Translator } from "../i18n";
 
 function StatusRow({ row }: { row: CheckRow }) {
@@ -61,7 +62,11 @@ function LimitBar({
 
 export default function Overview({ snapshot, t }: { snapshot: DashboardSnapshot; t: Translator }) {
   const [accounts, setAccounts] = useState<AccountReport | null>(null);
+  const [usage, setUsage] = useState<UsageReport | null>(null);
   const [loadingAccounts, setLoadingAccounts] = useState(true);
+  const [loadingUsage, setLoadingUsage] = useState(true);
+  const [usageMode, setUsageMode] = useState<UsageBreakdownMode>("day");
+  const [usageView, setUsageView] = useState<UsageChartView>("3d");
 
   useEffect(() => {
     // force: query the active saved slot's own usage so the overview shows the
@@ -71,6 +76,11 @@ export default function Overview({ snapshot, t }: { snapshot: DashboardSnapshot;
       .then(setAccounts)
       .catch(() => setAccounts(null))
       .finally(() => setLoadingAccounts(false));
+
+    getUsageReport()
+      .then(setUsage)
+      .catch(() => setUsage(null))
+      .finally(() => setLoadingUsage(false));
   }, []);
 
   const topRows = [
@@ -96,6 +106,19 @@ export default function Overview({ snapshot, t }: { snapshot: DashboardSnapshot;
           <LimitBar agent="codex" label={`${t("codex")} 5h`} value={accounts?.codex.five_hour} t={t} />
           <LimitBar agent="codex" label={`${t("codex")} ${t("weekly")}`} value={accounts?.codex.weekly} t={t} />
         </div>
+      </section>
+      <section className="overview-section">
+        {loadingUsage && <div className="overview-inline-loading">{t("loadingUsage")}</div>}
+        {usage && (
+          <TokenUsageChart
+            report={usage}
+            mode={usageMode}
+            view={usageView}
+            onModeChange={setUsageMode}
+            onViewChange={setUsageView}
+            t={t}
+          />
+        )}
       </section>
       <section className="overview-section">
         <div className="overview-section-title">
