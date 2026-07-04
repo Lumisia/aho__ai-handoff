@@ -1,6 +1,6 @@
 # AI Handoff Advanced Guide
 
-**English** | [한국어](README.ko.md) | [日本語](README.ja.md) | [中文](README.zh.md)
+**English** | [한국어](README.ko.md) | [日本語](README.ja.md)
 
 This guide explains the details that are intentionally kept out of the beginner README.
 

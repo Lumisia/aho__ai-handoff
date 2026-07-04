@@ -28,14 +28,28 @@ pub struct Config {
 }
 
 /// UI language preference. Serialized as a short code; defaults to English.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Language {
     #[default]
     En,
     Ko,
     Ja,
-    Zh,
+}
+
+impl<'de> Deserialize<'de> for Language {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Ok(match raw.trim().to_ascii_lowercase().as_str() {
+            "ko" => Language::Ko,
+            "ja" => Language::Ja,
+            // Removed language codes migrate to English instead of making the
+            // entire config unreadable for existing users.
+            _ => Language::En,
+        })
+    }
 }
 
 /// Statusline display options. Opt-in: defaults to enabled (`show = true`).
@@ -654,7 +668,7 @@ enum ValueKind {
     Seconds,
     /// One of `off` / `ask` / `auto`.
     Mode,
-    /// A UI language code: `en` / `ko` / `ja` / `zh`.
+    /// A UI language code: `en` / `ko` / `ja`.
     Lang,
     /// Capsule on-disk format: `json` / `md`.
     CapsuleFormat,
@@ -731,7 +745,7 @@ pub enum KeyKind {
     Seconds,
     /// `off` / `ask` / `auto`.
     Mode,
-    /// `en` / `ko` / `ja` / `zh`.
+    /// `en` / `ko` / `ja`.
     Lang,
     /// `json` / `md`.
     CapsuleFormat,
@@ -783,8 +797,8 @@ impl ValueKind {
                 _ => return Err(invalid("expected one of `off`, `ask`, `auto`")),
             },
             ValueKind::Lang => match raw {
-                "en" | "ko" | "ja" | "zh" => value(raw),
-                _ => return Err(invalid("expected one of `en`, `ko`, `ja`, `zh`")),
+                "en" | "ko" | "ja" => value(raw),
+                _ => return Err(invalid("expected one of `en`, `ko`, `ja`")),
             },
             ValueKind::CapsuleFormat => match raw {
                 "json" | "md" => value(raw),
@@ -1048,7 +1062,6 @@ pub fn lang_str(lang: Language) -> &'static str {
         Language::En => "en",
         Language::Ko => "ko",
         Language::Ja => "ja",
-        Language::Zh => "zh",
     }
 }
 
@@ -1491,11 +1504,11 @@ enabled = true
             ("en", Language::En),
             ("ko", Language::Ko),
             ("ja", Language::Ja),
-            ("zh", Language::Zh),
         ] {
             let c = parse(&format!("language = \"{text}\"\n")).unwrap();
             assert_eq!(c.language, want);
         }
+        assert_eq!(parse("language = \"zh\"\n").unwrap().language, Language::En);
     }
 
     #[test]
@@ -1574,7 +1587,6 @@ enabled = true
         for (raw, want) in [
             ("ko", Language::Ko),
             ("ja", Language::Ja),
-            ("zh", Language::Zh),
             ("en", Language::En),
         ] {
             let text = set_value(None, "capsule.language", raw).unwrap();

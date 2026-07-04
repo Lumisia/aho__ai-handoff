@@ -22,7 +22,7 @@ const MINUTES_STEP: f64 = 5.0;
 const COUNT_STEP: i64 = 1;
 const SECONDS_STEP: i64 = 5;
 const MODES: [&str; 3] = ["off", "ask", "auto"];
-const LANGS: [&str; 4] = ["en", "ko", "ja", "zh"];
+const LANGS: [&str; 3] = ["en", "ko", "ja"];
 const CAPSULE_FORMATS: [&str; 2] = ["json", "md"];
 const THEME_PRESETS: [&str; 4] = ["default", "high_contrast", "mono", "custom"];
 const GUI_THEME_PRESETS: [&str; 3] = ["white", "dark", "custom"];
@@ -193,7 +193,7 @@ mod tests {
     }
 
     #[test]
-    fn lang_cycles_through_four_codes() {
+    fn lang_cycles_through_three_codes() {
         assert_eq!(
             next_raw(KeyKind::Lang, "en", EditAction::Next).unwrap(),
             "ko"
@@ -204,15 +204,11 @@ mod tests {
         );
         assert_eq!(
             next_raw(KeyKind::Lang, "ja", EditAction::Next).unwrap(),
-            "zh"
-        );
-        assert_eq!(
-            next_raw(KeyKind::Lang, "zh", EditAction::Next).unwrap(),
             "en"
         );
         assert_eq!(
             next_raw(KeyKind::Lang, "en", EditAction::Prev).unwrap(),
-            "zh"
+            "ja"
         );
     }
 

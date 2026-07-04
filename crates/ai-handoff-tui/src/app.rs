@@ -373,8 +373,6 @@ enum Pending {
 enum RepairActionKind {
     RunDoctor,
     InstallPlugin,
-    StartDaemon,
-    AutostartOn,
     ManualLegacyCleanup,
     ManualCodexTrust,
 }
@@ -384,8 +382,6 @@ impl RepairActionKind {
         match self {
             Self::RunDoctor => "integration.repair.run_doctor",
             Self::InstallPlugin => "integration.repair.install_plugin",
-            Self::StartDaemon => "integration.repair.start_daemon",
-            Self::AutostartOn => "integration.repair.autostart_on",
             Self::ManualLegacyCleanup => "integration.repair.disable_legacy",
             Self::ManualCodexTrust => "integration.repair.open_trust_guide",
         }
@@ -395,18 +391,13 @@ impl RepairActionKind {
         match self {
             Self::RunDoctor => "integration.repair_detail.run_doctor",
             Self::InstallPlugin => "integration.repair_detail.install_plugin",
-            Self::StartDaemon => "integration.repair_detail.start_daemon",
-            Self::AutostartOn => "integration.repair_detail.autostart_on",
             Self::ManualLegacyCleanup => "integration.repair_detail.disable_legacy",
             Self::ManualCodexTrust => "integration.repair_detail.open_trust_guide",
         }
     }
 
     fn requires_confirm(self) -> bool {
-        matches!(
-            self,
-            Self::InstallPlugin | Self::StartDaemon | Self::AutostartOn
-        )
+        matches!(self, Self::InstallPlugin)
     }
 
     fn is_manual(self) -> bool {
@@ -3124,10 +3115,6 @@ impl App {
                     "codex-hooks" | "claude-settings" | "codex-config" | "ipc" | "store" => {
                         add(&mut actions, RepairActionKind::InstallPlugin)
                     }
-                    "daemon" => add(&mut actions, RepairActionKind::StartDaemon),
-                    "autostart" if self.snapshot.install_state.autostart != "missing" => {
-                        add(&mut actions, RepairActionKind::AutostartOn)
-                    }
                     _ => {}
                 }
             }
@@ -3185,12 +3172,6 @@ impl App {
             RepairActionKind::RunDoctor => self.run_integration_doctor(),
             RepairActionKind::InstallPlugin => {
                 self.run_repair_command(kind, &["install", "--yes"], false)
-            }
-            RepairActionKind::StartDaemon => {
-                self.run_repair_command(kind, &["daemon", "run"], true)
-            }
-            RepairActionKind::AutostartOn => {
-                self.run_repair_command(kind, &["autostart", "on"], false)
             }
             RepairActionKind::ManualLegacyCleanup | RepairActionKind::ManualCodexTrust => {}
         }
@@ -4682,7 +4663,7 @@ mod tests {
 
     #[test]
     fn window_line_interpolates_in_all_locales() {
-        for loc in ["en", "ko", "ja", "zh"] {
+        for loc in ["en", "ko", "ja"] {
             let s = t!(
                 "account.window_line",
                 locale = loc,
@@ -4932,14 +4913,15 @@ mod tests {
 
         let lines = app.integration_status_lines();
 
-        assert!(lines.iter().any(|line| line.contains("Daemon")));
+        assert!(!lines.iter().any(|line| line.contains("Daemon")));
+        assert!(!lines.iter().any(|line| line.contains("Autostart")));
         assert!(lines.iter().any(|line| line.contains("Codex hooks")));
         assert!(lines.iter().any(|line| line.contains(":")));
     }
 
     #[test]
     fn overview_usage_integration_and_settings_labels_translate() {
-        for locale in ["en", "ko", "ja", "zh"] {
+        for locale in ["en", "ko", "ja"] {
             for key in [
                 "overview.actions",
                 "overview.current_project",
@@ -5110,7 +5092,6 @@ mod tests {
         assert_eq!(t!("tab.usage", locale = "ko"), "사용량");
         assert_eq!(t!("tab.integration", locale = "ko"), "연동");
         assert_eq!(t!("tab.account", locale = "ja"), "アカウント");
-        assert_eq!(t!("tab.settings", locale = "zh"), "设置");
         assert_eq!(t!("tab.capsule", locale = "en"), "Capsule");
     }
 

@@ -102,8 +102,6 @@ pub fn health_rows(snapshot: &DashboardSnapshot) -> Vec<HealthRow> {
 
 fn health_label(id: &str, fallback: &str) -> String {
     let key = match id {
-        "daemon" => "health.label.daemon",
-        "autostart" => "health.label.autostart",
         "codex-hooks" => "health.label.codex-hooks",
         "codex-config" => "health.label.codex-config",
         "claude-settings" => "health.label.claude-settings",
@@ -122,7 +120,6 @@ fn health_detail(message: &str) -> String {
         "v2 hooks installed" => "health.msg.hooks_installed",
         "v2 hooks missing or incomplete" => "health.msg.hooks_incomplete",
         "writable_roots and AI_HANDOFF_HOME present" => "health.msg.config_ok",
-        "Runtime status API not implemented in this MVP" => "health.msg.daemon_unknown",
         _ => return message.to_string(),
     };
     rust_i18n::t!(key).into_owned()

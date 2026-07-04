@@ -5,1701 +5,1354 @@ tab.overview:
   en: Overview
   ko: 개요
   ja: 概要
-  zh: 概览
 tab.capsule:
   en: Capsule
   ko: 캡슐
   ja: カプセル
-  zh: 胶囊
 tab.usage:
   en: Usage
   ko: 사용량
   ja: 使用量
-  zh: 用量
 tab.account:
   en: Account
   ko: 계정
   ja: アカウント
-  zh: 账户
 tab.integration:
   en: Integration
   ko: 연동
   ja: 連携
-  zh: 集成
 tab.settings:
   en: Settings
   ko: 설정
   ja: 設定
-  zh: 设置
 
 # ── Status-bar hints ────────────────────────────────────────────────────
 hint.default:
   en: "q/Esc back · Tab/1-6 or ←/→ switch tab · ↓/Space/Enter open tab"
   ko: "q/Esc 뒤로 · Tab/1-6 또는 ←/→ 탭 전환 · ↓/Space/Enter 탭 열기"
   ja: "q/Esc 戻る · Tab/1-6 または ←/→ タブ切替 · ↓/Space/Enter タブを開く"
-  zh: "q/Esc 返回 · Tab/1-6 或 ←/→ 切换标签 · ↓/Space/Enter 打开标签"
 hint.quit:
   en: "Quit? Press q/Esc again to quit"
   ko: "종료하시겠습니까? 한 번 더 q/Esc 누르면 종료됩니다"
   ja: "終了しますか？もう一度 q/Esc で終了します"
-  zh: "要退出吗？再次按 q/Esc 退出"
 
 hint.capsule_tree:
   en: "↑/↓ move · Enter/→ expand or open capsule · ← collapse · q/Esc back"
   ko: "↑/↓ 이동 · Enter/→ 펼치기/캡슐 열기 · ← 접기 · q/Esc 뒤로"
   ja: "↑/↓ 移動 · Enter/→ 展開/カプセルを開く · ← 折りたたみ · q/Esc 戻る"
-  zh: "↑/↓ 移动 · Enter/→ 展开/打开胶囊 · ← 折叠 · q/Esc 返回"
 hint.capsule_detail:
   en: "↑/↓ pick field · Enter/e edit · s toggle state · d delete · ← back to list"
   ko: "↑/↓ 필드 선택 · Enter/e 편집 · s 상태 전환 · d 삭제 · ← 목록으로"
   ja: "↑/↓ フィールド選択 · Enter/e 編集 · s 状態切替 · d 削除 · ← 一覧へ"
-  zh: "↑/↓ 选择字段 · Enter/e 编辑 · s 切换状态 · d 删除 · ← 返回列表"
 hint.usage:
   en: "g cycle breakdown · q/Esc back"
   ko: "g 분류 전환 · q/Esc 뒤로"
   ja: "g 内訳を切替 · q/Esc 戻る"
-  zh: "g 切换分类 · q/Esc 返回"
 hint.integration:
   en: "↑/↓ select · Enter detail · r repair · d doctor · l logs · q/Esc back"
   ko: "↑/↓ 선택 · Enter 상세 · r 수리 · d 진단 · l 로그 · q/Esc 뒤로"
   ja: "↑/↓ 選択 · Enter 詳細 · r 修復 · d 診断 · l ログ · q/Esc 戻る"
-  zh: "↑/↓ 选择 · Enter 详情 · r 修复 · d 诊断 · l 日志 · q/Esc 返回"
 hint.integration_detail:
   en: "detail page · r repair · d doctor · l logs · q/Esc back"
   ko: "상세 페이지 · r 수리 · d 진단 · l 로그 · q/Esc 뒤로"
   ja: "詳細ページ · r 修復 · d 診断 · l ログ · q/Esc 戻る"
-  zh: "详情页 · r 修复 · d 诊断 · l 日志 · q/Esc 返回"
 hint.integration_repair:
   en: "↑/↓ select repair · Enter/y run · n cancel · d doctor · l logs · q/Esc back"
   ko: "↑/↓ 수리 선택 · Enter/y 실행 · n 취소 · d 진단 · l 로그 · q/Esc 뒤로"
   ja: "↑/↓ 修復選択 · Enter/y 実行 · n 取消 · d 診断 · l ログ · q/Esc 戻る"
-  zh: "↑/↓ 选择修复 · Enter/y 执行 · n 取消 · d 诊断 · l 日志 · q/Esc 返回"
 hint.integration_logs:
   en: "logs page · r repair · d doctor · q/Esc back"
   ko: "로그 페이지 · r 수리 · d 진단 · q/Esc 뒤로"
   ja: "ログページ · r 修復 · d 診断 · q/Esc 戻る"
-  zh: "日志页 · r 修复 · d 诊断 · q/Esc 返回"
 hint.settings:
   en: "↑/↓ select · space toggle · ←/→ change · q/Esc back"
   ko: "↑/↓ 선택 · Space 토글 · ←/→ 변경 · q/Esc 뒤로"
   ja: "↑/↓ 選択 · Space 切替 · ←/→ 変更 · q/Esc 戻る"
-  zh: "↑/↓ 选择 · Space 切换 · ←/→ 修改 · q/Esc 返回"
 
 # ── Status messages ─────────────────────────────────────────────────────
 status.saved:
   en: "saved %{key} = %{value}"
   ko: "저장됨 %{key} = %{value}"
   ja: "保存しました %{key} = %{value}"
-  zh: "已保存 %{key} = %{value}"
 status.cannot_edit:
   en: "%{key}: cannot edit current value"
   ko: "%{key}: 현재 값을 편집할 수 없음"
   ja: "%{key}: 現在の値は編集できません"
-  zh: "%{key}: 无法编辑当前值"
 status.field_error:
   en: "%{key}: %{err}"
   ko: "%{key}: %{err}"
   ja: "%{key}: %{err}"
-  zh: "%{key}: %{err}"
 status.update_started:
   en: "update window opened — restart ai-handoff when it finishes"
   ko: "업데이트 창을 열었습니다 — 완료 후 ai-handoff를 다시 시작하세요"
   ja: "アップデートウィンドウを開きました — 完了後に ai-handoff を再起動してください"
-  zh: "已打开更新窗口 — 完成后请重启 ai-handoff"
 status.update_failed:
   en: "update failed: %{err}"
   ko: "업데이트 실패: %{err}"
   ja: "アップデート失敗: %{err}"
-  zh: "更新失败: %{err}"
 status.uninstall_confirm:
   en: "Really uninstall the TUI/CLI? Enter/y confirm · Esc cancel"
   ko: "정말로 삭제하시겠습니까? Enter/y 확정 · Esc 취소"
   ja: "本当に削除しますか？ Enter/y 確定 · Esc キャンセル"
-  zh: "确定要卸载吗？ Enter/y 确认 · Esc 取消"
 status.uninstall_started:
   en: "uninstall window opened — the TUI will now close"
   ko: "삭제 창을 열었습니다 — TUI를 종료합니다"
   ja: "アンインストールウィンドウを開きました — TUI を終了します"
-  zh: "已打开卸载窗口 — TUI 即将关闭"
 status.uninstall_cancelled:
   en: "uninstall cancelled"
   ko: "삭제를 취소했습니다"
   ja: "削除をキャンセルしました"
-  zh: "已取消卸载"
 status.uninstall_failed:
   en: "uninstall failed: %{err}"
   ko: "삭제 실패: %{err}"
   ja: "削除失敗: %{err}"
-  zh: "卸载失败: %{err}"
 status.autostart_on:
   en: "autostart enabled (runs at logon)"
   ko: "자동 시작 켜짐 (로그온 시 실행)"
   ja: "自動起動 オン（ログオン時に実行）"
-  zh: "已启用开机自启（登录时运行）"
 status.autostart_off:
   en: "autostart disabled"
   ko: "자동 시작 꺼짐"
   ja: "自動起動 オフ"
-  zh: "已禁用开机自启"
 status.autostart_failed:
   en: "autostart change failed: %{err}"
   ko: "자동 시작 변경 실패: %{err}"
   ja: "自動起動の変更に失敗: %{err}"
-  zh: "开机自启更改失败: %{err}"
 status.usage_mode:
   en: "usage view: %{mode}"
   ko: "사용량 보기: %{mode}"
   ja: "使用量表示: %{mode}"
-  zh: "用量视图: %{mode}"
 status.settings_search:
   en: "search settings: type text, Enter keep filter, Esc cancel"
   ko: "설정 검색: 입력 후 Enter 유지, Esc 취소"
   ja: "設定検索: 入力して Enter で維持、Esc で取消"
-  zh: "搜索设置：输入后 Enter 保留过滤，Esc 取消"
 status.settings_search_done:
   en: "settings search applied"
   ko: "설정 검색이 적용됨"
   ja: "設定検索を適用しました"
-  zh: "设置搜索已应用"
 status.settings_editing_color:
   en: "editing color: named color, #RRGGBB, or 0..255; Enter save"
   ko: "색상 입력 중: 이름, #RRGGBB, 또는 0..255; Enter 저장"
   ja: "色を編集中: 色名、#RRGGBB、または 0..255。Enter で保存"
-  zh: "正在编辑颜色：颜色名、#RRGGBB 或 0..255；Enter 保存"
 status.settings_edit_cancelled:
   en: "settings edit cancelled"
   ko: "설정 편집 취소됨"
   ja: "設定編集を取り消しました"
-  zh: "设置编辑已取消"
 status.doctor_done:
   en: "doctor completed in %{ms}ms"
   ko: "진단 완료 (%{ms}ms)"
   ja: "診断完了 (%{ms}ms)"
-  zh: "诊断完成（%{ms}ms）"
 status.repair_confirm:
   en: "press Enter/y again to run: %{action}"
   ko: "실행하려면 Enter/y 한 번 더: %{action}"
   ja: "実行するには Enter/y をもう一度: %{action}"
-  zh: "再次按 Enter/y 执行：%{action}"
 status.repair_cancelled:
   en: "repair cancelled"
   ko: "수리 취소됨"
   ja: "修復を取消しました"
-  zh: "已取消修复"
 status.repair_done:
   en: "repair command finished"
   ko: "수리 명령 완료"
   ja: "修復コマンド完了"
-  zh: "修复命令已完成"
 status.repair_failed:
   en: "repair failed: %{err}"
   ko: "수리 실패: %{err}"
   ja: "修復に失敗: %{err}"
-  zh: "修复失败：%{err}"
 status.repair_manual:
   en: "manual repair instructions shown"
   ko: "수동 수리 안내 표시됨"
   ja: "手動修復手順を表示しました"
-  zh: "已显示手动修复说明"
 status.delete_confirm:
   en: "delete this capsule? press d or y to confirm, any other key to cancel"
   ko: "이 캡슐을 삭제할까요? d 또는 y로 확인, 다른 키로 취소"
   ja: "このカプセルを削除しますか？d または y で確定、他のキーで取消"
-  zh: "删除此胶囊？按 d 或 y 确认，其他键取消"
 status.delete_cancelled:
   en: "delete cancelled"
   ko: "삭제 취소됨"
   ja: "削除を取消しました"
-  zh: "已取消删除"
 status.delete_failed:
   en: "delete failed: %{err}"
   ko: "삭제 실패: %{err}"
   ja: "削除に失敗: %{err}"
-  zh: "删除失败: %{err}"
 status.capsule_deleted:
   en: "capsule deleted"
   ko: "캡슐 삭제됨"
   ja: "カプセルを削除しました"
-  zh: "已删除胶囊"
 status.state_changed:
   en: "state → %{state}"
   ko: "상태 → %{state}"
   ja: "状態 → %{state}"
-  zh: "状态 → %{state}"
 status.state_failed:
   en: "state change failed: %{err}"
   ko: "상태 변경 실패: %{err}"
   ja: "状態変更に失敗: %{err}"
-  zh: "状态更改失败: %{err}"
 status.edit_cancelled:
   en: "edit cancelled"
   ko: "편집 취소됨"
   ja: "編集を取消しました"
-  zh: "已取消编辑"
 status.editing:
   en: "editing %{field} — Enter save · Esc cancel"
   ko: "%{field} 편집 중 — Enter 저장 · Esc 취소"
   ja: "%{field} 編集中 — Enter 保存 · Esc 取消"
-  zh: "正在编辑 %{field} — Enter 保存 · Esc 取消"
 status.editing_list:
   en: "editing %{field} (items separated by |) — Enter save · Esc cancel"
   ko: "%{field} 편집 중 (여러 항목은 | 로 구분) — Enter 저장 · Esc 취소"
   ja: "%{field} 編集中（複数項目は | で区切り）— Enter 保存 · Esc 取消"
-  zh: "正在编辑 %{field}（多项用 | 分隔）— Enter 保存 · Esc 取消"
 status.cannot_edit_capsule:
   en: "this capsule cannot be edited (not a valid capsule)"
   ko: "이 캡슐은 편집할 수 없음 (유효한 캡슐 아님)"
   ja: "このカプセルは編集できません（有効なカプセルではありません）"
-  zh: "无法编辑此胶囊（不是有效的胶囊）"
 status.field_saved:
   en: "%{field} saved"
   ko: "%{field} 저장됨"
   ja: "%{field} を保存しました"
-  zh: "已保存 %{field}"
 status.save_failed:
   en: "save failed: %{err}"
   ko: "저장 실패: %{err}"
   ja: "保存に失敗: %{err}"
-  zh: "保存失败: %{err}"
 
 # ── Overview tab ────────────────────────────────────────────────────────
 status.capsule_refreshed:
   en: "capsules refreshed: %{count}"
   ko: "capsules refreshed: %{count}"
   ja: "capsules refreshed: %{count}"
-  zh: "capsules refreshed: %{count}"
 overview.health:
   en: Health
   ko: 상태
   ja: ヘルス
-  zh: 健康
 overview.actions:
   en: Required actions
   ko: 필요한 작업
   ja: 必要な操作
-  zh: 必要操作
 overview.current_project:
   en: Current project
   ko: 현재 프로젝트
   ja: 現在のプロジェクト
-  zh: 当前项目
 overview.recent_activity:
   en: Recent activity
   ko: 최근 활동
   ja: 最近の活動
-  zh: 最近活动
 overview.all_integrations_normal:
   en: All integrations normal
   ko: 모든 연동 정상
   ja: すべての連携は正常
-  zh: 所有集成正常
 overview.no_pending_capsule:
   en: No pending capsule
   ko: 대기 중인 캡슐 없음
   ja: 保留中のカプセルなし
-  zh: 没有待处理胶囊
 overview.automatic_handoff_standby:
   en: Automatic handoff standing by
   ko: 자동 handoff 대기 중
   ja: 自動 handoff 待機中
-  zh: 自动 handoff 待命中
 overview.pending_capsules:
   en: "%{count} pending capsules"
   ko: "대기 중인 캡슐 %{count}개"
   ja: "保留中のカプセル %{count} 件"
-  zh: "%{count} 个待处理胶囊"
 overview.repo_line:
   en: "repo: %{repo}"
   ko: "repo: %{repo}"
   ja: "repo: %{repo}"
-  zh: "repo: %{repo}"
 overview.pending_line:
   en: "pending: %{count}"
   ko: "대기: %{count}"
   ja: "保留: %{count}"
-  zh: "待处理: %{count}"
 overview.last_flow_line:
   en: "last flow: %{source} -> %{target}"
   ko: "최근 흐름: %{source} -> %{target}"
   ja: "直近の流れ: %{source} -> %{target}"
-  zh: "最近流向: %{source} -> %{target}"
 overview.last_capsule_line:
   en: "last capsule: %{when}"
   ko: "최근 캡슐: %{when}"
   ja: "直近のカプセル: %{when}"
-  zh: "最近胶囊: %{when}"
 overview.last_capsule_none:
   en: "last capsule: none"
   ko: "최근 캡슐: 없음"
   ja: "直近のカプセル: なし"
-  zh: "最近胶囊: 无"
 overview.pending_count:
   en: "pending %{count}"
   ko: "대기 %{count}"
   ja: "保留 %{count}"
-  zh: "待处理 %{count}"
 overview.total_count:
   en: "total %{count}"
   ko: "전체 %{count}"
   ja: "合計 %{count}"
-  zh: "总计 %{count}"
 overview.failed_count:
   en: "failed %{count}"
   ko: "실패 %{count}"
   ja: "失敗 %{count}"
-  zh: "失败 %{count}"
 overview.no_recent_activity:
   en: "No recent capsule activity"
   ko: "최근 캡슐 활동 없음"
   ja: "最近のカプセル活動なし"
-  zh: "没有最近的胶囊活动"
 overview.token_split:
   en: Token split
   ko: 토큰 분포
   ja: トークン内訳
-  zh: 令牌分布
 overview.no_usage:
   en: "No usage logs found."
   ko: "사용 기록이 없습니다."
   ja: "使用ログが見つかりません。"
-  zh: "未找到使用记录。"
 overview.agent_limits:
   en: Agent limits
   ko: 에이전트 한도
   ja: エージェント上限
-  zh: 代理限额
 overview.limit_left:
   en: "%{pct}% left"
   ko: "%{pct}% 남음"
   ja: "残り%{pct}%"
-  zh: "剩余%{pct}%"
 overview.limit_loading:
   en: fetching...
   ko: 조회 중...
   ja: 取得中...
-  zh: 获取中...
 overview.limit_no_account:
   en: no active account
   ko: 활성 계정 없음
   ja: アクティブなアカウントなし
-  zh: 无活动账户
 overview.limit_no_sample:
   en: no recent sample
   ko: 최근 샘플 없음
   ja: 最近のサンプルなし
-  zh: 暂无最近样本
 overview.limit_error:
   en: "unavailable (%{err})"
   ko: "조회 실패 (%{err})"
   ja: "取得失敗 (%{err})"
-  zh: "获取失败 (%{err})"
 overview.total:
   en: "Total %{tokens}  ~$%{cost}"
   ko: "합계 %{tokens}  ~$%{cost}"
   ja: "合計 %{tokens}  ~$%{cost}"
-  zh: "合计 %{tokens}  ~$%{cost}"
 overview.estimate:
   en: "estimate — not an official bill"
   ko: "추정치 — 공식 청구서 아님"
   ja: "推定 — 公式な請求ではありません"
-  zh: "估算 — 非正式账单"
 table.check:
   en: Check
   ko: 항목
   ja: 項目
-  zh: 检查项
 table.status:
   en: Status
   ko: 상태
   ja: 状態
-  zh: 状态
 table.detail:
   en: Detail
   ko: 세부
   ja: 詳細
-  zh: 详情
 
 # ── Usage tab ───────────────────────────────────────────────────────────
 usage.title:
   en: "By %{dim} — total %{tokens} tok ~$%{cost} (g: change)"
   ko: "%{dim}별 — 합계 %{tokens} 토큰 ~$%{cost} (g: 전환)"
   ja: "%{dim}別 — 合計 %{tokens} トークン ~$%{cost}（g: 切替）"
-  zh: "按%{dim} — 合计 %{tokens} 令牌 ~$%{cost}（g: 切换）"
 usage.tokens_suffix:
   en: "[tokens]"
   ko: "[토큰]"
   ja: "[トークン]"
-  zh: "[令牌]"
 usage.no_logs:
   en: "No usage logs found under ~/.claude/projects or ~/.codex."
   ko: "~/.claude/projects 또는 ~/.codex 에 사용 기록이 없습니다."
   ja: "~/.claude/projects または ~/.codex に使用ログがありません。"
-  zh: "在 ~/.claude/projects 或 ~/.codex 下未找到使用记录。"
 usage.total_tokens:
   en: "Total %{tokens} tokens"
   ko: "전체 %{tokens} 토큰"
   ja: "合計 %{tokens} トークン"
-  zh: "总计 %{tokens} 令牌"
 usage.estimate_line:
   en: "Est $%{cost} (estimate, not official bill)"
   ko: "추정 $%{cost} (공식 청구서 아님)"
   ja: "推定 $%{cost}（公式な請求ではありません）"
-  zh: "估算 $%{cost}（非正式账单）"
 usage.source_tokens:
   en: "%{source} %{tokens} tokens"
   ko: "%{source} %{tokens} 토큰"
   ja: "%{source} %{tokens} トークン"
-  zh: "%{source} %{tokens} 令牌"
 usage.unpriced_tokens:
   en: "%{tokens} tokens unpriced"
   ko: "%{tokens} 토큰 미산정"
   ja: "%{tokens} トークン未計上"
-  zh: "%{tokens} 令牌未计价"
 usage.summary:
   en: Summary
   ko: 요약
   ja: 要約
-  zh: 摘要
 usage.projects:
   en: Top projects
   ko: 프로젝트별
   ja: プロジェクト別
-  zh: 按项目
 usage.breakdown:
   en: Breakdown
   ko: 분류
   ja: 内訳
-  zh: 分类
 usage.mode.summary:
   en: Summary
   ko: 요약
   ja: 要約
-  zh: 摘要
 usage.mode.day:
   en: Day
   ko: 일별
   ja: 日別
-  zh: 按日期
 usage.mode.project:
   en: Project
   ko: 프로젝트별
   ja: プロジェクト別
-  zh: 按项目
 usage.mode.model:
   en: Model
   ko: 모델별
   ja: モデル別
-  zh: 按模型
 usage.mode.source:
   en: Source
   ko: 소스별
   ja: ソース別
-  zh: 按来源
 integration.status:
   en: Integration status
   ko: 연동 상태
   ja: 連携状態
-  zh: 集成状态
 integration.repair_actions:
   en: Repair actions
   ko: 수리 작업
   ja: 修復操作
-  zh: 修复操作
 integration.recent_diagnostics:
   en: Recent diagnostics
   ko: 최근 진단
   ja: 最近の診断
-  zh: 最近诊断
 integration.hooks:
   en: Hooks
   ko: Hooks
   ja: Hooks
-  zh: Hooks
 integration.event:
   en: Event
   ko: 이벤트
   ja: イベント
-  zh: 事件
 integration.detail_title:
   en: Integration detail
   ko: 연동 상세
   ja: 連携詳細
-  zh: 集成详情
 integration.doctor_title:
   en: Doctor run
   ko: 진단 실행
   ja: 診断実行
-  zh: 诊断运行
 integration.logs_title:
   en: Logs
   ko: 로그
   ja: ログ
-  zh: 日志
 integration.repair_center:
   en: Repair center
   ko: 수리 센터
   ja: 修復センター
-  zh: 修复中心
 integration.repair_detail:
   en: Repair detail
   ko: 수리 상세
   ja: 修復詳細
-  zh: 修复详情
 integration.repair_requires_confirm:
   en: "This action changes files or system state and requires confirmation."
   ko: "이 작업은 파일 또는 시스템 상태를 바꾸므로 확인이 필요합니다."
   ja: "この操作はファイルまたはシステム状態を変更するため確認が必要です。"
-  zh: "此操作会更改文件或系统状态，需要确认。"
 integration.repair_confirm_armed:
   en: "Confirmation armed. Press Enter/y again to execute."
   ko: "확인 대기 중. Enter/y를 한 번 더 누르면 실행됩니다."
   ja: "確認待ちです。Enter/y をもう一度押すと実行します。"
-  zh: "已等待确认。再次按 Enter/y 执行。"
 integration.detail_status:
   en: "Full status check"
   ko: "전체 상태 점검"
   ja: "全体ステータス確認"
-  zh: "完整状态检查"
 integration.detail_repair:
   en: "Recommended repair actions"
   ko: "추천 수리 작업"
   ja: "推奨修復操作"
-  zh: "推荐修复操作"
 integration.detail_hooks:
   en: "Hook files and event coverage"
   ko: "Hook 파일과 이벤트 적용 범위"
   ja: "Hook ファイルとイベント範囲"
-  zh: "Hook 文件和事件覆盖"
 integration.detail_diagnostics:
   en: "Diagnostics and duplicate hook findings"
   ko: "진단 및 중복 hook 발견 사항"
   ja: "診断と重複 hook 検出"
-  zh: "诊断和重复 hook 发现"
 integration.no_duplicates:
   en: "No duplicate hook findings."
   ko: "중복 hook 발견 사항 없음."
   ja: "重複 hook の検出なし。"
-  zh: "未发现重复 hook。"
 integration.duplicates:
   en: "Duplicate hook findings"
   ko: "중복 hook 발견 사항"
   ja: "重複 hook 検出"
-  zh: "重复 hook 发现"
 integration.doctor_completed:
   en: "doctor completed in %{ms}ms"
   ko: "doctor 완료 (%{ms}ms)"
   ja: "doctor 完了 (%{ms}ms)"
-  zh: "doctor 完成（%{ms}ms）"
 integration.doctor_counts:
   en: "checks: ok %{ok} · warning %{warn} · fail %{fail}"
   ko: "점검: 정상 %{ok} · 경고 %{warn} · 실패 %{fail}"
   ja: "チェック: 正常 %{ok} · 警告 %{warn} · 失敗 %{fail}"
-  zh: "检查：正常 %{ok} · 警告 %{warn} · 失败 %{fail}"
 integration.account_summary:
   en: "accounts: Codex %{codex} · Claude %{claude}"
   ko: "계정: Codex %{codex} · Claude %{claude}"
   ja: "アカウント: Codex %{codex} · Claude %{claude}"
-  zh: "账户：Codex %{codex} · Claude %{claude}"
 integration.recommended_repairs:
   en: "Recommended repairs"
   ko: "추천 수리"
   ja: "推奨修復"
-  zh: "推荐修复"
 integration.latest_run:
   en: "Latest run"
   ko: "최근 실행"
   ja: "直近の実行"
-  zh: "最近运行"
 integration.exit_code:
   en: "exit %{code}"
   ko: "종료 코드 %{code}"
   ja: "終了コード %{code}"
-  zh: "退出码 %{code}"
 integration.elapsed:
   en: "elapsed"
   ko: "소요 시간"
   ja: "所要時間"
-  zh: "耗时"
 integration.log_error:
   en: "log error"
   ko: "로그 오류"
   ja: "ログエラー"
-  zh: "日志错误"
 integration.log_empty:
   en: "No log lines."
   ko: "로그 줄이 없습니다."
   ja: "ログ行はありません。"
-  zh: "没有日志行。"
 integration.log_truncated:
   en: "(truncated)"
   ko: "(잘림)"
   ja: "(切り詰め)"
-  zh: "（已截断）"
 integration.repair.run_doctor:
   en: Run full doctor
   ko: 전체 doctor 실행
   ja: full doctor を実行
-  zh: 运行完整 doctor
 integration.repair.install_plugin:
   en: Reinstall AI Handoff plugin and config
   ko: AI Handoff plugin/config 재설치
   ja: AI Handoff plugin/config を再インストール
-  zh: 重新安装 AI Handoff plugin/config
 integration.repair.reinstall_codex:
   en: Reinstall Codex hooks
   ko: Codex hooks 재설치
   ja: Codex hooks を再インストール
-  zh: 重新安装 Codex hooks
 integration.repair.reinstall_claude:
   en: Reinstall Claude hooks
   ko: Claude hooks 재설치
   ja: Claude hooks を再インストール
-  zh: 重新安装 Claude hooks
 integration.repair.add_ipc_root:
   en: Add IPC writable_root
   ko: IPC writable_root 추가
   ja: IPC writable_root を追加
-  zh: 添加 IPC writable_root
 integration.repair.start_daemon:
   en: Start daemon
   ko: daemon 시작
   ja: daemon を開始
-  zh: 启动 daemon
 integration.repair.autostart_on:
   en: Enable daemon autostart
   ko: daemon 자동 시작 켜기
   ja: daemon 自動起動を有効化
-  zh: 启用 daemon 自动启动
 integration.repair.disable_legacy:
   en: Disable legacy hooks
   ko: legacy hooks 비활성화
   ja: legacy hooks を無効化
-  zh: 禁用 legacy hooks
 integration.repair.open_trust_guide:
   en: Open Codex /hooks trust guide
   ko: Codex /hooks trust 안내 열기
   ja: Codex /hooks trust ガイドを開く
-  zh: 打开 Codex /hooks trust 指南
 integration.repair_detail.run_doctor:
   en: "Refresh the read-only doctor report, account summary, and recommended repairs."
   ko: "읽기 전용 doctor 보고서, 계정 요약, 추천 수리를 새로고침합니다."
   ja: "読み取り専用の doctor レポート、アカウント概要、推奨修復を更新します。"
-  zh: "刷新只读 doctor 报告、账户摘要和推荐修复。"
 integration.repair_detail.install_plugin:
   en: "Runs install --yes to rewrite managed plugin bundles, hook wiring, IPC writable_root, and launcher state."
   ko: "install --yes를 실행해 관리 대상 plugin bundle, hook 연결, IPC writable_root, launcher 상태를 다시 씁니다."
   ja: "install --yes を実行し、管理対象 plugin bundle、hook 配線、IPC writable_root、launcher 状態を書き直します。"
-  zh: "运行 install --yes，重写受管 plugin bundle、hook 连接、IPC writable_root 和 launcher 状态。"
 integration.repair_detail.start_daemon:
   en: "Spawns daemon run in the background so hooks can reach the local IPC server."
   ko: "hook이 로컬 IPC 서버에 접근하도록 daemon run을 백그라운드로 시작합니다."
   ja: "hook がローカル IPC サーバーへ到達できるよう daemon run をバックグラウンドで起動します。"
-  zh: "在后台启动 daemon run，使 hook 能访问本地 IPC server。"
 integration.repair_detail.autostart_on:
   en: "Registers the daemon to run at logon and synchronizes autostart.enabled."
   ko: "로그온 시 daemon이 실행되도록 등록하고 autostart.enabled를 동기화합니다."
   ja: "ログオン時に daemon が起動するよう登録し、autostart.enabled を同期します。"
-  zh: "注册 daemon 登录时运行，并同步 autostart.enabled。"
 integration.repair_detail.disable_legacy:
   en: "Legacy duplicate hooks need manual cleanup in Codex /hooks or the old direct-hook install state."
   ko: "legacy 중복 hook은 Codex /hooks 또는 이전 direct-hook install 상태에서 수동 정리가 필요합니다."
   ja: "legacy 重複 hook は Codex /hooks または旧 direct-hook install state で手動整理が必要です。"
-  zh: "legacy 重复 hook 需要在 Codex /hooks 或旧 direct-hook install state 中手动清理。"
 integration.repair_detail.open_trust_guide:
   en: "Open Codex /hooks, inspect ai-handoff entries, and trust the current managed hook commands."
   ko: "Codex /hooks를 열어 ai-handoff 항목을 확인하고 현재 관리 hook 명령을 trust 처리합니다."
   ja: "Codex /hooks を開き、ai-handoff 項目を確認して現在の管理 hook コマンドを trust します。"
-  zh: "打开 Codex /hooks，检查 ai-handoff 项，并信任当前受管 hook 命令。"
 table.key:
   en: Key
   ko: 키
   ja: キー
-  zh: 键
 table.tokens:
   en: Tokens
   ko: 토큰
   ja: トークン
-  zh: 令牌
 table.est_cost:
   en: "Est $"
   ko: "추정 $"
   ja: "推定 $"
-  zh: "估算 $"
 table.unpriced:
   en: Unpriced
   ko: 미산정
   ja: 未計上
-  zh: 未计价
 
 # ── Dimensions ──────────────────────────────────────────────────────────
 dim.day:
   en: day
   ko: 일자
   ja: 日付
-  zh: 日期
 dim.model:
   en: model
   ko: 모델
   ja: モデル
-  zh: 模型
 dim.project:
   en: project
   ko: 프로젝트
   ja: プロジェクト
-  zh: 项目
 dim.source:
   en: source
   ko: 소스
   ja: ソース
-  zh: 来源
 
 # ── Settings descriptions (shown in the status bar while browsing) ──────
 setting.five_hour_enabled:
   en: "Turn the 5-hour rate-limit trigger on or off"
   ko: "5시간 사용량 한도 트리거 켜기/끄기"
   ja: "5時間レート制限トリガーのオン/オフ"
-  zh: "开启或关闭 5 小时速率限制触发"
 setting.threshold:
   en: "Fire when usage reaches this percent of the 5-hour limit"
   ko: "5시간 한도의 이 퍼센트에 도달하면 트리거"
   ja: "5時間制限のこの割合に達したら発火"
-  zh: "用量达到 5 小时限额的此百分比时触发"
 setting.mode:
   en: "On trigger: off (nothing) · ask (confirm) · auto (act)"
   ko: "트리거 시: off(아무것도) · ask(확인) · auto(자동)"
   ja: "トリガー時: off(何もしない) · ask(確認) · auto(自動)"
-  zh: "触发时: off(不做) · ask(确认) · auto(自动)"
 setting.burn_enabled:
   en: "Also trigger based on how fast the budget is burning"
   ko: "예산 소진 속도 기준으로도 트리거"
   ja: "予算の消費速度でもトリガー"
-  zh: "也根据预算消耗速度触发"
 setting.runway:
   en: "Fire when fewer than this many minutes of runway remain"
   ko: "남은 여유가 이 분(分) 미만이면 트리거"
   ja: "残り猶予がこの分数未満で発火"
-  zh: "剩余可用时间少于此分钟数时触发"
 setting.autostart:
   en: "Run the daemon automatically at logon"
   ko: "로그온 시 데몬 자동 실행"
   ja: "ログオン時にデーモンを自動起動"
-  zh: "登录时自动运行守护进程"
 setting.daemon_idle_timeout:
   en: "Exit the daemon after this many idle seconds"
   ko: "요청 없이 이 초만큼 유휴 상태가 이어지면 데몬 종료"
   ja: "要求なしでこの秒数アイドル状態が続いたらデーモンを終了"
-  zh: "没有请求并空闲达到此秒数后退出守护进程"
 setting.statusline:
   en: "Show the AI Handoff status line inside the agent"
   ko: "에이전트 안에 AI Handoff 상태줄 표시"
   ja: "エージェント内に AI Handoff ステータス行を表示"
-  zh: "在代理中显示 AI Handoff 状态行"
 setting.language:
-  en: "Dashboard language (en / ko / ja / zh)"
-  ko: "대시보드 언어 (en / ko / ja / zh)"
-  ja: "ダッシュボードの言語 (en / ko / ja / zh)"
-  zh: "仪表盘语言 (en / ko / ja / zh)"
+  en: "Dashboard language (en / ko / ja)"
+  ko: "대시보드 언어 (en / ko / ja)"
+  ja: "ダッシュボードの言語 (en / ko / ja)"
 
 # ── Settings tab ────────────────────────────────────────────────────────
 setting.capsule_format:
   en: "New capsule storage format: JSON for compact machine data, MD for readable handoff notes"
   ko: "새 캡슐 저장 형식: JSON은 기계용, MD는 사람이 읽기 쉬운 인계 노트"
   ja: "新しいカプセル保存形式: JSON は機械向け、MD は読みやすい引き継ぎノート"
-  zh: "新胶囊保存格式：JSON 适合机器数据，MD 适合可读交接笔记"
 setting.capsule_language:
   en: "Sets the language used when creating capsules"
   ko: "캡슐을 생성할 때 언어를 설정합니다."
   ja: "カプセルを生成するときの言語を設定します。"
-  zh: "设置生成胶囊时使用的语言。"
 setting.capsule_next_prompt_max_items:
   en: "Maximum next-prompt items captured by hooks and checkpoint"
   ko: "hook/checkpoint가 저장할 다음 프롬프트 항목 최대 개수"
   ja: "hook/checkpoint が保存する次のプロンプト項目の最大数"
-  zh: "hook/checkpoint 保存的下一提示项最大数量"
 setting.capsule_remaining_max_items:
   en: "Maximum remaining-work items captured by hooks and checkpoint"
   ko: "hook/checkpoint가 저장할 남은 작업 항목 최대 개수"
   ja: "hook/checkpoint が保存する残作業項目の最大数"
-  zh: "hook/checkpoint 保存的剩余工作项最大数量"
 setting.capsule_done_max_items:
   en: "Maximum completed-work items captured by hooks and checkpoint"
   ko: "hook/checkpoint가 저장할 완료 항목 최대 개수"
   ja: "hook/checkpoint が保存する完了項目の最大数"
-  zh: "hook/checkpoint 保存的已完成项最大数量"
 setting.capsule_risks_max_items:
   en: "Maximum risk items captured by hooks and checkpoint"
   ko: "hook/checkpoint가 저장할 위험 항목 최대 개수"
   ja: "hook/checkpoint が保存するリスク項目の最大数"
-  zh: "hook/checkpoint 保存的风险项最大数量"
 setting.theme_preset:
   en: "Theme preset; custom values below override the preset"
   ko: "테마 프리셋; 아래 사용자 색상 값이 프리셋보다 우선합니다"
   ja: "テーマプリセット。下のカスタム色がプリセットより優先されます"
-  zh: "主题预设；下面的自定义颜色会覆盖预设"
 setting.theme_codex_color:
   en: "Codex label and usage chart color"
   ko: "Codex 라벨과 사용량 차트 색상"
   ja: "Codex ラベルと使用量チャートの色"
-  zh: "Codex 标签和使用量图表颜色"
 setting.theme_claude_color:
   en: "Claude label and usage chart color"
   ko: "Claude 라벨과 사용량 차트 색상"
   ja: "Claude ラベルと使用量チャートの色"
-  zh: "Claude 标签和使用量图表颜色"
 setting.theme_focus_border_color:
   en: "Focused pane border color"
   ko: "현재 포커스된 패널 외곽선 색상"
   ja: "現在フォーカス中のペイン枠線の色"
-  zh: "当前焦点面板边框颜色"
 setting.theme_selection_bg_color:
   en: "Selected row/tab background color"
   ko: "선택된 행과 탭의 배경색"
   ja: "選択中の行とタブの背景色"
-  zh: "选中行和标签的背景色"
 setting.theme_selection_fg_color:
   en: "Selected row/tab text color"
   ko: "선택된 행과 탭의 글자색"
   ja: "選択中の行とタブの文字色"
-  zh: "选中行和标签的文字颜色"
 
 settings.title:
   en: "Settings (↑/↓ select · space toggle · ←/→ change · applies to both agents)"
   ko: "설정 (↑/↓ 선택 · Space 토글 · ←/→ 변경 · 두 에이전트 모두 적용)"
   ja: "設定 (↑/↓ 選択 · Space 切替 · ←/→ 変更 · 両エージェントに適用)"
-  zh: "设置 (↑/↓ 选择 · Space 切换 · ←/→ 修改 · 对两个代理生效)"
 settings.categories:
   en: Categories
   ko: 카테고리
   ja: カテゴリ
-  zh: 分类
 settings.category_line:
   en: "%{name} (%{count})"
   ko: "%{name} (%{count})"
   ja: "%{name}（%{count}）"
-  zh: "%{name}（%{count}）"
 settings.category.all:
   en: All
   ko: 전체
   ja: すべて
-  zh: 全部
 settings.category.automation:
   en: Automation
   ko: 자동화
   ja: 自動化
-  zh: 自动化
 settings.category.triggers:
   en: Triggers
   ko: 트리거
   ja: トリガー
-  zh: 触发器
 settings.category.capsule:
   en: Capsule
   ko: 캡슐
   ja: カプセル
-  zh: 胶囊
 settings.category.paths:
   en: Paths
   ko: 경로
   ja: パス
-  zh: 路径
 settings.category.display:
   en: Display
   ko: 표시
   ja: 表示
-  zh: 显示
 settings.category.language:
   en: Language
   ko: 언어
   ja: 言語
-  zh: 语言
 settings.category.security:
   en: Security
   ko: 보안
   ja: セキュリティ
-  zh: 安全
 settings.category.agents:
   en: Agents
   ko: 에이전트
   ja: エージェント
-  zh: 代理
 settings.category.advanced:
   en: Advanced(raw)
   ko: 고급(raw)
   ja: 詳細(raw)
-  zh: 高级(raw)
 settings.category_desc.all:
   en: Every editable setting
   ko: 모든 편집 가능한 설정
   ja: すべての編集可能な設定
-  zh: 所有可编辑设置
 settings.category_desc.automation:
   en: Control daemon and automatic handoff behavior
   ko: daemon과 자동 handoff 동작을 제어
   ja: daemon と自動 handoff の動作を制御
-  zh: 控制 daemon 和自动 handoff 行为
 settings.category_desc.triggers:
   en: Configure rate-limit and burn-rate triggers
   ko: 사용량 한도와 소진 속도 트리거 설정
   ja: レート制限と消費速度トリガーを設定
-  zh: 配置额度限制和消耗速度触发器
 settings.category_desc.capsule:
   en: Configure capsule format, retention, and redaction
   ko: 캡슐 형식, 보관 기간, redaction 설정
   ja: カプセル形式、保持期間、redaction を設定
-  zh: 配置胶囊格式、保留期和 redaction
 settings.category_desc.paths:
   en: Configure home, store, IPC, logs, and account paths
   ko: home, store, IPC, logs, account 경로 설정
   ja: home、store、IPC、logs、account のパスを設定
-  zh: 配置 home、store、IPC、logs、account 路径
 settings.category_desc.display:
   en: Configure TUI theme, compact mode, and charts
   ko: TUI 테마, compact mode, 차트 표시 설정
   ja: TUIテーマ、compact mode、チャート表示を設定
-  zh: 配置 TUI 主题、compact mode 和图表显示
 settings.category_desc.language:
   en: Configure UI and capsule creation languages
   ko: UI와 캡슐 생성 언어 설정
   ja: UI とカプセル生成言語を設定
-  zh: 配置 UI 和胶囊生成语言
 settings.category_desc.security:
   en: Configure masking, redaction, and sensitive-action policy
   ko: masking, redaction, 민감 작업 정책 설정
   ja: masking、redaction、機密操作ポリシーを設定
-  zh: 配置 masking、redaction 和敏感操作策略
 settings.category_desc.agents:
   en: Configure Claude/Codex integrations and hooks
   ko: Claude/Codex 연동과 hooks 설정
   ja: Claude/Codex 連携と hooks を設定
-  zh: 配置 Claude/Codex 集成和 hooks
 settings.category_desc.advanced:
   en: Raw key/value configuration for advanced users
   ko: 고급 사용자를 위한 raw key/value 설정
   ja: 上級ユーザー向けの raw key/value 設定
-  zh: 面向高级用户的 raw key/value 配置
 settings.category.update:
   en: Update
   ko: 업데이트
   ja: アップデート
-  zh: 更新
 settings.category_desc.update:
   en: Check the version, update, or uninstall
   ko: 버전 확인, 업데이트, 삭제
   ja: バージョン確認、更新、アンインストール
-  zh: 查看版本、更新或卸载
 settings.update.version:
   en: Current version
   ko: 현재 버전
   ja: 現在のバージョン
-  zh: 当前版本
 settings.update.run:
   en: Update now
   ko: 업데이트하기
   ja: 今すぐアップデート
-  zh: 立即更新
 settings.update.uninstall:
   en: Uninstall
   ko: 삭제하기
   ja: アンインストール
-  zh: 卸载
 settings.update.readonly:
   en: "Current version is read-only."
   ko: "현재 버전은 읽기 전용 항목입니다."
   ja: "現在のバージョンは読み取り専用です。"
-  zh: "当前版本为只读项。"
 settings.update.desc.version:
   en: "Installed AI Handoff version: v%{version} (read-only)."
   ko: "설치된 AI Handoff 버전: v%{version} (읽기 전용)."
   ja: "インストール済みの AI Handoff バージョン: v%{version}（読み取り専用）。"
-  zh: "已安装的 AI Handoff 版本：v%{version}（只读）。"
 settings.update.desc.run:
   en: "Enter opens a new window that downloads and installs the latest release."
   ko: "Enter를 누르면 새 창에서 최신 릴리즈를 내려받아 설치합니다."
   ja: "Enter で新しいウィンドウを開き、最新リリースをダウンロードしてインストールします。"
-  zh: "按 Enter 打开新窗口，下载并安装最新版本。"
 settings.update.desc.uninstall:
   en: "Removes the AI Handoff TUI/CLI from this machine (the GUI has its own uninstall in its settings)."
   ko: "이 컴퓨터에서 AI Handoff TUI/CLI를 삭제합니다 (GUI는 GUI 설정에서 삭제)."
   ja: "このマシンから AI Handoff TUI/CLI を削除します（GUI は GUI 設定から削除）。"
-  zh: "从本机移除 AI Handoff TUI/CLI（GUI 请在 GUI 设置中卸载）。"
 settings.empty_category:
   en: "No editable settings in this category yet."
   ko: "아직 이 카테고리에 편집 가능한 설정이 없습니다."
   ja: "このカテゴリにはまだ編集可能な設定がありません。"
-  zh: "此分类中还没有可编辑设置。"
 table.setting:
   en: Setting
   ko: 설정
   ja: 設定
-  zh: 设置
 table.value:
   en: Value
   ko: 값
   ja: 値
-  zh: 值
 
 # ── Capsule tab ─────────────────────────────────────────────────────────
 settings.detail_title:
   en: Detail / preview
   ko: 상세 / 미리보기
   ja: 詳細 / プレビュー
-  zh: 详情 / 预览
 settings.detail_key:
   en: "Key:"
   ko: "키:"
   ja: "キー:"
-  zh: "键:"
 settings.detail_value:
   en: "Current:"
   ko: "현재값:"
   ja: "現在値:"
-  zh: "当前值:"
 settings.detail_default:
   en: "Default:"
   ko: "기본값:"
   ja: "既定値:"
-  zh: "默认值:"
 settings.detail_help:
   en: "Space/Enter edit · q/Esc back · / search · r reset"
   ko: "Space/Enter 편집 · q/Esc 뒤로 · / 검색 · r 기본값"
   ja: "Space/Enter 編集 · q/Esc 戻る · / 検索 · r 既定値"
-  zh: "Space/Enter 编辑 · q/Esc 返回 · / 搜索 · r 恢复默认"
 settings.detail_editing:
   en: "Editing:"
   ko: "입력 중:"
   ja: "編集中:"
-  zh: "编辑中:"
 settings.detail_preview:
   en: "selected"
   ko: "선택됨"
   ja: "選択中"
-  zh: "已选中"
 
 capsule.empty:
   en: "No capsules captured yet.\n\nCapsules appear here once /handoff hands off context between Codex and Claude. Each is grouped under its agent and project."
   ko: "아직 담은 캡슐이 없습니다.\n\n/handoff 로 Codex와 Claude 사이 컨텍스트를 인계하면 여기 나타납니다. 각 캡슐은 에이전트·프로젝트별로 묶입니다."
   ja: "まだカプセルがありません。\n\n/handoff で Codex と Claude の間でコンテキストを引き継ぐとここに表示されます。各カプセルはエージェント・プロジェクトごとにまとまります。"
-  zh: "尚无已捕获的胶囊。\n\n通过 /handoff 在 Codex 与 Claude 之间交接上下文后，胶囊会出现在此。每个胶囊按代理与项目分组。"
 capsule.list_title:
   en: "Capsules (↓/Space/Enter to open)"
   ko: "캡슐 (↓/Space/Enter 로 열기)"
   ja: "カプセル (↓/Space/Enter で開く)"
-  zh: "胶囊 (↓/Space/Enter 打开)"
 capsule.actions:
   en: Actions
   ko: 동작
   ja: 操作
-  zh: 操作
 capsule.state_label:
   en: "state: %{state}"
   ko: "상태: %{state}"
   ja: "状態: %{state}"
-  zh: "状态: %{state}"
 capsule.btn_toggle:
   en: "[s] toggle state"
   ko: "[s] 상태 전환"
   ja: "[s] 状態切替"
-  zh: "[s] 切换状态"
 capsule.btn_delete:
   en: "[d] delete"
   ko: "[d] 삭제"
   ja: "[d] 削除"
-  zh: "[d] 删除"
 capsule.btn_confirm_delete:
   en: "[d] confirm delete"
   ko: "[d] 삭제 확인"
   ja: "[d] 削除を確定"
-  zh: "[d] 确认删除"
 capsule.btn_edit:
   en: "[e/Enter] edit field"
   ko: "[e/Enter] 필드 편집"
   ja: "[e/Enter] フィールド編集"
-  zh: "[e/Enter] 编辑字段"
 capsule.detail_title:
   en: "Capsule — %{path}"
   ko: "캡슐 — %{path}"
   ja: "カプセル — %{path}"
-  zh: "胶囊 — %{path}"
 capsule.detail_label:
   en: "Capsule detail"
   ko: "캡슐 상세"
   ja: "カプセル詳細"
-  zh: "胶囊详情"
 capsule.detail_placeholder:
   en: "Move with ↑/↓; press Enter/→ on a capsule to open it here."
   ko: "↑/↓ 로 이동; 캡슐에서 Enter/→ 누르면 여기 열립니다."
   ja: "↑/↓ で移動; カプセルで Enter/→ を押すとここに開きます。"
-  zh: "用 ↑/↓ 移动；在胶囊上按 Enter/→ 即可在此打开。"
 capsule.editable_header:
   en: "Editable (Enter/e):"
   ko: "편집 가능 (Enter/e):"
   ja: "編集可能 (Enter/e):"
-  zh: "可编辑 (Enter/e):"
 capsule.readonly_header:
   en: "Read-only:"
   ko: "읽기 전용:"
   ja: "読み取り専用:"
-  zh: "只读:"
 capsule.empty_value:
   en: "(empty)"
   ko: "(비어 있음)"
   ja: "(空)"
-  zh: "(空)"
 capsule.edit_title:
   en: "Edit field"
   ko: "필드 편집"
   ja: "フィールド編集"
-  zh: "编辑字段"
 capsule.edit_banner:
   en: "Editing %{field} — %{hint}"
   ko: "%{field} 편집 — %{hint}"
   ja: "%{field} 編集 — %{hint}"
-  zh: "编辑 %{field} — %{hint}"
 capsule.edit_hint:
   en: "Enter to save · Esc to cancel"
   ko: "Enter 저장 · Esc 취소"
   ja: "Enter 保存 · Esc 取消"
-  zh: "Enter 保存 · Esc 取消"
 capsule.edit_hint_list:
   en: "items separated by | · Enter to save · Esc to cancel"
   ko: "여러 항목은 | 로 구분 · Enter 저장 · Esc 취소"
   ja: "複数項目は | で区切り · Enter 保存 · Esc 取消"
-  zh: "多项用 | 分隔 · Enter 保存 · Esc 取消"
 capsule.field_flow:
   en: Flow
   ko: 흐름
   ja: フロー
-  zh: 流向
 capsule.field_state:
   en: State
   ko: 상태
   ja: 状態
-  zh: 状态
 capsule.field_created:
   en: Created
   ko: 생성
   ja: 作成
-  zh: 创建
 capsule.field_id:
   en: Capsule
   ko: 캡슐
   ja: カプセル
-  zh: 胶囊
 capsule.field_files:
   en: "Files:"
   ko: "파일:"
   ja: "ファイル:"
-  zh: "文件:"
 
 # ── Capsule editable field names ────────────────────────────────────────
 field.goal:
   en: Goal
   ko: 목표
   ja: 目標
-  zh: 目标
 field.next_prompt:
   en: Next prompt
   ko: 다음 프롬프트
   ja: 次のプロンプト
-  zh: 下一提示
 field.remaining:
   en: Remaining
   ko: 남은 작업
   ja: 残作業
-  zh: 剩余
 field.done:
   en: Done
   ko: 완료
   ja: 完了
-  zh: 已完成
 field.risks:
   en: Risks
   ko: 위험
   ja: リスク
-  zh: 风险
 
 # ── Health table (labels by check id, messages by fixed text) ───────────
-health.label.daemon:
-  en: Daemon
-  ko: 데몬
-  ja: デーモン
-  zh: 守护进程
-health.label.autostart:
-  en: Autostart
-  ko: 자동 시작
-  ja: 自動起動
-  zh: 开机自启
 health.label.codex-hooks:
   en: Codex hooks
   ko: Codex 후크
   ja: Codex フック
-  zh: Codex 钩子
 health.label.codex-config:
   en: Codex config
   ko: Codex 설정
   ja: Codex 設定
-  zh: Codex 配置
 health.label.claude-settings:
   en: Claude settings
   ko: Claude 설정
   ja: Claude 設定
-  zh: Claude 设置
 health.label.ipc:
   en: IPC
   ko: IPC
   ja: IPC
-  zh: IPC
 health.label.store:
   en: Store
   ko: 저장소
   ja: ストア
-  zh: 存储
 health.msg.present:
   en: present
   ko: 있음
   ja: あり
-  zh: 存在
 health.msg.missing:
   en: missing
   ko: 없음
   ja: なし
-  zh: 缺失
 health.msg.not_a_dir:
   en: "path exists but is not a directory"
   ko: "경로는 있지만 디렉터리가 아님"
   ja: "パスは存在しますがディレクトリではありません"
-  zh: "路径存在但不是目录"
 health.msg.hooks_installed:
   en: "v2 hooks installed"
   ko: "v2 후크 설치됨"
   ja: "v2 フック導入済み"
-  zh: "已安装 v2 钩子"
 health.msg.hooks_incomplete:
   en: "v2 hooks missing or incomplete"
   ko: "v2 후크 없음 또는 불완전"
   ja: "v2 フックが無いか不完全"
-  zh: "v2 钩子缺失或不完整"
 health.msg.config_ok:
   en: "writable_roots and AI_HANDOFF_HOME present"
   ko: "writable_roots 및 AI_HANDOFF_HOME 있음"
   ja: "writable_roots と AI_HANDOFF_HOME あり"
-  zh: "writable_roots 与 AI_HANDOFF_HOME 均存在"
-health.msg.daemon_unknown:
-  en: "Runtime status API not implemented in this MVP"
-  ko: "런타임 상태 API는 이 MVP에 미구현"
-  ja: "ランタイム状態 API はこの MVP では未実装"
-  zh: "此 MVP 未实现运行时状态 API"
 
 # ── Account tab ─────────────────────────────────────────────────────────
 hint.account_tree:
   en: "↑/↓ move · Enter/→ open account · + add account · q/Esc back"
   ko: "↑/↓ 이동 · Enter/→ 계정 열기 · + 계정 추가하기 · q/Esc 뒤로"
   ja: "↑/↓ 移動 · Enter/→ アカウントを開く · + アカウントを追加 · q/Esc 戻る"
-  zh: "↑/↓ 移动 · Enter/→ 打开账户 · + 添加账户 · q/Esc 返回"
 hint.account_detail:
   en: "s switch app · l run CLI · a add · d delete · r refresh credits · ← back"
   ko: "s 앱 전환 · l CLI로 실행 · a 추가 · d 삭제 · r 초기화권 새로고침 · ← 뒤로"
   ja: "s アプリ切替 · l CLIで起動 · a 追加 · d 削除 · r 初期化券更新 · ← 戻る"
-  zh: "s 切换应用 · l 运行 CLI · a 添加 · d 删除 · r 刷新重置券 · ← 返回"
 account.empty:
   en: "No accounts yet.\n\nPress + to add an account (sign in to Codex or Claude). Add several to manage and switch between them."
   ko: "아직 계정이 없습니다.\n\n+ 를 눌러 계정을 추가하세요 (Codex 또는 Claude 로그인). 여러 개를 추가해 관리·전환할 수 있습니다."
   ja: "まだアカウントがありません。\n\n+ を押してアカウントを追加します（Codex または Claude にサインイン）。複数追加して管理・切替できます。"
-  zh: "尚无账户。\n\n按 + 添加账户（登录 Codex 或 Claude）。可添加多个以管理并切换。"
 account.list_title:
   en: "Accounts (↓/Space/Enter to open)"
   ko: "계정 (↓/Space/Enter 로 열기)"
   ja: "アカウント (↓/Space/Enter で開く)"
-  zh: "账户 (↓/Space/Enter 打开)"
 account.add:
   en: "+ add account"
   ko: "+ 계정 추가하기"
   ja: "+ アカウントを追加"
-  zh: "+ 添加账户"
 account.active:
   en: active
   ko: 사용 중
   ja: 使用中
-  zh: 使用中
 account.actions:
   en: Actions
   ko: 동작
   ja: 操作
-  zh: 操作
 account.btn_switch:
   en: "[s] switch app"
   ko: "[s] 앱 전환"
   ja: "[s] アプリ切替"
-  zh: "[s] 切换应用"
 account.btn_delete:
   en: "[d] delete"
   ko: "[d] 삭제"
   ja: "[d] 削除"
-  zh: "[d] 删除"
 account.btn_confirm_delete:
   en: "[d] confirm delete"
   ko: "[d] 삭제 확인"
   ja: "[d] 削除を確定"
-  zh: "[d] 确认删除"
 account.btn_launch:
   en: "[l] run CLI"
   ko: "[l] CLI로 실행"
   ja: "[l] CLIで起動"
-  zh: "[l] 运行 CLI"
 account.btn_refresh:
   en: "[r] check usage"
   ko: "[r] 사용량 확인"
   ja: "[r] 使用量確認"
-  zh: "[r] 查询用量"
 account.btn_add:
   en: "[a] add account"
   ko: "[a] 계정 추가"
   ja: "[a] アカウント追加"
-  zh: "[a] 添加账户"
 account.detail_placeholder:
   en: "Pick an account on the left to see its plan and limits."
   ko: "왼쪽에서 계정을 선택하면 플랜과 한도가 표시됩니다."
   ja: "左でアカウントを選ぶとプランと制限が表示されます。"
-  zh: "在左侧选择账户以查看其套餐与限额。"
 account.signed_in:
   en: "Signed in: %{email}"
   ko: "로그인: %{email}"
   ja: "サインイン: %{email}"
-  zh: "已登录: %{email}"
 account.account_line:
   en: "Account: %{email}"
   ko: "계정: %{email}"
   ja: "アカウント: %{email}"
-  zh: "账户: %{email}"
 account.inactive_hint:
   en: "Not the active account — press s to switch, then plan/limits show here."
   ko: "활성 계정 아님 — s로 전환하면 플랜·한도가 여기 표시됩니다."
   ja: "アクティブではありません — s で切替えるとプラン・制限が表示されます。"
-  zh: "非当前账户 — 按 s 切换后这里显示套餐与限额。"
 account.summary_count:
   en: "%{count} saved account(s)"
   ko: "저장된 계정 %{count}개"
   ja: "保存済みアカウント %{count}件"
-  zh: "已保存 %{count} 个账户"
 account.summary_active:
   en: "active: %{email}"
   ko: "활성: %{email}"
   ja: "アクティブ: %{email}"
-  zh: "当前: %{email}"
 account.summary_add_hint:
   en: "Press a (or +) to add an account · Enter on one to see its details."
   ko: "a (또는 +) 로 계정 추가 · 계정에서 Enter로 상세 보기."
   ja: "a（または +）でアカウント追加 · アカウントで Enter で詳細。"
-  zh: "按 a（或 +）添加账户 · 在账户上按 Enter 查看详情。"
 account.not_signed_in:
   en: "Not signed in"
   ko: "로그인 안 됨"
   ja: "サインインしていません"
-  zh: "未登录"
 account.plan:
   en: "Plan: %{plan}"
   ko: "플랜: %{plan}"
   ja: "プラン: %{plan}"
-  zh: "套餐: %{plan}"
 account.plan_unknown:
   en: unknown
   ko: 알 수 없음
   ja: 不明
-  zh: 未知
 account.five_hour:
   en: "5-hour"
   ko: "5시간"
   ja: "5時間"
-  zh: "5小时"
 account.weekly:
   en: Weekly
   ko: 주간
   ja: 週間
-  zh: 每周
 account.window_line:
   en: "%{label}: %{used}% used · %{left}% left%{reset}"
   ko: "%{label}: %{used}% 사용 · %{left}% 남음%{reset}"
   ja: "%{label}: %{used}% 使用 · %{left}% 残り%{reset}"
-  zh: "%{label}: 已用 %{used}% · 剩 %{left}%%{reset}"
 account.reset_suffix:
   en: " · resets %{when}"
   ko: " · %{when} 리셋"
   ja: " · %{when} リセット"
-  zh: " · %{when} 重置"
 account.no_data:
   en: "No usage data yet — run the agent once to populate limits."
   ko: "사용 데이터 없음 — 에이전트를 한 번 실행하면 한도가 채워집니다."
   ja: "使用データなし — エージェントを一度実行すると制限が反映されます。"
-  zh: "暂无用量数据 — 运行一次代理即可填充限额。"
 account.usage_loading:
   en: "fetching this account's usage…"
   ko: "이 계정의 사용량 불러오는 중…"
   ja: "このアカウントの使用量を取得中…"
-  zh: "正在获取此账户的用量…"
 account.usage_error:
   en: "usage unavailable (%{err})"
   ko: "사용량 조회 실패 (%{err})"
   ja: "使用量を取得できません (%{err})"
-  zh: "用量不可用 (%{err})"
 account.usage_press_r:
   en: "press r to load this account's usage"
   ko: "r 누르면 이 계정 사용량 조회"
   ja: "r でこのアカウントの使用量を取得"
-  zh: "按 r 加载此账户用量"
 account.claude_inactive:
   en: "Claude usage shows for the active account only (switch app with s)."
   ko: "Claude 사용량은 활성 계정만 표시됩니다 (s로 앱 전환)."
   ja: "Claude の使用量はアクティブなアカウントのみ表示 (s でアプリ切替)。"
-  zh: "Claude 用量仅显示当前账户（按 s 切换应用）。"
 account.reset_credits:
   en: "Reset credits (초기화권)"
   ko: "초기화권"
   ja: "初期化券 (reset credits)"
-  zh: "重置券 (reset credits)"
 account.reset_credits_value:
   en: "%{count} available"
   ko: "%{count}개 보유"
   ja: "%{count}枚 保有"
-  zh: "可用 %{count} 个"
 account.reset_credit_item:
   en: "#%{n} expires %{expires} · granted %{granted}"
   ko: "#%{n} 만료 %{expires} · 지급 %{granted}"
   ja: "#%{n} 失効 %{expires} · 付与 %{granted}"
-  zh: "#%{n} 到期 %{expires} · 获得 %{granted}"
 account.reset_credits_hint:
   en: "press r to refresh credit details"
   ko: "r 새로고침으로 초기화권 상세 조회"
   ja: "r で初期化券の詳細を更新"
-  zh: "按 r 刷新重置券详情"
 account.reset_credits_press:
   en: "press r to fetch (uses your Codex token over the network)"
   ko: "r 누르면 조회 (Codex 토큰으로 네트워크 호출)"
   ja: "r で取得（Codex トークンでネットワーク呼び出し）"
-  zh: "按 r 获取（通过网络使用你的 Codex 令牌）"
 account.reset_credits_loading:
   en: "fetching…"
   ko: "조회 중…"
   ja: "取得中…"
-  zh: "获取中…"
 account.reset_credits_error:
   en: "unavailable (%{err})"
   ko: "조회 실패 (%{err})"
   ja: "取得不可 (%{err})"
-  zh: "不可用 (%{err})"
 status.account_switched:
   en: "switched to %{label} — restart Codex/Claude for it to take effect"
   ko: "%{label} 로 전환됨 — 적용하려면 Codex/Claude 재시작"
   ja: "%{label} に切替 — 反映には Codex/Claude を再起動"
-  zh: "已切换到 %{label} — 重启 Codex/Claude 后生效"
 status.account_switched_running:
   en: "switched to %{label} — a session is running; restart it to apply"
   ko: "%{label} 로 전환됨 — 실행 중인 세션이 있음, 재시작해야 적용됨"
   ja: "%{label} に切替 — 実行中のセッションあり、再起動で反映"
-  zh: "已切换到 %{label} — 有正在运行的会话，重启后生效"
 status.account_switched_managed:
   en: "switched to %{label} (managed account) — restart; a forced workspace policy may sign you out"
   ko: "%{label} 로 전환됨 (관리형 계정) — 재시작 필요, 강제 workspace 정책 시 로그아웃될 수 있음"
   ja: "%{label} に切替（管理アカウント）— 再起動。強制ワークスペース設定でログアウトの可能性"
-  zh: "已切换到 %{label}（受管账户）— 重启；强制工作区策略可能导致登出"
 status.account_switch_failed:
   en: "switch failed: %{err}"
   ko: "전환 실패: %{err}"
   ja: "切替に失敗: %{err}"
-  zh: "切换失败: %{err}"
 status.account_delete_confirm:
   en: "remove this saved account? press d or y to confirm, any other key to cancel"
   ko: "담아둔 이 계정을 삭제할까요? d 또는 y로 확인, 다른 키로 취소"
   ja: "保存したこのアカウントを削除しますか？d または y で確定、他のキーで取消"
-  zh: "删除此已保存账户？按 d 或 y 确认，其他键取消"
 status.account_delete_cancelled:
   en: "delete cancelled"
   ko: "삭제 취소됨"
   ja: "削除を取消しました"
-  zh: "已取消删除"
 status.account_deleted:
   en: "saved account removed"
   ko: "담아둔 계정 삭제됨"
   ja: "保存したアカウントを削除しました"
-  zh: "已删除保存的账户"
 status.account_delete_failed:
   en: "delete failed: %{err}"
   ko: "삭제 실패: %{err}"
   ja: "削除に失敗: %{err}"
-  zh: "删除失败: %{err}"
 status.account_captured:
   en: "added account: %{label}"
   ko: "계정 추가됨: %{label}"
   ja: "アカウントを追加しました: %{label}"
-  zh: "已添加账户: %{label}"
 status.account_capture_failed:
   en: "add failed: %{err}"
   ko: "추가 실패: %{err}"
   ja: "追加に失敗: %{err}"
-  zh: "添加失败: %{err}"
 status.account_launched:
   en: "launched %{label} (this session)"
   ko: "%{label} 실행함 (이 세션)"
   ja: "%{label} を起動しました（このセッション）"
-  zh: "已启动 %{label}（本次会话）"
 status.account_login_window:
   en: "login opened in a new window — finish it there; the account appears when done"
   ko: "새 창에서 로그인 시작됨 — 거기서 완료하면 계정이 추가됩니다"
   ja: "新しいウィンドウでログイン開始 — そこで完了するとアカウントが追加されます"
-  zh: "已在新窗口打开登录 — 在那里完成后账户将出现"
 status.account_login_timeout:
   en: "login timed out (no credential captured)"
   ko: "로그인 시간 초과 (자격증명 못 받음)"
   ja: "ログインがタイムアウト（資格情報を取得できず）"
-  zh: "登录超时（未捕获到凭据）"
 status.account_launch_failed:
   en: "launch failed: %{err}"
   ko: "실행 실패: %{err}"
   ja: "起動に失敗: %{err}"
-  zh: "启动失败: %{err}"
 status.account_credits_ok:
   en: "reset credits: %{count}"
   ko: "초기화권: %{count}개"
   ja: "初期化券: %{count}枚"
-  zh: "重置券: %{count} 个"
 status.account_credits_failed:
   en: "reset credits unavailable: %{err}"
   ko: "초기화권 조회 실패: %{err}"
   ja: "初期化券の取得に失敗: %{err}"
-  zh: "重置券获取失败: %{err}"
 
 # ── Consumption state ───────────────────────────────────────────────────
 state.pending:
   en: pending
   ko: 대기
   ja: 保留
-  zh: 待处理
 state.in_progress:
   en: in progress
   ko: 진행 중
   ja: 進行中
-  zh: 进行中
 state.blocked:
   en: blocked
   ko: 차단됨
   ja: ブロック中
-  zh: 已阻塞
 state.needs_review:
   en: needs review
   ko: 검토 필요
   ja: レビュー待ち
-  zh: 需要审核
 state.consumed:
   en: consumed
   ko: 사용됨
   ja: 消費済み
-  zh: 已消费
 state.archived:
   en: archived
   ko: 보관됨
   ja: アーカイブ済み
-  zh: 已归档
 setting_label.five_hour_enabled:
   en: "5-hour trigger"
   ko: "5시간 트리거"
   ja: "5時間トリガー"
-  zh: "5 小时触发器"
 setting_label.threshold:
   en: "5-hour threshold"
   ko: "5시간 한도 기준"
   ja: "5時間しきい値"
-  zh: "5 小时阈值"
 setting_label.mode:
   en: "5-hour mode"
   ko: "5시간 모드"
   ja: "5時間モード"
-  zh: "5 小时模式"
 setting_label.burn_enabled:
   en: "Burn-rate trigger"
   ko: "소진 속도 트리거"
   ja: "消費速度トリガー"
-  zh: "消耗速度触发器"
 setting_label.runway:
   en: "Burn-rate runway"
   ko: "소진 속도 남은 시간"
   ja: "消費速度の残り時間"
-  zh: "消耗速度剩余时间"
 setting_label.autostart:
   en: "Autostart daemon"
   ko: "데몬 자동 시작"
   ja: "デーモン自動起動"
-  zh: "守护进程自动启动"
 setting_label.daemon_idle_timeout:
   en: "Daemon idle timeout"
   ko: "데몬 유휴 종료 시간"
   ja: "デーモンアイドル終了時間"
-  zh: "守护进程空闲退出时间"
 setting_label.statusline:
   en: "Agent status line"
   ko: "에이전트 상태줄"
   ja: "エージェント状態行"
-  zh: "代理状态栏"
 setting_label.language:
   en: "Language"
   ko: "언어"
   ja: "言語"
-  zh: "语言"
 setting_label.capsule_format:
   en: "Capsule format"
   ko: "캡슐 형식"
   ja: "カプセル形式"
-  zh: "胶囊格式"
 setting_label.capsule_language:
   en: "Capsule creation language"
   ko: "캡슐 생성 언어"
   ja: "カプセル生成言語"
-  zh: "胶囊生成语言"
 setting_label.capsule_next_prompt_max_items:
   en: "Next prompt max items"
   ko: "다음 프롬프트 최대 개수"
   ja: "次プロンプト最大件数"
-  zh: "下一个提示最大数量"
 setting_label.capsule_remaining_max_items:
   en: "Remaining work max items"
   ko: "남은 작업 최대 개수"
   ja: "残作業最大件数"
-  zh: "剩余工作最大数量"
 setting_label.capsule_done_max_items:
   en: "Done max items"
   ko: "완료 항목 최대 개수"
   ja: "完了項目最大件数"
-  zh: "完成项最大数量"
 setting_label.capsule_risks_max_items:
   en: "Risk max items"
   ko: "위험 항목 최대 개수"
   ja: "リスク項目最大件数"
-  zh: "风险项最大数量"
 setting_label.theme_preset:
   en: "Theme preset"
   ko: "테마 프리셋"
   ja: "テーマプリセット"
-  zh: "主题预设"
 setting_label.theme_codex_color:
   en: "Codex color"
   ko: "코덱스 색상"
   ja: "Codex色"
-  zh: "Codex 颜色"
 setting_label.theme_claude_color:
   en: "Claude color"
   ko: "클로드 색상"
   ja: "Claude色"
-  zh: "Claude 颜色"
 setting_label.theme_focus_border_color:
   en: "Focus border color"
   ko: "포커스 외곽선 색상"
   ja: "フォーカス枠色"
-  zh: "焦点边框颜色"
 setting_label.theme_selection_bg_color:
   en: "Selection background"
   ko: "선택 배경색"
   ja: "選択背景色"
-  zh: "选中背景色"
 setting_label.theme_selection_fg_color:
   en: "Selection text color"
   ko: "선택 글자색"
   ja: "選択文字色"
-  zh: "选中文字色"

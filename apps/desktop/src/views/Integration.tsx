@@ -90,10 +90,6 @@ export default function Integration({ initial, t }: { initial: DashboardSnapshot
         {report && (
           <div className="doctor-summary">
             <div>
-              <span>Daemon</span>
-              <strong>{report.doctor.daemon}</strong>
-            </div>
-            <div>
               <span>Checks</span>
               <strong>
                 {report.doctor.ok}/{report.doctor.warn}/{report.doctor.fail}

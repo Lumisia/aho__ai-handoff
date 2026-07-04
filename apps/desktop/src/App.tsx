@@ -14,7 +14,6 @@
   PanelLeftClose,
   PanelLeftOpen,
   RefreshCw,
-  ScrollText,
   Search,
   Settings,
   Square,
@@ -49,12 +48,11 @@ import type { Translator } from "./i18n";
 import Account from "./views/Account";
 import Capsules from "./views/Capsules";
 import Integration from "./views/Integration";
-import Logs from "./views/Logs";
 import Overview from "./views/Overview";
 import SettingsView from "./views/Settings";
 import Usage from "./views/Usage";
 
-type Tab = "overview" | "capsules" | "usage" | "account" | "integration" | "settings" | "logs";
+type Tab = "overview" | "capsules" | "usage" | "account" | "integration" | "settings";
 type AgentName = "Codex" | "Claude";
 
 interface CapsuleProjectNode {
@@ -80,7 +78,6 @@ const navTabs: Array<{ id: Exclude<Tab, "capsules" | "settings">; labelKey: stri
   { id: "usage", labelKey: "usage", icon: ChartColumnIncreasing },
   { id: "account", labelKey: "account", icon: CircleUserRound },
   { id: "integration", labelKey: "integration", icon: Cable },
-  { id: "logs", labelKey: "logs", icon: ScrollText },
 ];
 
 function displayAgent(source: string): AgentName {
@@ -344,19 +341,11 @@ function CapsuleContextMenu({
   );
 }
 
-function displayAutostart(value: string, t: Translator) {
-  const normalized = value.trim().toLowerCase();
-  if (["enabled", "on", "true", "yes", "registered"].includes(normalized)) return t("stateOn");
-  if (["disabled", "off", "false", "no", "missing", "none"].includes(normalized)) return t("stateOff");
-  return value;
-}
-
 function OverviewHeaderStats({ snapshot, t }: { snapshot: DashboardSnapshot; t: Translator }) {
   const items = [
     { label: t("pending"), value: snapshot.capsules.pending_count },
     { label: t("capsules"), value: snapshot.capsules.items.length },
     { label: t("skippedFiles"), value: snapshot.capsules.skipped },
-    { label: t("autostart"), value: displayAutostart(snapshot.install_state.autostart, t) },
   ];
 
   return (
@@ -407,9 +396,11 @@ function AppTitlebar({
   onOpenGithub: () => void;
 }) {
   const pending = snapshot?.capsules.pending_count ?? 0;
-  const daemonStatus = snapshot?.daemon.status ?? "unknown";
+  const attentionCount =
+    snapshot?.checks.filter((check) => check.status === "warning" || check.status === "error" || check.status === "missing")
+      .length ?? 0;
   const context = snapshot
-    ? `${t("pending")} ${pending} - daemon ${daemonStatus}`
+    ? `${t("pending")} ${pending}${attentionCount > 0 ? ` - ${t("attention")} ${attentionCount}` : ""}`
     : t("titlebarContextEmpty");
   const status = statusMessage ?? context;
   const SidebarIcon = sidebarCollapsed ? PanelLeftOpen : PanelLeftClose;
@@ -435,7 +426,7 @@ function AppTitlebar({
       </div>
 
       <div className="titlebar-drag" data-tauri-drag-region onDoubleClick={() => void getCurrentWindow().toggleMaximize()}>
-        <span className={`health-dot ${daemonStatus === "ok" ? "ok" : daemonStatus === "warning" ? "warn" : ""}`} />
+        <span className={`health-dot ${attentionCount === 0 ? "ok" : "warn"}`} />
         <span>{status}</span>
       </div>
 
@@ -895,7 +886,6 @@ export default function App() {
         {snapshot && active === "usage" && <Usage t={t} />}
         {snapshot && active === "account" && <Account snapshot={snapshot} t={t} />}
         {snapshot && active === "integration" && <Integration initial={snapshot} t={t} />}
-        {snapshot && active === "logs" && <Logs t={t} />}
       </main>
       <SettingsModal
         open={settingsOpen}

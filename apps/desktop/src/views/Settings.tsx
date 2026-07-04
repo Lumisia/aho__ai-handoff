@@ -142,7 +142,7 @@ function optionsFor(row: ConfigRow) {
     case "mode":
       return ["off", "ask", "auto"];
     case "language":
-      return ["ko", "ja", "zh", "en"];
+      return ["ko", "ja", "en"];
     case "capsule_format":
       return ["json", "md"];
     case "theme_preset":

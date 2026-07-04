@@ -421,15 +421,6 @@ fn trigger_prompt_copy(language: config::Language) -> TriggerPromptCopy {
             no_desc: "カプセルを作成せず、元の作業を続けます。",
             other_desc: "ユーザーの追加指示に従ってカプセル作成の有無を決め、元の作業を続けます。",
         },
-        config::Language::Zh => TriggerPromptCopy {
-            question: "已达到 5 小时限制阈值。要保存交接胶囊吗？",
-            yes: "是",
-            no: "否",
-            other: "其他",
-            yes_desc: "写入胶囊 JSON 并执行 checkpoint，然后继续原来的任务。",
-            no_desc: "不创建胶囊，继续原来的任务。",
-            other_desc: "按用户的补充指示决定是否创建胶囊，然后继续原来的任务。",
-        },
         config::Language::En => TriggerPromptCopy {
             question: "The five-hour usage threshold was reached. Save a handoff capsule?",
             yes: "Yes",

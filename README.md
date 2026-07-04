@@ -2,7 +2,7 @@
 
 # AI Handoff
 
-**English** | [한국어](docs/README.ko.md) | [日本語](docs/README.ja.md) | [中文](docs/README.zh.md)
+**English** | [한국어](docs/README.ko.md) | [日本語](docs/README.ja.md)
 
 AI Handoff is a local-first handoff tool for Claude Code and Codex.
 
@@ -74,7 +74,7 @@ To pass more options (pick one agent, pin a version), keep the same scriptblock 
 Pin a release when you need repeatable installs:
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Lumisia/aho__ai-handoff/master/scripts/install.ps1))) -Yes -Version v2.0.14
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Lumisia/aho__ai-handoff/master/scripts/install.ps1))) -Yes -Version v2.0.15
 ```
 
 ### Shell Installer
@@ -155,7 +155,6 @@ Token and cost numbers are estimates from local logs. They are not an official b
 - [Advanced Guide](docs/advanced/README.md)
 - [Korean](docs/README.ko.md)
 - [Japanese](docs/README.ja.md)
-- [Chinese](docs/README.zh.md)
 
 ## License
 

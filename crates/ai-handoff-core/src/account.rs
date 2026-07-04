@@ -553,9 +553,9 @@ fn read_meta(dir: &Path) -> Option<AccountMeta> {
 }
 
 /// Stable identity for a credential, independent of the display label.
-/// Claude priority: org UUID > email > hash. Codex priority: account id +
-/// plan > email + plan > hash. The hash fallback is the first 12 hex chars of
-/// SHA-256.
+/// Team/business credentials can share an org/account id across multiple
+/// emails, while one email can also have multiple plans. Keep both boundaries.
+/// The hash fallback is the first 12 hex chars of SHA-256.
 fn identity_key(agent: Agent, identity: Option<&Identity>, cred_bytes: &[u8]) -> String {
     let hash_key = || {
         use sha2::{Digest, Sha256};
@@ -564,30 +564,45 @@ fn identity_key(agent: Agent, identity: Option<&Identity>, cred_bytes: &[u8]) ->
         let hex = format!("{:x}", h.finalize());
         format!("{}:token:{}", agent.dir(), &hex[..12])
     };
-    let plan_suffix = || {
-        identity
-            .and_then(|i| i.plan_type.as_deref())
-            .map(|plan| format!(":plan:{}", plan.to_ascii_lowercase()))
+    let lower = |s: &str| s.to_ascii_lowercase();
+    let email = identity.and_then(|i| i.email.as_deref()).map(lower);
+    let account_id = identity.and_then(|i| i.account_id.as_deref()).map(lower);
+    let plan = identity.and_then(|i| i.plan_type.as_deref()).map(lower);
+    let suffix = |name: &str, value: Option<&String>| {
+        value
+            .map(|value| format!(":{name}:{value}"))
             .unwrap_or_default()
     };
-    let email_key = |email: &str| {
-        format!(
-            "{}:email:{}{}",
-            agent.dir(),
-            email.to_ascii_lowercase(),
-            plan_suffix()
-        )
-    };
     match agent {
-        Agent::Claude => claude_org_from_cred_bytes(cred_bytes)
-            .map(|org| format!("claude:org:{org}"))
-            .or_else(|| identity.and_then(|i| i.email.as_deref()).map(email_key))
-            .unwrap_or_else(hash_key),
-        Agent::Codex => identity
-            .and_then(|i| i.account_id.as_deref())
-            .map(|id| format!("codex:account:{id}{}", plan_suffix()))
-            .or_else(|| identity.and_then(|i| i.email.as_deref()).map(email_key))
-            .unwrap_or_else(hash_key),
+        Agent::Claude => {
+            let org = claude_org_from_cred_bytes(cred_bytes).map(|org| org.to_ascii_lowercase());
+            match (email.as_ref(), org.as_ref()) {
+                (Some(email), Some(org)) => {
+                    format!(
+                        "claude:email:{email}:org:{org}{}",
+                        suffix("plan", plan.as_ref())
+                    )
+                }
+                (Some(email), None) => {
+                    format!("claude:email:{email}{}", suffix("plan", plan.as_ref()))
+                }
+                (None, Some(org)) => format!("claude:org:{org}{}", suffix("plan", plan.as_ref())),
+                (None, None) => hash_key(),
+            }
+        }
+        Agent::Codex => match (email.as_ref(), account_id.as_ref()) {
+            (Some(email), Some(account)) => {
+                format!(
+                    "codex:email:{email}:account:{account}{}",
+                    suffix("plan", plan.as_ref())
+                )
+            }
+            (Some(email), None) => format!("codex:email:{email}{}", suffix("plan", plan.as_ref())),
+            (None, Some(account)) => {
+                format!("codex:account:{account}{}", suffix("plan", plan.as_ref()))
+            }
+            (None, None) => hash_key(),
+        },
     }
 }
 
@@ -620,22 +635,19 @@ pub fn claude_org_uuid_from_access_token(access_token: &str) -> Option<String> {
 }
 
 fn slot_identity_key(agent: Agent, meta: &AccountMeta, cred_bytes: &[u8]) -> String {
-    if let Some(key) = meta.identity_key.clone() {
-        if agent == Agent::Codex && meta.plan_hint.is_some() && !key.contains(":plan:") {
-            let identity = Identity {
-                email: meta.email.clone(),
-                account_id: meta.account_id.clone(),
-                plan_type: meta.plan_hint.clone(),
-            };
-            return identity_key(agent, Some(&identity), cred_bytes);
-        }
-        return key;
-    }
     let identity = Identity {
         email: meta.email.clone(),
         account_id: meta.account_id.clone(),
         plan_type: meta.plan_hint.clone(),
     };
+    let has_identity_fields =
+        identity.email.is_some() || identity.account_id.is_some() || identity.plan_type.is_some();
+    if let Some(key) = meta.identity_key.clone() {
+        if has_identity_fields {
+            return identity_key(agent, Some(&identity), cred_bytes);
+        }
+        return key;
+    }
     identity_key(agent, Some(&identity), cred_bytes)
 }
 
@@ -1385,11 +1397,16 @@ mod tests {
     }
 
     #[test]
-    fn save_slot_reuses_slot_after_token_refresh_same_org() {
+    fn save_slot_reuses_slot_after_token_refresh_same_claude_identity() {
         let _guard = crate::test_support::env_lock();
         let home = tempfile::tempdir().unwrap();
         std::env::set_var("AI_HANDOFF_HOME", home.path());
 
+        let identity = Identity {
+            email: Some("dev@example.com".into()),
+            account_id: None,
+            plan_type: Some("pro".into()),
+        };
         let old = format!(
             r#"{{"claudeAiOauth":{{"accessToken":"{}"}}}}"#,
             fake_jwt(r#"{"organizationUUID":"org-123"}"#)
@@ -1399,8 +1416,8 @@ mod tests {
             fake_jwt(r#"{"organizationUUID":"org-123","iat":2}"#)
         );
 
-        let first = save_slot(Agent::Claude, old.as_bytes(), None, "test").unwrap();
-        let second = save_slot(Agent::Claude, new.as_bytes(), None, "test").unwrap();
+        let first = save_slot(Agent::Claude, old.as_bytes(), Some(&identity), "test").unwrap();
+        let second = save_slot(Agent::Claude, new.as_bytes(), Some(&identity), "test").unwrap();
 
         assert_eq!(first, second);
         assert_eq!(list_slots(Agent::Claude).len(), 1);
@@ -1408,6 +1425,48 @@ mod tests {
             std::fs::read(slot_dir(Agent::Claude, &first).join(".credentials.json")).unwrap(),
             new.as_bytes()
         );
+
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn save_slot_keeps_claude_same_org_different_email_as_separate_slots() {
+        let _guard = crate::test_support::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+
+        let dev = Identity {
+            email: Some("dev@example.com".into()),
+            account_id: None,
+            plan_type: Some("pro".into()),
+        };
+        let ops = Identity {
+            email: Some("ops@example.com".into()),
+            account_id: None,
+            plan_type: Some("pro".into()),
+        };
+        let dev_cred = format!(
+            r#"{{"claudeAiOauth":{{"accessToken":"{}","subscriptionType":"pro"}}}}"#,
+            fake_jwt(r#"{"organizationUUID":"org-123"}"#)
+        );
+        let ops_cred = format!(
+            r#"{{"claudeAiOauth":{{"accessToken":"{}","subscriptionType":"pro"}}}}"#,
+            fake_jwt(r#"{"organizationUUID":"org-123","iat":2}"#)
+        );
+
+        let first = save_slot(Agent::Claude, dev_cred.as_bytes(), Some(&dev), "test").unwrap();
+        let second = save_slot(Agent::Claude, ops_cred.as_bytes(), Some(&ops), "test").unwrap();
+
+        assert_eq!(first, "dev@example.com");
+        assert_eq!(second, "ops@example.com");
+        let slots = list_slots(Agent::Claude);
+        assert_eq!(slots.len(), 2);
+        assert!(slots
+            .iter()
+            .any(|slot| slot.meta.email.as_deref() == Some("dev@example.com")));
+        assert!(slots
+            .iter()
+            .any(|slot| slot.meta.email.as_deref() == Some("ops@example.com")));
 
         std::env::remove_var("AI_HANDOFF_HOME");
     }
@@ -1510,7 +1569,7 @@ mod tests {
     }
 
     #[test]
-    fn save_slot_updates_same_account_id_even_when_email_changes() {
+    fn save_slot_keeps_codex_same_account_id_different_email_as_separate_slots() {
         let _guard = crate::test_support::env_lock();
         let home = tempfile::tempdir().unwrap();
         std::env::set_var("AI_HANDOFF_HOME", home.path());
@@ -1530,10 +1589,15 @@ mod tests {
         let second = save_slot(Agent::Codex, b"gmail-credential", Some(&gmail), "test").unwrap();
 
         assert_eq!(first, "shared-account");
-        assert_eq!(second, "shared-account");
+        assert_ne!(second, first);
         let slots = list_slots(Agent::Codex);
-        assert_eq!(slots.len(), 1);
-        assert_eq!(slots[0].meta.email.as_deref(), Some("h2171@gmail.com"));
+        assert_eq!(slots.len(), 2);
+        assert!(slots
+            .iter()
+            .any(|slot| slot.meta.email.as_deref() == Some("h2171@naver.com")));
+        assert!(slots
+            .iter()
+            .any(|slot| slot.meta.email.as_deref() == Some("h2171@gmail.com")));
         assert_eq!(
             std::fs::read(slot_dir(Agent::Codex, &second).join("auth.json")).unwrap(),
             b"gmail-credential"

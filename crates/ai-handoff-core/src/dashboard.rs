@@ -166,8 +166,6 @@ pub fn dashboard_snapshot_for(home: &Path, user_home: &Path) -> DashboardSnapsho
     let capsules = list_capsules_for(home);
 
     let mut checks = vec![
-        daemon.clone(),
-        autostart.clone(),
         codex_hooks.clone(),
         codex_config.clone(),
         claude_settings.clone(),
@@ -764,6 +762,25 @@ mod tests {
         assert_eq!(snapshot.claude_settings.status, CheckStatus::Missing);
         assert_eq!(snapshot.ipc.status, CheckStatus::Missing);
         assert_eq!(snapshot.store.status, CheckStatus::Missing);
+    }
+
+    #[test]
+    fn dashboard_checks_hide_runtime_daemon_and_autostart_rows() {
+        let temp = tempfile::tempdir().unwrap();
+        let snapshot = dashboard_snapshot_for(temp.path(), temp.path());
+        let ids = snapshot
+            .checks
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(!ids.contains(&"daemon"));
+        assert!(!ids.contains(&"autostart"));
+        assert!(ids.contains(&"codex-hooks"));
+        assert!(ids.contains(&"codex-config"));
+        assert!(ids.contains(&"claude-settings"));
+        assert!(ids.contains(&"ipc"));
+        assert!(ids.contains(&"store"));
     }
 
     #[test]

@@ -16,15 +16,15 @@ automatic 5-hour threshold.
 When ai-handoff injects a five-hour threshold prompt, treat it as an interruption
 inside the current task, not as the task's end state.
 
-- If the user answers `Yes` / `네` / `はい` / `是`, write the capsule JSON to a
+- If the user answers `Yes` / `네` / `はい`, write the capsule JSON to a
   temporary file, run `ai-handoff checkpoint --agent <self> --file <path-to.json>`,
   report the saved checkpoint briefly, then resume the original work exactly
   where it stopped.
-- If the user answers `No` / `아니오` / `いいえ` / `否`, do not create a capsule;
+- If the user answers `No` / `아니오` / `いいえ`, do not create a capsule;
   resume the original work.
-- If the user answers `Other` / `기타` / `その他` / `其他`, follow the user's
-  free-text instruction. Create or skip the capsule as instructed, then resume
-  the original work.
+- If the user answers `Other` / `기타` / `その他`, follow the user's free-text
+  instruction. Create or skip the capsule as instructed, then resume the
+  original work.
 - In automatic mode, do not ask. Create the checkpoint from the current work
   state, then resume the original work.
 
@@ -34,15 +34,15 @@ inside the current task, not as the task's end state.
     aho checkpoint --agent <self> --file <path-to.json>
 
 Always pass `--agent` set to the agent you are: `claude-code` if you are Claude
-Code, `codex` if you are Codex. It sets the handoff direction (source → target).
+Code, `codex` if you are Codex. It sets the handoff direction (source -> target).
 Omitting it defaults the source to codex, which records the wrong direction when
 Claude Code runs the checkpoint.
 
 Always supply a JSON capsule body unless the user explicitly asks for a terse
 message-only checkpoint. Write the JSON to a file and pass `--file`, which is
-robust across shells. PowerShell does not pipe to a native
-executable's stdin, so `<json> | ai-handoff checkpoint` silently drops the body
-and only `--message` survives. On POSIX shells stdin still works.
+robust across shells. PowerShell does not pipe to a native executable's stdin,
+so `<json> | ai-handoff checkpoint` silently drops the body and only `--message`
+survives. On POSIX shells stdin still works.
 
 JSON fields (top level): `goal`, `done` (array), `remaining` (array),
 `risks` (array), `next_prompt` (string), optional `agent`. The daemon trims each
@@ -57,14 +57,15 @@ field using the shared config limits:
 Before writing the JSON, read `capsule.language` with
 `ai-handoff config get capsule.language` when practical. Write the natural
 language values in `goal`, `done`, `remaining`, `risks`, and `next_prompt` in
-that language: `ko`, `ja`, `zh`, or `en`. Keep JSON key names in English. If the
+that language: `ko`, `ja`, or `en`. Keep JSON key names in English. If the
 setting cannot be read, default to English. Existing capsules are not
 translated by the daemon.
 
-Invoke from the skill list as the handoff checkpoint entry. The user-facing command is
-`/handoff checkpoint <goal>`; create a short JSON file with non-empty fields when
-the information is available, run `ai-handoff checkpoint --agent <self> --file <path-to.json>`,
-and report the capsule ID on success. Use `--message` only when no done /
-remaining / risks / next_prompt detail is available.
+Invoke from the skill list as the handoff checkpoint entry. The user-facing
+command is `/handoff checkpoint <goal>`; create a short JSON file with non-empty
+fields when the information is available, run
+`ai-handoff checkpoint --agent <self> --file <path-to.json>`, and report the
+capsule ID on success. Use `--message` only when no done / remaining / risks /
+next_prompt detail is available.
 
 Never include secrets, credentials, or raw transcript text in the JSON or message.

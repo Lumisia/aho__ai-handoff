@@ -1,6 +1,6 @@
 # AI Handoff 상세 문서
 
-[English](README.md) | **한국어** | [日本語](README.ja.md) | [中文](README.zh.md)
+[English](README.md) | **한국어** | [日本語](README.ja.md)
 
 이 문서는 초보자용 README에서 의도적으로 줄인 자세한 내용을 설명합니다.
 

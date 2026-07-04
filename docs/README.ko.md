@@ -2,7 +2,7 @@
 
 # AI Handoff
 
-[English](../README.md) | **한국어** | [日本語](README.ja.md) | [中文](README.zh.md)
+[English](../README.md) | **한국어** | [日本語](README.ja.md)
 
 AI Handoff는 Claude Code와 Codex 사이에서 작업을 넘겨주는 로컬 우선 도구입니다.
 
@@ -75,7 +75,7 @@ Set-ExecutionPolicy Bypass -Scope Process -Force; & ([scriptblock]::Create((irm 
 반복 가능한 설치가 필요하면 릴리즈를 고정하세요:
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Lumisia/aho__ai-handoff/master/scripts/install.ps1))) -Yes -Version v2.0.14
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Lumisia/aho__ai-handoff/master/scripts/install.ps1))) -Yes -Version v2.0.15
 ```
 
 ### Shell Installer
@@ -157,7 +157,6 @@ AI Handoff는 로컬 홈 폴더 하나를 만듭니다.
 - [Advanced Guide](advanced/README.ko.md)
 - [English](../README.md)
 - [Japanese](README.ja.md)
-- [Chinese](README.zh.md)
 
 ## 라이선스
 

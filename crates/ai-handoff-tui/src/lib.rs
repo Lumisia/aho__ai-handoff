@@ -15,7 +15,7 @@ pub mod viewmodel;
 
 pub use app::App;
 
-// Load the shared workspace translations (en/ko/ja/zh) at compile time. The
+// Load the shared workspace translations (en/ko/ja) at compile time. The
 // active locale is global (rust_i18n::set_locale) and shared across crates.
 rust_i18n::i18n!("../../locales", fallback = "en");
 
