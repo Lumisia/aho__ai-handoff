@@ -1,6 +1,7 @@
 import type { CSSProperties } from "react";
 import type { Translator } from "../i18n";
 import type { UsageGroup, UsageReport } from "../types";
+import Isometric3DChart, { type IsoColumn } from "./Isometric3DChart";
 
 export type UsageBreakdownMode = "day" | "project" | "model" | "source";
 export type UsageChartView = "2d" | "3d";
@@ -85,7 +86,7 @@ function compareByTokens(view: UsageChartView) {
   };
 }
 
-function buildDayStacks(report: UsageReport, view: UsageChartView): DayStack[] {
+function buildDayStacks(report: UsageReport): DayStack[] {
   const byDay = new Map(report.by_day.map((group) => [group.key, group]));
   const byDaySource = new Map<string, ChartSegment[]>();
   for (const item of report.by_day_source) {
@@ -113,7 +114,8 @@ function buildDayStacks(report: UsageReport, view: UsageChartView): DayStack[] {
         segments,
       };
     })
-    .sort(compareByTokens(view));
+    // Daily view is a timeline: always chronological, never ranked by tokens.
+    .sort((a, b) => a.day.localeCompare(b.day));
 }
 
 function buildRankBars(report: UsageReport, mode: UsageBreakdownMode, view: UsageChartView): RankBar[] {
@@ -130,41 +132,25 @@ function buildRankBars(report: UsageReport, mode: UsageBreakdownMode, view: Usag
   return view === "3d" ? bars.slice(-14) : bars.slice(0, 14);
 }
 
-function DayChart({ stacks, view }: { stacks: DayStack[]; view: UsageChartView }) {
+function dayColumns(stacks: DayStack[]): IsoColumn[] {
+  return stacks.map((stack) => ({
+    id: stack.day,
+    label: shortDay(stack.day),
+    total: stack.total,
+    cost: stack.cost,
+    events: stack.events,
+    segments: stack.segments.map((segment) => ({
+      key: segment.key,
+      value: segment.tokens,
+      agent: segment.agent,
+    })),
+  }));
+}
+
+function DayChart({ stacks, view, t }: { stacks: DayStack[]; view: UsageChartView; t: Translator }) {
   const max = Math.max(0, ...stacks.map((stack) => stack.total));
   if (view === "3d") {
-    return (
-      <div className="token-plot token-plot-3d" aria-label="30 day token chart">
-        <div className="token-3d-grid">
-          {stacks.map((stack, index) => {
-            let offset = 0;
-            return (
-              <div className="token-3d-column" key={stack.day} title={`${stack.day} - ${formatTokens(stack.total)}`}>
-                {stack.segments.map((segment) => {
-                  const height = max > 0 ? Math.max(3, Math.round((segment.tokens / max) * 118)) : 0;
-                  const segmentOffset = offset;
-                  offset += height;
-                  return (
-                    <span
-                      className={`token-3d-segment ${segment.agent}`}
-                      key={`${stack.day}-${segment.key}`}
-                      style={
-                        {
-                          "--token-color": colorForAgent(segment.agent),
-                          "--token-delay": `${Math.min(index * 18, 360)}ms`,
-                          "--token-offset": `${segmentOffset}px`,
-                          height: `${height}px`,
-                        } as CSSProperties
-                      }
-                    />
-                  );
-                })}
-              </div>
-            );
-          })}
-        </div>
-      </div>
-    );
+    return <Isometric3DChart columns={dayColumns(stacks)} t={t} ariaLabel="30 day token chart" />;
   }
 
   return (
@@ -205,33 +191,21 @@ function DayChart({ stacks, view }: { stacks: DayStack[]; view: UsageChartView }
   );
 }
 
-function RankChart({ bars, view }: { bars: RankBar[]; view: UsageChartView }) {
+function rankColumns(bars: RankBar[]): IsoColumn[] {
+  return bars.map((bar) => ({
+    id: bar.key,
+    label: bar.key,
+    total: bar.tokens,
+    cost: bar.cost,
+    events: bar.events,
+    segments: [{ key: bar.key, value: bar.tokens, agent: bar.agent }],
+  }));
+}
+
+function RankChart({ bars, view, t }: { bars: RankBar[]; view: UsageChartView; t: Translator }) {
   const max = Math.max(0, ...bars.map((bar) => bar.tokens));
   if (view === "3d") {
-    return (
-      <div className="token-plot token-plot-3d compact-rank" aria-label="ranked token chart">
-        <div className="token-3d-grid rank-grid">
-          {bars.map((bar, index) => {
-            const height = max > 0 ? Math.max(5, Math.round((bar.tokens / max) * 118)) : 0;
-            return (
-              <div className="token-3d-column rank-column" key={bar.key} title={`${bar.key} - ${formatTokens(bar.tokens)}`}>
-                <span
-                  className={`token-3d-segment ${bar.agent}`}
-                  style={
-                    {
-                      "--token-color": colorForAgent(bar.agent),
-                      "--token-delay": `${Math.min(index * 24, 360)}ms`,
-                      "--token-offset": "0px",
-                      height: `${height}px`,
-                    } as CSSProperties
-                  }
-                />
-              </div>
-            );
-          })}
-        </div>
-      </div>
-    );
+    return <Isometric3DChart columns={rankColumns(bars)} t={t} ariaLabel="ranked token chart" />;
   }
 
   return (
@@ -276,7 +250,7 @@ export default function TokenUsageChart({
   onViewChange: (view: UsageChartView) => void;
   t: Translator;
 }) {
-  const dayStacks = buildDayStacks(report, view);
+  const dayStacks = buildDayStacks(report);
   const rankBars = buildRankBars(report, mode, view);
   const activeDays = dayStacks.filter((stack) => stack.total > 0).length;
   const monthTokens = dayStacks.reduce((sum, stack) => sum + stack.total, 0);
@@ -338,7 +312,11 @@ export default function TokenUsageChart({
       </div>
 
       {hasData ? (
-        mode === "day" ? <DayChart stacks={dayStacks} view={view} /> : <RankChart bars={rankBars} view={view} />
+        mode === "day" ? (
+          <DayChart stacks={dayStacks} view={view} t={t} />
+        ) : (
+          <RankChart bars={rankBars} view={view} t={t} />
+        )
       ) : (
         <div className="empty token-chart-empty">{t("chartEmpty")}</div>
       )}
