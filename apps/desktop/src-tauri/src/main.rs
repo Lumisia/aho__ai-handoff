@@ -283,16 +283,18 @@ async fn read_logs() -> Result<Vec<LogFile>, String> {
 }
 
 #[tauri::command]
-async fn get_usage_report() -> Result<UsageReport, String> {
-    blocking_command("get_usage_report", || {
+async fn get_usage_report(days: Option<i64>) -> Result<UsageReport, String> {
+    let window_days = days.unwrap_or(DAY_BREAKDOWN_WINDOW_DAYS);
+    blocking_command("get_usage_report", move || {
         let mut cache = USAGE_SCAN_CACHE
             .get_or_init(|| Mutex::new(ai_handoff_usage::ScanCache::default()))
             .lock()
             .map_err(|_| "usage cache lock poisoned".to_string())?;
         let roots = ai_handoff_usage::default_roots();
-        Ok(usage_report_from_events(&ai_handoff_usage::scan_cached(
-            &roots, &mut cache,
-        )))
+        Ok(usage_report_from_events(
+            &ai_handoff_usage::scan_cached(&roots, &mut cache),
+            window_days,
+        ))
     })
     .await
 }
@@ -871,15 +873,18 @@ fn split_items(value: &str) -> Vec<String> {
         .collect()
 }
 
-fn usage_report_from_events(events: &[UsageEvent]) -> UsageReport {
-    usage_report_from_events_for_today(events, chrono::Local::now().date_naive())
+fn usage_report_from_events(events: &[UsageEvent], window_days: i64) -> UsageReport {
+    usage_report_from_events_for_today(events, chrono::Local::now().date_naive(), window_days)
 }
 
 fn usage_report_from_events_for_today(
     events: &[UsageEvent],
     today: chrono::NaiveDate,
+    window_days: i64,
 ) -> UsageReport {
-    let since = today - chrono::Duration::days(DAY_BREAKDOWN_WINDOW_DAYS - 1);
+    // Clamp to a sane range: the GUI offers 30 / 90 / 365-day windows.
+    let window_days = window_days.clamp(1, 730);
+    let since = today - chrono::Duration::days(window_days - 1);
     let since = since.format("%Y-%m-%d").to_string();
     let through = today.format("%Y-%m-%d").to_string();
     let recent_events = events
@@ -894,7 +899,7 @@ fn usage_report_from_events_for_today(
         .into_iter()
         .map(|group| (group.key.clone(), group))
         .collect::<std::collections::HashMap<_, _>>();
-    let by_day = (0..DAY_BREAKDOWN_WINDOW_DAYS)
+    let by_day = (0..window_days)
         .map(|offset| {
             let key = (today - chrono::Duration::days(offset))
                 .format("%Y-%m-%d")
@@ -908,7 +913,7 @@ fn usage_report_from_events_for_today(
             }))
         })
         .collect();
-    let by_day_source = (0..DAY_BREAKDOWN_WINDOW_DAYS)
+    let by_day_source = (0..window_days)
         .flat_map(|offset| {
             let day = (today - chrono::Duration::days(offset))
                 .format("%Y-%m-%d")
@@ -2102,6 +2107,7 @@ mod tests {
         let report = usage_report_from_events_for_today(
             &events,
             chrono::NaiveDate::from_ymd_opt(2026, 6, 30).unwrap(),
+            DAY_BREAKDOWN_WINDOW_DAYS,
         );
 
         assert_eq!(report.by_day.len(), 30);

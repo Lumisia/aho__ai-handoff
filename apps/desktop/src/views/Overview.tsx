@@ -1,6 +1,11 @@
 import { useEffect, useState } from "react";
 import { getAccountReport, getUsageReport } from "../api";
-import TokenUsageChart, { type UsageBreakdownMode, type UsageChartView } from "../components/TokenUsageChart";
+import TokenUsageChart, {
+  periodDays,
+  type UsageBreakdownMode,
+  type UsageChartView,
+  type UsagePeriod,
+} from "../components/TokenUsageChart";
 import type { AccountReport, AccountWindow, CheckRow, DashboardSnapshot, UsageReport } from "../types";
 import type { Translator } from "../i18n";
 
@@ -67,6 +72,7 @@ export default function Overview({ snapshot, t }: { snapshot: DashboardSnapshot;
   const [loadingUsage, setLoadingUsage] = useState(true);
   const [usageMode, setUsageMode] = useState<UsageBreakdownMode>("day");
   const [usageView, setUsageView] = useState<UsageChartView>("3d");
+  const [usagePeriod, setUsagePeriod] = useState<UsagePeriod>("month");
 
   useEffect(() => {
     // force: query the active saved slot's own usage so the overview shows the
@@ -76,12 +82,15 @@ export default function Overview({ snapshot, t }: { snapshot: DashboardSnapshot;
       .then(setAccounts)
       .catch(() => setAccounts(null))
       .finally(() => setLoadingAccounts(false));
+  }, []);
 
-    getUsageReport()
+  useEffect(() => {
+    setLoadingUsage(true);
+    getUsageReport({ days: periodDays(usagePeriod) })
       .then(setUsage)
       .catch(() => setUsage(null))
       .finally(() => setLoadingUsage(false));
-  }, []);
+  }, [usagePeriod]);
 
   const topRows = [
     snapshot.codex_hooks,
@@ -114,8 +123,10 @@ export default function Overview({ snapshot, t }: { snapshot: DashboardSnapshot;
             report={usage}
             mode={usageMode}
             view={usageView}
+            period={usagePeriod}
             onModeChange={setUsageMode}
             onViewChange={setUsageView}
+            onPeriodChange={setUsagePeriod}
             t={t}
           />
         )}

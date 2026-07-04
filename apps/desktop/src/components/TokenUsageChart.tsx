@@ -1,10 +1,11 @@
 import type { CSSProperties } from "react";
 import type { Translator } from "../i18n";
 import type { UsageGroup, UsageReport } from "../types";
-import Isometric3DChart, { type IsoColumn } from "./Isometric3DChart";
+import Contribution3DChart, { type IsoCell } from "./Contribution3DChart";
 
 export type UsageBreakdownMode = "day" | "project" | "model" | "source";
 export type UsageChartView = "2d" | "3d";
+export type UsagePeriod = "month" | "quarter" | "year";
 
 export const usageBreakdownModes: Array<{ id: UsageBreakdownMode; labelKey: string }> = [
   { id: "day", labelKey: "day" },
@@ -12,6 +13,28 @@ export const usageBreakdownModes: Array<{ id: UsageBreakdownMode; labelKey: stri
   { id: "model", labelKey: "model" },
   { id: "source", labelKey: "source" },
 ];
+
+export const usagePeriods: Array<{
+  id: UsagePeriod;
+  labelKey: string;
+  windowKey: string;
+  days: number;
+}> = [
+  { id: "month", labelKey: "period1m", windowKey: "window1m", days: 30 },
+  { id: "quarter", labelKey: "period3m", windowKey: "window3m", days: 90 },
+  { id: "year", labelKey: "period1y", windowKey: "window1y", days: 365 },
+];
+
+export function periodDays(period: UsagePeriod): number {
+  return usagePeriods.find((p) => p.id === period)?.days ?? 30;
+}
+
+interface IsoGrid {
+  cells: IsoCell[];
+  cols: number;
+  rows: number;
+  maxTokens: number;
+}
 
 interface ChartSegment {
   key: string;
@@ -132,30 +155,85 @@ function buildRankBars(report: UsageReport, mode: UsageBreakdownMode, view: Usag
   return view === "3d" ? bars.slice(-14) : bars.slice(0, 14);
 }
 
-function dayColumns(stacks: DayStack[]): IsoColumn[] {
-  return stacks.map((stack) => ({
-    id: stack.day,
-    label: shortDay(stack.day),
-    total: stack.total,
-    cost: stack.cost,
-    events: stack.events,
-    segments: stack.segments.map((segment) => ({
-      key: segment.key,
-      value: segment.tokens,
-      agent: segment.agent,
-    })),
-  }));
+function parseDay(day: string): Date {
+  const [y, m, d] = day.split("-").map(Number);
+  return new Date(y, (m ?? 1) - 1, d ?? 1);
+}
+
+function isoDay(date: Date): string {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+function addDays(date: Date, n: number): Date {
+  const c = new Date(date);
+  c.setDate(c.getDate() + n);
+  return c;
+}
+
+function diffDays(a: Date, b: Date): number {
+  return Math.round((a.getTime() - b.getTime()) / 86_400_000);
+}
+
+// GitHub-style calendar: 7 rows (Sun..Sat), one column per week. Days with no
+// usage stay as flat floor tiles; active days rise as agent-stacked cubes.
+function dayCalendar(stacks: DayStack[]): IsoGrid {
+  if (stacks.length === 0) return { cells: [], cols: 0, rows: 7, maxTokens: 0 };
+  const byDay = new Map(stacks.map((stack) => [stack.day, stack]));
+  const earliest = parseDay(stacks[0].day);
+  const latest = parseDay(stacks[stacks.length - 1].day);
+  const start = addDays(earliest, -earliest.getDay()); // Sunday on/before earliest
+  const cols = Math.floor(diffDays(latest, start) / 7) + 1;
+  const cells: IsoCell[] = [];
+  let maxTokens = 0;
+  for (let col = 0; col < cols; col++) {
+    for (let row = 0; row < 7; row++) {
+      const date = addDays(start, col * 7 + row);
+      const key = isoDay(date);
+      const stack = byDay.get(key);
+      const total = stack?.total ?? 0;
+      if (total > maxTokens) maxTokens = total;
+      cells.push({
+        col,
+        row,
+        label: shortDay(key),
+        total,
+        cost: stack?.cost ?? 0,
+        events: stack?.events ?? 0,
+        segments: (stack?.segments ?? []).map((segment) => ({
+          key: segment.key,
+          value: segment.tokens,
+          agent: segment.agent,
+        })),
+      });
+    }
+  }
+  return { cells, cols, rows: 7, maxTokens };
 }
 
 function DayChart({ stacks, view, t }: { stacks: DayStack[]; view: UsageChartView; t: Translator }) {
   const max = Math.max(0, ...stacks.map((stack) => stack.total));
   if (view === "3d") {
-    return <Isometric3DChart columns={dayColumns(stacks)} t={t} ariaLabel="30 day token chart" />;
+    const grid = dayCalendar(stacks);
+    return (
+      <Contribution3DChart
+        cells={grid.cells}
+        cols={grid.cols}
+        rows={grid.rows}
+        maxTokens={grid.maxTokens}
+        t={t}
+      />
+    );
   }
 
   return (
-    <div className="token-plot token-plot-2d" aria-label="30 day token chart">
-      <div className="token-2d-bars">
+    <div className="token-plot token-plot-2d" aria-label="daily token chart">
+      <div
+        className="token-2d-bars"
+        style={{ gridTemplateColumns: `repeat(${Math.max(stacks.length, 1)}, minmax(0, 1fr))` }}
+      >
         {stacks.map((stack, index) => {
           const height = max > 0 ? Math.max(3, Math.round((stack.total / max) * 100)) : 0;
           return (
@@ -191,21 +269,32 @@ function DayChart({ stacks, view, t }: { stacks: DayStack[]; view: UsageChartVie
   );
 }
 
-function rankColumns(bars: RankBar[]): IsoColumn[] {
-  return bars.map((bar) => ({
-    id: bar.key,
+function rankGrid(bars: RankBar[]): IsoGrid {
+  const cells: IsoCell[] = bars.map((bar, index) => ({
+    col: index,
+    row: 0,
     label: bar.key,
     total: bar.tokens,
     cost: bar.cost,
     events: bar.events,
     segments: [{ key: bar.key, value: bar.tokens, agent: bar.agent }],
   }));
+  return { cells, cols: cells.length, rows: 1, maxTokens: Math.max(0, ...bars.map((b) => b.tokens)) };
 }
 
 function RankChart({ bars, view, t }: { bars: RankBar[]; view: UsageChartView; t: Translator }) {
   const max = Math.max(0, ...bars.map((bar) => bar.tokens));
   if (view === "3d") {
-    return <Isometric3DChart columns={rankColumns(bars)} t={t} ariaLabel="ranked token chart" />;
+    const grid = rankGrid(bars);
+    return (
+      <Contribution3DChart
+        cells={grid.cells}
+        cols={grid.cols}
+        rows={grid.rows}
+        maxTokens={grid.maxTokens}
+        t={t}
+      />
+    );
   }
 
   return (
@@ -239,17 +328,22 @@ export default function TokenUsageChart({
   report,
   mode,
   view,
+  period,
   onModeChange,
   onViewChange,
+  onPeriodChange,
   t,
 }: {
   report: UsageReport;
   mode: UsageBreakdownMode;
   view: UsageChartView;
+  period: UsagePeriod;
   onModeChange: (mode: UsageBreakdownMode) => void;
   onViewChange: (view: UsageChartView) => void;
+  onPeriodChange: (period: UsagePeriod) => void;
   t: Translator;
 }) {
+  const windowLabel = t(usagePeriods.find((p) => p.id === period)?.windowKey ?? "window1m");
   const dayStacks = buildDayStacks(report);
   const rankBars = buildRankBars(report, mode, view);
   const activeDays = dayStacks.filter((stack) => stack.total > 0).length;
@@ -264,9 +358,20 @@ export default function TokenUsageChart({
   return (
     <section className="token-usage-card">
       <div className="token-chart-head">
-        <div>
+        <div className="token-chart-title">
           <h3>{t("tokenUsage")}</h3>
-          <span>{mode === "day" ? t("monthWindow") : t(mode)}</span>
+          <span>{windowLabel}</span>
+          <div className="segmented token-period-tabs" aria-label={windowLabel}>
+            {usagePeriods.map((item) => (
+              <button
+                key={item.id}
+                className={period === item.id ? "active" : ""}
+                onClick={() => onPeriodChange(item.id)}
+              >
+                {t(item.labelKey)}
+              </button>
+            ))}
+          </div>
         </div>
         <div className="token-chart-controls">
           <div className="segmented token-category-tabs" aria-label={t("breakdown")}>

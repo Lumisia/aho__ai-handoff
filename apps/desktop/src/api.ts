@@ -16,8 +16,8 @@ import type {
   UsageReport,
 } from "./types";
 
-let usageReportCache: UsageReport | null = null;
-let usageReportPromise: Promise<UsageReport> | null = null;
+const usageReportCache = new Map<number, UsageReport>();
+const usageReportPromises = new Map<number, Promise<UsageReport>>();
 let accountReportCache: AccountReport | null = null;
 let accountReportPromise: Promise<AccountReport> | null = null;
 let configRowsCache: ConfigRow[] | null = null;
@@ -93,18 +93,26 @@ export function readLogs(options: { force?: boolean } = {}): Promise<LogFile[]> 
   return logsPromise;
 }
 
-export function getUsageReport(options: { force?: boolean } = {}): Promise<UsageReport> {
-  if (!options.force && usageReportCache) return Promise.resolve(usageReportCache);
-  if (!options.force && usageReportPromise) return usageReportPromise;
-  usageReportPromise = invoke<UsageReport>("get_usage_report")
+export function getUsageReport(
+  options: { force?: boolean; days?: number } = {},
+): Promise<UsageReport> {
+  const days = options.days ?? 30;
+  if (!options.force) {
+    const cached = usageReportCache.get(days);
+    if (cached) return Promise.resolve(cached);
+    const inflight = usageReportPromises.get(days);
+    if (inflight) return inflight;
+  }
+  const promise = invoke<UsageReport>("get_usage_report", { days })
     .then((report) => {
-      usageReportCache = report;
+      usageReportCache.set(days, report);
       return report;
     })
     .finally(() => {
-      usageReportPromise = null;
+      usageReportPromises.delete(days);
     });
-  return usageReportPromise;
+  usageReportPromises.set(days, promise);
+  return promise;
 }
 
 function cacheAccountReport(report: AccountReport) {

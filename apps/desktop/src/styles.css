@@ -1215,6 +1215,17 @@ button.table-row.active code {
   font-size: 12px;
 }
 
+.token-chart-title {
+  display: grid;
+  gap: 6px;
+  align-content: start;
+}
+
+.token-period-tabs {
+  width: fit-content;
+  margin-top: 2px;
+}
+
 .token-chart-controls {
   display: flex;
   align-items: center;
@@ -1223,7 +1234,8 @@ button.table-row.active code {
 }
 
 .token-category-tabs button,
-.token-view-tabs button {
+.token-view-tabs button,
+.token-period-tabs button {
   padding: 5px 9px;
   font-size: 12px;
   font-weight: 650;
@@ -1350,13 +1362,44 @@ button.table-row.active code {
   overflow: hidden;
 }
 
-.token-iso-canvas {
+.token-iso canvas {
   display: block;
+  outline: none;
+  touch-action: none;
+}
+
+.token-iso-actions {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
+  display: flex;
+  gap: 6px;
+}
+
+.token-iso-btn {
+  border: 1px solid var(--border-color);
+  background: var(--panel-bg-color);
+  color: var(--muted-color);
+  border-radius: 5px;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.token-iso-btn:hover {
+  border-color: var(--border-strong-color);
+}
+
+.token-iso-btn.primary {
+  background: color-mix(in srgb, var(--panel-bg-color) 82%, transparent);
+  font-weight: 650;
 }
 
 .token-iso-tip {
-  position: absolute;
-  z-index: 3;
+  position: fixed;
+  z-index: 60;
   display: grid;
   gap: 3px;
   padding: 8px 10px;

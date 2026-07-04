@@ -6,9 +6,11 @@ import TokenUsageChart, {
   agentForKey,
   formatCost,
   formatTokens,
+  periodDays,
   rowsForUsageMode,
   type UsageBreakdownMode,
   type UsageChartView,
+  type UsagePeriod,
 } from "../components/TokenUsageChart";
 import type { UsageGroup, UsageReport } from "../types";
 import type { Translator } from "../i18n";
@@ -56,18 +58,20 @@ export default function Usage({ t }: { t: Translator }) {
   const [report, setReport] = useState<UsageReport | null>(null);
   const [mode, setMode] = useState<UsageBreakdownMode>("day");
   const [chartView, setChartView] = useState<UsageChartView>("3d");
+  const [period, setPeriod] = useState<UsagePeriod>("month");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     void loadUsage(false);
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [period]);
 
   async function loadUsage(force: boolean) {
     setLoading(true);
     setError(null);
     try {
-      setReport(await getUsageReport({ force }));
+      setReport(await getUsageReport({ force, days: periodDays(period) }));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -79,7 +83,8 @@ export default function Usage({ t }: { t: Translator }) {
     if (!report) return [];
     const base = rowsForUsageMode(report, mode);
     if (mode === "day") return base;
-    return [...base].sort((a, b) => a.tokens.total - b.tokens.total || a.key.localeCompare(b.key));
+    // Project / model / source: rank highest usage first.
+    return [...base].sort((a, b) => b.tokens.total - a.tokens.total || a.key.localeCompare(b.key));
   }, [mode, report]);
   const max = useMemo(() => Math.max(0, ...rows.map((row) => row.tokens.total)), [rows]);
 
@@ -115,8 +120,10 @@ export default function Usage({ t }: { t: Translator }) {
         report={report}
         mode={mode}
         view={chartView}
+        period={period}
         onModeChange={setMode}
         onViewChange={setChartView}
+        onPeriodChange={setPeriod}
         t={t}
       />
       <section className="panel">
