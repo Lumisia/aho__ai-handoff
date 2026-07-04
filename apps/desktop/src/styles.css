@@ -1345,7 +1345,8 @@ button.table-row.active code {
   position: relative;
   min-height: 210px;
   padding: 10px;
-  perspective: 720px;
+  perspective: 820px;
+  overflow: hidden;
 }
 
 .token-plot-3d::before {
@@ -1372,9 +1373,10 @@ button.table-row.active code {
   align-items: flex-end;
   justify-content: center;
   gap: 7px;
-  height: 172px;
-  margin: 20px auto 0;
-  transform: rotateX(58deg) rotateZ(-36deg);
+  height: 56px;
+  margin: 96px auto 0;
+  transform: rotateX(61deg) rotateZ(-36deg);
+  transform-origin: center bottom;
   transform-style: preserve-3d;
 }
 
@@ -1384,9 +1386,11 @@ button.table-row.active code {
 
 .token-3d-column {
   display: flex;
-  flex-direction: column-reverse;
-  justify-content: flex-start;
+  align-items: flex-end;
+  justify-content: center;
+  position: relative;
   width: 12px;
+  height: 1px;
   transform-style: preserve-3d;
 }
 
@@ -1395,14 +1399,17 @@ button.table-row.active code {
 }
 
 .token-3d-segment {
-  position: relative;
+  position: absolute;
+  bottom: 0;
+  left: 0;
   display: block;
   width: 100%;
   min-height: 3px;
   background: var(--token-color);
   box-shadow: inset -2px 0 color-mix(in srgb, #000 20%, transparent);
-  transform: translateZ(0) scaleY(0);
-  transform-origin: bottom;
+  transform: translateZ(var(--token-offset, 0px)) rotateX(-90deg) scaleY(0);
+  transform-origin: bottom center;
+  transform-style: preserve-3d;
   animation: token-rise-3d 620ms cubic-bezier(.2, .75, .2, 1) forwards;
   animation-delay: var(--token-delay, 0ms);
 }
@@ -1536,10 +1543,10 @@ button.table-row.active code {
 
 @keyframes token-rise-3d {
   from {
-    transform: translateZ(0) scaleY(0);
+    transform: translateZ(var(--token-offset, 0px)) rotateX(-90deg) scaleY(0);
   }
   to {
-    transform: translateZ(0) scaleY(1);
+    transform: translateZ(var(--token-offset, 0px)) rotateX(-90deg) scaleY(1);
   }
 }
 

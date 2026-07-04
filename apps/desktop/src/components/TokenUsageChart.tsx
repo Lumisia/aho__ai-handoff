@@ -76,7 +76,16 @@ function shortDay(day: string) {
   return month && date ? `${month}.${date}` : day;
 }
 
-function buildDayStacks(report: UsageReport): DayStack[] {
+function compareByTokens(view: UsageChartView) {
+  return (a: { key?: string; total?: number; tokens?: number }, b: { key?: string; total?: number; tokens?: number }) => {
+    const aTokens = a.total ?? a.tokens ?? 0;
+    const bTokens = b.total ?? b.tokens ?? 0;
+    const tokenDelta = view === "2d" ? bTokens - aTokens : aTokens - bTokens;
+    return tokenDelta || (a.key ?? "").localeCompare(b.key ?? "");
+  };
+}
+
+function buildDayStacks(report: UsageReport, view: UsageChartView): DayStack[] {
   const byDay = new Map(report.by_day.map((group) => [group.key, group]));
   const byDaySource = new Map<string, ChartSegment[]>();
   for (const item of report.by_day_source) {
@@ -91,7 +100,6 @@ function buildDayStacks(report: UsageReport): DayStack[] {
 
   return report.by_day
     .slice()
-    .reverse()
     .map((group) => {
       const segments = (byDaySource.get(group.key) ?? [])
         .filter((segment) => segment.tokens > 0)
@@ -104,11 +112,12 @@ function buildDayStacks(report: UsageReport): DayStack[] {
         events: day.events,
         segments,
       };
-    });
+    })
+    .sort(compareByTokens(view));
 }
 
-function buildRankBars(report: UsageReport, mode: UsageBreakdownMode): RankBar[] {
-  return rowsForUsageMode(report, mode)
+function buildRankBars(report: UsageReport, mode: UsageBreakdownMode, view: UsageChartView): RankBar[] {
+  const bars = rowsForUsageMode(report, mode)
     .filter((group) => group.tokens.total > 0)
     .map((group) => ({
       key: group.key,
@@ -117,8 +126,8 @@ function buildRankBars(report: UsageReport, mode: UsageBreakdownMode): RankBar[]
       events: group.events,
       agent: agentForKey(group.key),
     }))
-    .sort((a, b) => a.tokens - b.tokens || a.key.localeCompare(b.key))
-    .slice(-14);
+    .sort(compareByTokens(view));
+  return view === "3d" ? bars.slice(-14) : bars.slice(0, 14);
 }
 
 function DayChart({ stacks, view }: { stacks: DayStack[]; view: UsageChartView }) {
@@ -127,26 +136,32 @@ function DayChart({ stacks, view }: { stacks: DayStack[]; view: UsageChartView }
     return (
       <div className="token-plot token-plot-3d" aria-label="30 day token chart">
         <div className="token-3d-grid">
-          {stacks.map((stack, index) => (
-            <div className="token-3d-column" key={stack.day} title={`${stack.day} - ${formatTokens(stack.total)}`}>
-              {stack.segments.map((segment) => {
-                const height = max > 0 ? Math.max(3, Math.round((segment.tokens / max) * 118)) : 0;
-                return (
-                  <span
-                    className={`token-3d-segment ${segment.agent}`}
-                    key={`${stack.day}-${segment.key}`}
-                    style={
-                      {
-                        "--token-color": colorForAgent(segment.agent),
-                        "--token-delay": `${Math.min(index * 18, 360)}ms`,
-                        height: `${height}px`,
-                      } as CSSProperties
-                    }
-                  />
-                );
-              })}
-            </div>
-          ))}
+          {stacks.map((stack, index) => {
+            let offset = 0;
+            return (
+              <div className="token-3d-column" key={stack.day} title={`${stack.day} - ${formatTokens(stack.total)}`}>
+                {stack.segments.map((segment) => {
+                  const height = max > 0 ? Math.max(3, Math.round((segment.tokens / max) * 118)) : 0;
+                  const segmentOffset = offset;
+                  offset += height;
+                  return (
+                    <span
+                      className={`token-3d-segment ${segment.agent}`}
+                      key={`${stack.day}-${segment.key}`}
+                      style={
+                        {
+                          "--token-color": colorForAgent(segment.agent),
+                          "--token-delay": `${Math.min(index * 18, 360)}ms`,
+                          "--token-offset": `${segmentOffset}px`,
+                          height: `${height}px`,
+                        } as CSSProperties
+                      }
+                    />
+                  );
+                })}
+              </div>
+            );
+          })}
         </div>
       </div>
     );
@@ -206,6 +221,7 @@ function RankChart({ bars, view }: { bars: RankBar[]; view: UsageChartView }) {
                     {
                       "--token-color": colorForAgent(bar.agent),
                       "--token-delay": `${Math.min(index * 24, 360)}ms`,
+                      "--token-offset": "0px",
                       height: `${height}px`,
                     } as CSSProperties
                   }
@@ -260,8 +276,8 @@ export default function TokenUsageChart({
   onViewChange: (view: UsageChartView) => void;
   t: Translator;
 }) {
-  const dayStacks = buildDayStacks(report);
-  const rankBars = buildRankBars(report, mode);
+  const dayStacks = buildDayStacks(report, view);
+  const rankBars = buildRankBars(report, mode, view);
   const activeDays = dayStacks.filter((stack) => stack.total > 0).length;
   const monthTokens = dayStacks.reduce((sum, stack) => sum + stack.total, 0);
   const monthCost = dayStacks.reduce((sum, stack) => sum + stack.cost, 0);
