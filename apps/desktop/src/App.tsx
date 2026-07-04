@@ -99,14 +99,68 @@ function hexLuminance(value?: string | null) {
   return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
 }
 
-function isDarkGuiTheme(theme: ThemeReport | null) {
-  if (!theme) return false;
-  if (theme.preset === "dark" || theme.preset === "dark_green") return true;
-  if (theme.preset === "white") return false;
-  const appLuminance = hexLuminance(theme.app_bg_color);
-  const panelLuminance = hexLuminance(theme.panel_bg_color);
-  const surface = appLuminance ?? panelLuminance;
-  return surface !== null && surface < 0.18;
+interface ResolvedThemeColors {
+  focus_border_color: string;
+  selection_bg_color: string;
+  selection_fg_color: string;
+  app_bg_color: string;
+  sidebar_bg_color: string;
+  panel_bg_color: string;
+  text_color: string;
+  codex_color: string;
+  claude_color: string;
+}
+
+function isDarkColors(colors: ResolvedThemeColors) {
+  const surface = hexLuminance(colors.app_bg_color) ?? hexLuminance(colors.panel_bg_color);
+  return surface !== null && surface < 0.35;
+}
+
+/// Resolve which catalog theme is active given the mode and the OS preference,
+/// then hand back its colors. "custom" uses the config's own color fields.
+function resolveTheme(
+  theme: ThemeReport | null,
+  osDark: boolean,
+): { colors: ResolvedThemeColors; dark: boolean } | null {
+  if (!theme) return null;
+  const custom: ResolvedThemeColors = {
+    focus_border_color: theme.focus_border_color,
+    selection_bg_color: theme.selection_bg_color,
+    selection_fg_color: theme.selection_fg_color,
+    app_bg_color: theme.app_bg_color,
+    sidebar_bg_color: theme.sidebar_bg_color,
+    panel_bg_color: theme.panel_bg_color,
+    text_color: theme.text_color,
+    codex_color: theme.codex_color,
+    claude_color: theme.claude_color,
+  };
+  const activeId =
+    theme.mode === "light"
+      ? theme.light_theme
+      : theme.mode === "dark"
+        ? theme.dark_theme
+        : osDark
+          ? theme.dark_theme
+          : theme.light_theme;
+  if (activeId === "custom") {
+    return { colors: custom, dark: isDarkColors(custom) };
+  }
+  const entry = theme.catalog.find((item) => item.id === activeId);
+  if (!entry) return { colors: custom, dark: isDarkColors(custom) };
+  return {
+    colors: {
+      focus_border_color: entry.focus_border_color,
+      selection_bg_color: entry.selection_bg_color,
+      selection_fg_color: entry.selection_fg_color,
+      app_bg_color: entry.app_bg_color,
+      sidebar_bg_color: entry.sidebar_bg_color,
+      panel_bg_color: entry.panel_bg_color,
+      text_color: entry.text_color,
+      codex_color: entry.codex_color,
+      claude_color: entry.claude_color,
+    },
+    dark: entry.dark,
+  };
 }
 
 function shortDate(value: string) {
@@ -543,6 +597,9 @@ export default function App() {
   const [capsuleMenu, setCapsuleMenu] = useState<CapsuleContextMenuState | null>(null);
   const [titleStatus, setTitleStatus] = useState<string | null>(null);
   const [titlebarLogin, setTitlebarLogin] = useState<AccountLoginSession | null>(null);
+  const [osDark, setOsDark] = useState(
+    () => window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false,
+  );
   const refreshSeq = useRef(0);
   const seededProjectRef = useRef(false);
   const sidebarDragOffset = useRef(0);
@@ -584,6 +641,15 @@ export default function App() {
 
   useEffect(() => {
     void refresh();
+  }, []);
+
+  // Track the OS light/dark preference so "system" mode auto-switches themes.
+  useEffect(() => {
+    const mq = window.matchMedia?.("(prefers-color-scheme: dark)");
+    if (!mq) return;
+    const handler = (event: MediaQueryListEvent) => setOsDark(event.matches);
+    mq.addEventListener("change", handler);
+    return () => mq.removeEventListener("change", handler);
   }, []);
 
   useEffect(() => {
@@ -764,24 +830,27 @@ export default function App() {
     });
   }
 
+  const resolvedTheme = resolveTheme(theme, osDark);
   const themeStyle = {
     "--sidebar-width": `${sidebarWidth}px`,
-    ...(theme
+    ...(resolvedTheme
       ? {
-          "--focus-border-color": theme.focus_border_color,
-          "--selection-bg-color": theme.selection_bg_color,
-          "--selection-fg-color": theme.selection_fg_color,
-          "--app-bg-color": theme.app_bg_color,
-          "--sidebar-bg-color": theme.sidebar_bg_color,
-          "--panel-bg-color": theme.panel_bg_color,
-          "--text-color": theme.text_color,
+          "--focus-border-color": resolvedTheme.colors.focus_border_color,
+          "--selection-bg-color": resolvedTheme.colors.selection_bg_color,
+          "--selection-fg-color": resolvedTheme.colors.selection_fg_color,
+          "--app-bg-color": resolvedTheme.colors.app_bg_color,
+          "--sidebar-bg-color": resolvedTheme.colors.sidebar_bg_color,
+          "--panel-bg-color": resolvedTheme.colors.panel_bg_color,
+          "--text-color": resolvedTheme.colors.text_color,
+          "--agent-codex-color": resolvedTheme.colors.codex_color,
+          "--agent-claude-color": resolvedTheme.colors.claude_color,
         }
       : {}),
   } as CSSProperties;
 
   const pageTitle =
     active === "capsules" ? t("capsules") : t(navTabs.find((tab) => tab.id === active)?.labelKey ?? "overview");
-  const guiDark = isDarkGuiTheme(theme);
+  const guiDark = resolvedTheme?.dark ?? false;
 
   return (
     <div

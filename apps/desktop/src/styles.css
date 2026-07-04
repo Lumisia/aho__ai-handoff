@@ -1247,6 +1247,22 @@ button.table-row.active code {
   white-space: nowrap;
 }
 
+/* Percent + reset time stacked to the RIGHT of the bar (not below the row). */
+.limit-right {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+}
+.limit-reset {
+  color: var(--subtle-color);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.limit-reset:empty {
+  display: none;
+}
+
 .overview-status-list {
   display: grid;
   border: 1px solid var(--border-color);
@@ -1429,6 +1445,21 @@ button.table-row.active code {
   font-size: 12px;
   text-align: right;
   white-space: nowrap;
+}
+
+.account-limit-row .limit-right {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+}
+.account-limit-row .limit-reset {
+  color: var(--subtle-color);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.account-limit-row .limit-reset:empty {
+  display: none;
 }
 
 .account-limit-row.codex .usage-bar span {
@@ -2820,4 +2851,164 @@ body {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+
+/* --- Theme settings panel ------------------------------------------------ */
+.theme-panel {
+  display: grid;
+  gap: 22px;
+  max-width: 720px;
+}
+
+.theme-section {
+  display: grid;
+  gap: 10px;
+}
+
+.theme-section-head {
+  display: grid;
+  gap: 2px;
+}
+.theme-section-head strong {
+  font-size: 14px;
+  font-weight: 600;
+}
+.theme-section-head span {
+  color: var(--muted-color);
+  font-size: 12px;
+}
+
+.theme-mode-toggle {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--soft-bg-color);
+  width: fit-content;
+}
+.theme-mode-btn {
+  border: none;
+  background: transparent;
+  color: var(--muted-color);
+  padding: 6px 18px;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.theme-mode-btn:hover:not(:disabled) {
+  color: var(--text-color);
+}
+.theme-mode-btn.active {
+  background: var(--panel-bg-color);
+  color: var(--text-color);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
+}
+
+.theme-slot-row {
+  display: flex;
+  align-items: end;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+.theme-slot {
+  display: grid;
+  gap: 3px;
+}
+.theme-slot small {
+  color: var(--muted-color);
+  font-size: 12px;
+}
+.theme-slot code {
+  font-size: 13px;
+  color: var(--text-color);
+}
+
+.theme-detail-table {
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+/* --- Theme gallery modal ------------------------------------------------- */
+.theme-gallery-modal {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  width: min(920px, calc(100vw - 40px));
+  height: min(680px, calc(100vh - 78px));
+  border: 1px solid var(--border-strong-color);
+  border-radius: 10px;
+  background: var(--app-bg-color);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.32);
+  overflow: hidden;
+}
+.theme-gallery-body {
+  overflow: auto;
+  padding: 18px 22px 24px;
+  display: grid;
+  gap: 24px;
+}
+.theme-gallery-section h4 {
+  margin: 0 0 10px;
+  font-size: 13px;
+  color: var(--muted-color);
+  font-weight: 600;
+}
+.theme-gallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 12px;
+}
+.theme-card {
+  display: grid;
+  gap: 0;
+  padding: 0;
+  border: 2px solid var(--border-color);
+  border-radius: 9px;
+  overflow: hidden;
+  cursor: pointer;
+  text-align: left;
+}
+.theme-card:hover {
+  border-color: var(--border-strong-color);
+}
+.theme-card.active {
+  border-width: 2px;
+}
+.theme-card-preview {
+  height: 70px;
+  padding: 12px 12px 0;
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  position: relative;
+}
+.theme-card-bar {
+  height: 6px;
+  width: 62%;
+  border-radius: 3px;
+}
+.theme-card-bar.short {
+  width: 40%;
+}
+.theme-card-pill {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  width: 46px;
+  height: 16px;
+  border-radius: 8px;
+}
+.theme-card-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 11px;
+  font-size: 13px;
+}
+.theme-card-label strong {
+  font-weight: 600;
+}
+.theme-card-check {
+  font-size: 13px;
 }

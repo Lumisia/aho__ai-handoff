@@ -47,17 +47,6 @@ function compactDate(value: string) {
   });
 }
 
-function resetSummary(
-  fiveHour: AccountWindow | null | undefined,
-  weekly: AccountWindow | null | undefined,
-  t: Translator,
-) {
-  const values = [fiveHour?.resets_at, weekly?.resets_at]
-    .filter((value): value is number => typeof value === "number")
-    .map(compactDateFromSeconds);
-  return values.length > 0 ? `${t("reset")} - ${values.join(" / ")}` : `${t("reset")} - ${t("resetUnknown")}`;
-}
-
 function creditSummary(credits: ResetCreditRow[] | undefined) {
   const first = credits?.[0];
   if (!first) return null;
@@ -81,13 +70,21 @@ function LimitBar({
   t: Translator;
 }) {
   const used = value ? Math.max(0, Math.min(100, value.used_percent)) : 0;
+  const reset = value?.resets_at ? compactDateFromSeconds(value.resets_at) : null;
   return (
     <div className={`account-limit-row ${agent}`}>
       <strong>{label}</strong>
       <div className="usage-bar" aria-hidden="true">
         <span style={{ width: `${used}%` }} />
       </div>
-      <span>{value ? `${pct(value.remaining_percent)} ${t("left")}` : t("noSample")}</span>
+      <span className="limit-right">
+        <span className="limit-pct">{value ? `${pct(value.remaining_percent)} ${t("left")}` : t("noSample")}</span>
+        {reset && (
+          <small className="limit-reset">
+            {t("resetsAt")} {reset}
+          </small>
+        )}
+      </span>
     </div>
   );
 }
@@ -140,7 +137,9 @@ function AgentPanel({
   }, [agent, login, onRefresh]);
 
   useEffect(() => {
-    if (agent !== "codex" || !activeSlotLabel || autoUsageTried.current.has(activeSlotLabel)) return;
+    // Auto-fetch the active slot's own usage (both agents) so its 5h/weekly
+    // limits show on open. Uses the slot credential — the safe explicit path.
+    if (!activeSlotLabel || autoUsageTried.current.has(activeSlotLabel)) return;
     let cancelled = false;
     autoUsageTried.current.add(activeSlotLabel);
     setUsageBusy(activeSlotLabel);
@@ -221,7 +220,6 @@ function AgentPanel({
       <div className="account-limit-stack">
         <LimitBar agent={agent} label="5h" value={displayFiveHour} t={t} />
         <LimitBar agent={agent} label={t("weekly")} value={displayWeekly} t={t} />
-        <div className="account-reset-line">{resetSummary(displayFiveHour, displayWeekly, t)}</div>
         {activeCredits && (
           <div className="account-credit-summary">
             {t("resetCredits")} - {activeCredits}

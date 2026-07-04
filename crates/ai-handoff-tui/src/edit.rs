@@ -26,6 +26,7 @@ const LANGS: [&str; 3] = ["en", "ko", "ja"];
 const CAPSULE_FORMATS: [&str; 2] = ["json", "md"];
 const THEME_PRESETS: [&str; 4] = ["default", "high_contrast", "mono", "custom"];
 const GUI_THEME_PRESETS: [&str; 3] = ["white", "dark", "custom"];
+const GUI_THEME_MODES: [&str; 3] = ["system", "light", "dark"];
 const COLOR_PRESETS: [&str; 18] = [
     "#B996EB",
     "#E68C1E",
@@ -61,6 +62,14 @@ pub fn next_raw(kind: KeyKind, current: &str, action: EditAction) -> Option<Stri
         KeyKind::CapsuleFormat => Some(cycle(&CAPSULE_FORMATS, current, action)),
         KeyKind::ThemePreset => Some(cycle(&THEME_PRESETS, current, action)),
         KeyKind::GuiThemePreset => Some(cycle(&GUI_THEME_PRESETS, current, action)),
+        KeyKind::GuiThemeMode => Some(cycle(&GUI_THEME_MODES, current, action)),
+        KeyKind::GuiThemeName => {
+            // GUI-only keys (desktop Theme panel edits these); cycle catalog ids.
+            let ids: Vec<&str> = std::iter::once("custom")
+                .chain(config::theme_catalog().iter().map(|t| t.id))
+                .collect();
+            Some(cycle(&ids, current, action))
+        }
         KeyKind::Color => Some(cycle(&COLOR_PRESETS, current, action)),
         KeyKind::Percent => {
             let now: f64 = current.parse().ok()?;

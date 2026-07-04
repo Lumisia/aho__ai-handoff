@@ -146,9 +146,28 @@ export interface SlotUsageReport {
   reset_credit_details: ResetCreditRow[];
 }
 
+export interface ThemeCatalogEntry {
+  id: string;
+  name: string;
+  dark: boolean;
+  codex_color: string;
+  claude_color: string;
+  focus_border_color: string;
+  selection_bg_color: string;
+  selection_fg_color: string;
+  app_bg_color: string;
+  sidebar_bg_color: string;
+  panel_bg_color: string;
+  text_color: string;
+}
+
 export interface ThemeReport {
   language: string;
   preset: string;
+  mode: "system" | "light" | "dark";
+  light_theme: string;
+  dark_theme: string;
+  catalog: ThemeCatalogEntry[];
   codex_color: string;
   claude_color: string;
   focus_border_color: string;

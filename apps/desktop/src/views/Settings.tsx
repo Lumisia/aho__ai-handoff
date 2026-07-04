@@ -17,12 +17,13 @@ import type { LucideIcon } from "lucide-react";
 import {
   getAppVersion,
   getConfigSettings,
+  getTheme,
   resetConfigValue,
   runAppUninstall,
   runAppUpdate,
   setConfigValue,
 } from "../api";
-import type { ConfigRow } from "../types";
+import type { ConfigRow, ThemeCatalogEntry, ThemeReport } from "../types";
 import type { Translator } from "../i18n";
 
 const settingLabelKeys: Record<string, string> = {
@@ -364,6 +365,265 @@ function UpdatePanel({ t }: { t: Translator }) {
   );
 }
 
+const THEME_MODES: Array<{ id: "system" | "light" | "dark"; labelKey: string }> = [
+  { id: "system", labelKey: "themeModeSystem" },
+  { id: "light", labelKey: "themeModeLight" },
+  { id: "dark", labelKey: "themeModeDark" },
+];
+
+function ThemeCard({
+  entry,
+  active,
+  onSelect,
+  t,
+}: {
+  entry: ThemeCatalogEntry;
+  active: boolean;
+  onSelect: () => void;
+  t: Translator;
+}) {
+  return (
+    <button
+      type="button"
+      className={active ? "theme-card active" : "theme-card"}
+      onClick={onSelect}
+      style={{ background: entry.app_bg_color, borderColor: active ? entry.focus_border_color : undefined }}
+    >
+      <div className="theme-card-preview" style={{ background: entry.panel_bg_color }}>
+        <span className="theme-card-bar" style={{ background: entry.focus_border_color }} />
+        <span className="theme-card-bar short" style={{ background: entry.codex_color }} />
+        <span className="theme-card-pill" style={{ background: entry.selection_bg_color, color: entry.selection_fg_color }} />
+      </div>
+      <div className="theme-card-label" style={{ color: entry.text_color }}>
+        <strong>{entry.name}</strong>
+        {active && <span className="theme-card-check">✓</span>}
+      </div>
+    </button>
+  );
+}
+
+function customEntryFrom(theme: ThemeReport, t: Translator): ThemeCatalogEntry {
+  return {
+    id: "custom",
+    name: t("customTheme"),
+    dark: false,
+    codex_color: theme.codex_color,
+    claude_color: theme.claude_color,
+    focus_border_color: theme.focus_border_color,
+    selection_bg_color: theme.selection_bg_color,
+    selection_fg_color: theme.selection_fg_color,
+    app_bg_color: theme.app_bg_color,
+    sidebar_bg_color: theme.sidebar_bg_color,
+    panel_bg_color: theme.panel_bg_color,
+    text_color: theme.text_color,
+  };
+}
+
+function ThemeGalleryModal({
+  theme,
+  onPick,
+  onClose,
+  t,
+}: {
+  theme: ThemeReport;
+  onPick: (slot: "light_theme" | "dark_theme", id: string) => void;
+  onClose: () => void;
+  t: Translator;
+}) {
+  const { catalog, light_theme: lightTheme, dark_theme: darkTheme } = theme;
+  const custom = customEntryFrom(theme, t);
+  // The Custom card (edited in "detail settings") can be assigned to either slot.
+  const lights = [...catalog.filter((entry) => !entry.dark), custom];
+  const darks = [...catalog.filter((entry) => entry.dark), custom];
+  return (
+    <div className="modal-backdrop" onMouseDown={onClose}>
+      <section
+        className="theme-gallery-modal"
+        role="dialog"
+        aria-modal="true"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header className="modal-header">
+          <h2>{t("chooseTheme")}</h2>
+          <button className="titlebar-icon-button" title={t("close")} onClick={onClose}>
+            ✕
+          </button>
+        </header>
+        <div className="theme-gallery-body">
+          <div className="theme-gallery-section">
+            <h4>{t("lightTheme")}</h4>
+            <div className="theme-gallery">
+              {lights.map((entry) => (
+                <ThemeCard
+                  key={entry.id}
+                  entry={entry}
+                  active={entry.id === lightTheme}
+                  onSelect={() => onPick("light_theme", entry.id)}
+                  t={t}
+                />
+              ))}
+            </div>
+          </div>
+          <div className="theme-gallery-section">
+            <h4>{t("darkTheme")}</h4>
+            <div className="theme-gallery">
+              {darks.map((entry) => (
+                <ThemeCard
+                  key={entry.id}
+                  entry={entry}
+                  active={entry.id === darkTheme}
+                  onSelect={() => onPick("dark_theme", entry.id)}
+                  t={t}
+                />
+              ))}
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function ThemePanel({
+  colorRows,
+  busy,
+  t,
+  onCommit,
+  onReset,
+  onThemeChanged,
+}: {
+  colorRows: ConfigRow[];
+  busy: boolean;
+  t: Translator;
+  onCommit: (row: ConfigRow, value: string) => Promise<void>;
+  onReset: (row: ConfigRow) => Promise<void>;
+  onThemeChanged?: () => Promise<void> | void;
+}) {
+  const [theme, setTheme] = useState<ThemeReport | null>(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [editingKey, setEditingKey] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  const reload = () => {
+    getTheme({ force: true })
+      .then(setTheme)
+      .catch(() => setTheme(null));
+  };
+
+  useEffect(() => {
+    reload();
+  }, []);
+
+  const themeName = (id: string | undefined) =>
+    id === "custom" ? t("customTheme") : theme?.catalog.find((entry) => entry.id === id)?.name ?? id ?? "-";
+
+  async function setGuiValue(key: string, value: string) {
+    setSaving(true);
+    try {
+      await setConfigValue(key, value);
+      await onThemeChanged?.();
+      reload();
+    } catch {
+      // Errors surface through the parent's config commit path on retry.
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const disabled = busy || saving;
+
+  return (
+    <div className="theme-panel">
+      <div className="theme-section">
+        <div className="theme-section-head">
+          <strong>{t("themeMode")}</strong>
+          <span>{t("themeModeHelp")}</span>
+        </div>
+        <div className="theme-mode-toggle" role="group" aria-label={t("themeMode")}>
+          {THEME_MODES.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              className={theme?.mode === item.id ? "theme-mode-btn active" : "theme-mode-btn"}
+              disabled={disabled}
+              onClick={() => void setGuiValue("gui_theme.mode", item.id)}
+            >
+              {t(item.labelKey)}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="theme-section">
+        <div className="theme-section-head">
+          <strong>{t("chooseTheme")}</strong>
+          <span>{t("chooseThemeHelp")}</span>
+        </div>
+        <div className="theme-slot-row">
+          <div className="theme-slot">
+            <small>{t("lightTheme")}</small>
+            <code>{themeName(theme?.light_theme)}</code>
+          </div>
+          <div className="theme-slot">
+            <small>{t("darkTheme")}</small>
+            <code>{themeName(theme?.dark_theme)}</code>
+          </div>
+          <button className="ghost" disabled={disabled || !theme} onClick={() => setPickerOpen(true)}>
+            {t("chooseTheme")}
+          </button>
+        </div>
+      </div>
+
+      <div className="theme-section">
+        <div className="theme-section-head">
+          <strong>{t("themeDetail")}</strong>
+          <span>{t("themeDetailHelp")}</span>
+        </div>
+        <div className="setting-table theme-detail-table">
+          {colorRows.map((row) => (
+            <div className="table-row setting-row" key={row.key}>
+              <div className="setting-name">
+                <span>{settingLabel(row, t)}</span>
+              </div>
+              <div className="setting-actions">
+                <SettingValueEditor
+                  row={row}
+                  busy={disabled}
+                  t={t}
+                  open={editingKey === row.key}
+                  onToggle={() => setEditingKey((current) => (current === row.key ? null : row.key))}
+                  onClose={() => setEditingKey(null)}
+                  onCommit={async (r, value) => {
+                    await onCommit(r, value);
+                    reload();
+                  }}
+                />
+                <button
+                  className="reset-icon"
+                  title={t("reset")}
+                  disabled={disabled}
+                  onClick={() => void onReset(row).then(reload)}
+                >
+                  <RotateCcw size={14} />
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {pickerOpen && theme && (
+        <ThemeGalleryModal
+          theme={theme}
+          onPick={(slot, id) => void setGuiValue(`gui_theme.${slot}`, id)}
+          onClose={() => setPickerOpen(false)}
+          t={t}
+        />
+      )}
+    </div>
+  );
+}
+
 export default function SettingsView({
   onThemeChanged,
   t,
@@ -463,7 +723,17 @@ export default function SettingsView({
         {error && <div className="banner error">{error}</div>}
         {loading && <section className="loading-screen">{t("loadSettings")}</section>}
         {category === UPDATE_CATEGORY && <UpdatePanel t={t} />}
-        {category !== UPDATE_CATEGORY && (
+        {category === "theme" && (
+          <ThemePanel
+            colorRows={rows.filter((row) => row.key.startsWith("gui_theme."))}
+            busy={busy}
+            t={t}
+            onCommit={commit}
+            onReset={reset}
+            onThemeChanged={onThemeChanged}
+          />
+        )}
+        {category !== UPDATE_CATEGORY && category !== "theme" && (
         <div className="setting-table">
           <div className="table-row head">
             <span>{t("setting")}</span>

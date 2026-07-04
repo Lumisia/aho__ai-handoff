@@ -18,6 +18,16 @@ function pct(value: number) {
   return `${Math.round(value)}%`;
 }
 
+function resetText(value: AccountWindow | null | undefined) {
+  if (!value?.resets_at) return null;
+  return new Date(value.resets_at * 1000).toLocaleString(undefined, {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
 function LimitBar({
   agent,
   label,
@@ -30,13 +40,21 @@ function LimitBar({
   t: Translator;
 }) {
   const used = value ? Math.max(0, Math.min(100, value.used_percent)) : 0;
+  const reset = resetText(value);
   return (
     <div className={`limit-row ${agent}`}>
       <strong>{label}</strong>
       <div className="usage-bar" aria-hidden="true">
         <span style={{ width: `${used}%` }} />
       </div>
-      <span>{value ? `${pct(value.remaining_percent)} ${t("left")}` : t("noSample")}</span>
+      <span className="limit-right">
+        <span className="limit-pct">{value ? `${pct(value.remaining_percent)} ${t("left")}` : t("noSample")}</span>
+        {reset && (
+          <small className="limit-reset">
+            {t("resetsAt")} {reset}
+          </small>
+        )}
+      </span>
     </div>
   );
 }
@@ -46,15 +64,16 @@ export default function Overview({ snapshot, t }: { snapshot: DashboardSnapshot;
   const [loadingAccounts, setLoadingAccounts] = useState(true);
 
   useEffect(() => {
-    getAccountReport()
+    // force: query the active saved slot's own usage so the overview shows the
+    // active Claude/Codex 5h+weekly limits (statusline samples alone are often
+    // absent). Only the active saved slot is hit — never a bare live credential.
+    getAccountReport({ force: true })
       .then(setAccounts)
       .catch(() => setAccounts(null))
       .finally(() => setLoadingAccounts(false));
   }, []);
 
   const topRows = [
-    snapshot.daemon,
-    snapshot.autostart,
     snapshot.codex_hooks,
     snapshot.codex_config,
     snapshot.claude_settings,

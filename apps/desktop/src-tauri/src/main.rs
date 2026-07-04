@@ -164,6 +164,30 @@ struct AccountCommandSpec {
 struct ThemeReport {
     language: String,
     preset: String,
+    /// "system" | "light" | "dark" — how the active theme is chosen.
+    mode: String,
+    /// Catalog id used in light mode (or "custom").
+    light_theme: String,
+    /// Catalog id used in dark mode (or "custom").
+    dark_theme: String,
+    /// Built-in theme palettes the picker offers.
+    catalog: Vec<ThemeCatalogEntry>,
+    codex_color: String,
+    claude_color: String,
+    focus_border_color: String,
+    selection_bg_color: String,
+    selection_fg_color: String,
+    app_bg_color: String,
+    sidebar_bg_color: String,
+    panel_bg_color: String,
+    text_color: String,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+struct ThemeCatalogEntry {
+    id: String,
+    name: String,
+    dark: bool,
     codex_color: String,
     claude_color: String,
     focus_border_color: String,
@@ -619,12 +643,20 @@ fn config_rows_for(path: &Path) -> Result<Vec<ConfigRow>, String> {
 }
 
 fn desktop_config_keys() -> Vec<&'static str> {
+    // The Theme panel renders preset/mode/light/dark itself (segmented control
+    // + theme gallery), so those keys are not surfaced as generic rows. The
+    // seven color keys stay — the panel shows them as "detail settings".
+    const HIDDEN_GUI_KEYS: [&str; 6] = [
+        "gui_theme.codex_color",
+        "gui_theme.claude_color",
+        "gui_theme.preset",
+        "gui_theme.mode",
+        "gui_theme.light_theme",
+        "gui_theme.dark_theme",
+    ];
     config::settable_keys()
         .filter(|key| !key.starts_with("theme."))
-        .chain(
-            config::gui_settable_keys()
-                .filter(|key| *key != "gui_theme.codex_color" && *key != "gui_theme.claude_color"),
-        )
+        .chain(config::gui_settable_keys().filter(|key| !HIDDEN_GUI_KEYS.contains(key)))
         .collect()
 }
 
@@ -657,6 +689,8 @@ fn key_kind_name(kind: config::KeyKind) -> &'static str {
         config::KeyKind::CapsuleFormat => "capsule_format",
         config::KeyKind::ThemePreset => "theme_preset",
         config::KeyKind::GuiThemePreset => "gui_theme_preset",
+        config::KeyKind::GuiThemeMode => "gui_theme_mode",
+        config::KeyKind::GuiThemeName => "gui_theme_name",
         config::KeyKind::Color => "color",
     }
 }
@@ -1201,11 +1235,35 @@ fn agent_title(agent: Agent) -> &'static str {
 }
 
 fn theme_report_from_config(cfg: &config::Config) -> ThemeReport {
-    let theme = config::effective_gui_theme_config(&cfg.gui_theme);
+    let raw = &cfg.gui_theme;
+    // Effective config only resolves the `preset` label + custom color slot;
+    // mode and light/dark selections come straight from the raw config.
+    let theme = config::effective_gui_theme_config(raw);
+    let catalog = config::theme_catalog()
+        .iter()
+        .map(|t| ThemeCatalogEntry {
+            id: t.id.into(),
+            name: t.name.into(),
+            dark: t.dark,
+            codex_color: css_color(t.codex),
+            claude_color: css_color(t.claude),
+            focus_border_color: css_color(t.focus),
+            selection_bg_color: css_color(t.selection_bg),
+            selection_fg_color: css_color(t.selection_fg),
+            app_bg_color: css_color(t.app_bg),
+            sidebar_bg_color: css_color(t.sidebar_bg),
+            panel_bg_color: css_color(t.panel_bg),
+            text_color: css_color(t.text),
+        })
+        .collect();
 
     ThemeReport {
         language: config::lang_str(cfg.language).into(),
         preset: gui_theme_preset_name(theme.preset).into(),
+        mode: config::gui_theme_mode_str(raw.mode).into(),
+        light_theme: raw.light_theme.clone(),
+        dark_theme: raw.dark_theme.clone(),
+        catalog,
         codex_color: css_color(theme.codex_color.as_str()),
         claude_color: css_color(theme.claude_color.as_str()),
         focus_border_color: css_color(theme.focus_border_color.as_str()),

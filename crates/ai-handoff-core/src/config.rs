@@ -201,6 +201,12 @@ pub fn theme_config_for_preset(preset: ThemePreset) -> ThemeConfig {
 #[serde(default)]
 pub struct GuiThemeConfig {
     pub preset: GuiThemePreset,
+    /// How the active theme is chosen: follow the OS, or force light/dark.
+    pub mode: GuiThemeMode,
+    /// Catalog id of the theme used in light mode (or "custom").
+    pub light_theme: String,
+    /// Catalog id of the theme used in dark mode (or "custom").
+    pub dark_theme: String,
     pub codex_color: ColorSpec,
     pub claude_color: ColorSpec,
     pub focus_border_color: ColorSpec,
@@ -228,6 +234,136 @@ pub enum GuiThemePreset {
     Custom,
 }
 
+/// Whether the desktop GUI follows the OS light/dark setting or is forced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum GuiThemeMode {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+pub fn gui_theme_mode_str(mode: GuiThemeMode) -> &'static str {
+    match mode {
+        GuiThemeMode::System => "system",
+        GuiThemeMode::Light => "light",
+        GuiThemeMode::Dark => "dark",
+    }
+}
+
+/// A named, built-in GUI theme (famous editor/app palettes). The frontend maps
+/// these nine colors onto its CSS variables; `dark` places the theme in the
+/// dark or light gallery and drives the "system" auto-switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NamedTheme {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub dark: bool,
+    pub codex: &'static str,
+    pub claude: &'static str,
+    pub focus: &'static str,
+    pub selection_bg: &'static str,
+    pub selection_fg: &'static str,
+    pub app_bg: &'static str,
+    pub sidebar_bg: &'static str,
+    pub panel_bg: &'static str,
+    pub text: &'static str,
+}
+
+/// The built-in theme catalog: the three original presets plus famous
+/// light/dark palettes (Dracula, Nord, Tokyo Night, Notion, GitHub, …).
+pub fn theme_catalog() -> &'static [NamedTheme] {
+    const T: &[NamedTheme] = &[
+        // --- Light -------------------------------------------------------
+        NamedTheme { id: "white", name: "Light", dark: false,
+            codex: "#6F7380", claude: "#8A7252", focus: "#2F6F50",
+            selection_bg: "#244F3B", selection_fg: "#FFFFFF",
+            app_bg: "#F6F7F5", sidebar_bg: "#EEF1ED", panel_bg: "#FFFFFF", text: "#17201C" },
+        NamedTheme { id: "notion", name: "Notion", dark: false,
+            codex: "#2383E2", claude: "#D9730D", focus: "#2383E2",
+            selection_bg: "#D3E5F3", selection_fg: "#1A1A1A",
+            app_bg: "#FFFFFF", sidebar_bg: "#F7F6F3", panel_bg: "#FFFFFF", text: "#37352F" },
+        NamedTheme { id: "github_light", name: "GitHub Light", dark: false,
+            codex: "#0969DA", claude: "#9A6700", focus: "#0969DA",
+            selection_bg: "#DDF4FF", selection_fg: "#0969DA",
+            app_bg: "#FFFFFF", sidebar_bg: "#F6F8FA", panel_bg: "#FFFFFF", text: "#24292F" },
+        NamedTheme { id: "solarized_light", name: "Solarized Light", dark: false,
+            codex: "#2AA198", claude: "#CB4B16", focus: "#268BD2",
+            selection_bg: "#E6DFC8", selection_fg: "#073642",
+            app_bg: "#FDF6E3", sidebar_bg: "#EEE8D5", panel_bg: "#FDF6E3", text: "#657B83" },
+        NamedTheme { id: "catppuccin_latte", name: "Catppuccin Latte", dark: false,
+            codex: "#1E66F5", claude: "#FE640B", focus: "#8839EF",
+            selection_bg: "#DCE0E8", selection_fg: "#4C4F69",
+            app_bg: "#EFF1F5", sidebar_bg: "#E6E9EF", panel_bg: "#FFFFFF", text: "#4C4F69" },
+        // Retro 8-bit hardware panel: warm beige with a chunky arcade red.
+        NamedTheme { id: "eight_bit", name: "8-Bit", dark: false,
+            codex: "#7B7B8E", claude: "#C13129", focus: "#C13129",
+            selection_bg: "#C13129", selection_fg: "#F1F1E6",
+            app_bg: "#E5E5DD", sidebar_bg: "#D8D8D1", panel_bg: "#F1F1E6", text: "#3D3D4B" },
+        // Refined editorial light: paper white with a vermilion accent.
+        NamedTheme { id: "vermilion", name: "Vermilion", dark: false,
+            codex: "#5F5F5F", claude: "#D84424", focus: "#D84424",
+            selection_bg: "#FBE3DC", selection_fg: "#A82E12",
+            app_bg: "#F7F5F3", sidebar_bg: "#F1EEEB", panel_bg: "#FFFFFF", text: "#1A1A1A" },
+        // --- Dark --------------------------------------------------------
+        NamedTheme { id: "dark", name: "Dark", dark: true,
+            codex: "#8D918D", claude: "#8D918D", focus: "#8B8374",
+            selection_bg: "#3B3E3D", selection_fg: "#F1EFE7",
+            app_bg: "#121314", sidebar_bg: "#171918", panel_bg: "#1D2020", text: "#E8E6DC" },
+        NamedTheme { id: "dark_green", name: "Dark green", dark: true,
+            codex: "#A9ADB8", claude: "#C3A77B", focus: "#68A782",
+            selection_bg: "#315F49", selection_fg: "#F4F7F4",
+            app_bg: "#171B19", sidebar_bg: "#1D231F", panel_bg: "#202622", text: "#EDF2ED" },
+        NamedTheme { id: "dracula", name: "Dracula", dark: true,
+            codex: "#8BE9FD", claude: "#FFB86C", focus: "#BD93F9",
+            selection_bg: "#44475A", selection_fg: "#F8F8F2",
+            app_bg: "#282A36", sidebar_bg: "#21222C", panel_bg: "#343746", text: "#F8F8F2" },
+        NamedTheme { id: "nord", name: "Nord", dark: true,
+            codex: "#81A1C1", claude: "#D08770", focus: "#88C0D0",
+            selection_bg: "#434C5E", selection_fg: "#ECEFF4",
+            app_bg: "#2E3440", sidebar_bg: "#292E39", panel_bg: "#3B4252", text: "#D8DEE9" },
+        NamedTheme { id: "one_dark", name: "One Dark", dark: true,
+            codex: "#56B6C2", claude: "#D19A66", focus: "#61AFEF",
+            selection_bg: "#3E4451", selection_fg: "#FFFFFF",
+            app_bg: "#282C34", sidebar_bg: "#21252B", panel_bg: "#2C313A", text: "#ABB2BF" },
+        NamedTheme { id: "monokai", name: "Monokai", dark: true,
+            codex: "#66D9EF", claude: "#FD971F", focus: "#A6E22E",
+            selection_bg: "#49483E", selection_fg: "#F8F8F2",
+            app_bg: "#272822", sidebar_bg: "#1E1F1C", panel_bg: "#2D2E28", text: "#F8F8F2" },
+        NamedTheme { id: "tokyo_night", name: "Tokyo Night", dark: true,
+            codex: "#7DCFFF", claude: "#FF9E64", focus: "#7AA2F7",
+            selection_bg: "#283457", selection_fg: "#C0CAF5",
+            app_bg: "#1A1B26", sidebar_bg: "#16161E", panel_bg: "#24283B", text: "#A9B1D6" },
+        NamedTheme { id: "catppuccin_mocha", name: "Catppuccin Mocha", dark: true,
+            codex: "#89B4FA", claude: "#FAB387", focus: "#CBA6F7",
+            selection_bg: "#45475A", selection_fg: "#CDD6F4",
+            app_bg: "#1E1E2E", sidebar_bg: "#181825", panel_bg: "#313244", text: "#CDD6F4" },
+        NamedTheme { id: "gruvbox", name: "Gruvbox", dark: true,
+            codex: "#83A598", claude: "#FABD2F", focus: "#FE8019",
+            selection_bg: "#504945", selection_fg: "#FBF1C7",
+            app_bg: "#282828", sidebar_bg: "#1D2021", panel_bg: "#32302F", text: "#EBDBB2" },
+        NamedTheme { id: "rose_pine", name: "Rosé Pine", dark: true,
+            codex: "#9CCFD8", claude: "#F6C177", focus: "#C4A7E7",
+            selection_bg: "#403D52", selection_fg: "#E0DEF4",
+            app_bg: "#191724", sidebar_bg: "#1F1D2E", panel_bg: "#26233A", text: "#E0DEF4" },
+        NamedTheme { id: "github_dark", name: "GitHub Dark", dark: true,
+            codex: "#58A6FF", claude: "#D29922", focus: "#58A6FF",
+            selection_bg: "#1F6FEB", selection_fg: "#FFFFFF",
+            app_bg: "#0D1117", sidebar_bg: "#010409", panel_bg: "#161B22", text: "#C9D1D9" },
+        NamedTheme { id: "solarized_dark", name: "Solarized Dark", dark: true,
+            codex: "#2AA198", claude: "#CB4B16", focus: "#268BD2",
+            selection_bg: "#094D5A", selection_fg: "#FDF6E3",
+            app_bg: "#002B36", sidebar_bg: "#073642", panel_bg: "#073642", text: "#93A1A1" },
+    ];
+    T
+}
+
+/// Whether a catalog id names a known theme (used to validate slot ids).
+pub fn theme_id_is_known(id: &str) -> bool {
+    id == "custom" || theme_catalog().iter().any(|theme| theme.id == id)
+}
+
 pub fn gui_theme_config_for_preset(preset: GuiThemePreset) -> GuiThemeConfig {
     let (codex, claude, focus, selection_bg, selection_fg, app_bg, sidebar_bg, panel_bg, text) =
         match preset {
@@ -246,6 +382,9 @@ pub fn gui_theme_config_for_preset(preset: GuiThemePreset) -> GuiThemeConfig {
         };
     GuiThemeConfig {
         preset,
+        mode: GuiThemeMode::System,
+        light_theme: "white".into(),
+        dark_theme: "dark".into(),
         codex_color: ColorSpec::trusted(codex),
         claude_color: ColorSpec::trusted(claude),
         focus_border_color: ColorSpec::trusted(focus),
@@ -261,6 +400,9 @@ pub fn gui_theme_config_for_preset(preset: GuiThemePreset) -> GuiThemeConfig {
 fn legacy_dark_gui_theme_config() -> GuiThemeConfig {
     GuiThemeConfig {
         preset: GuiThemePreset::Dark,
+        mode: GuiThemeMode::System,
+        light_theme: "white".into(),
+        dark_theme: "dark".into(),
         codex_color: ColorSpec::trusted("#C8A7FF"),
         claude_color: ColorSpec::trusted("#FFB05C"),
         focus_border_color: ColorSpec::trusted("#FF9F43"),
@@ -676,6 +818,10 @@ enum ValueKind {
     ThemePreset,
     /// GUI theme preset name.
     GuiThemePreset,
+    /// GUI theme mode: `system` / `light` / `dark`.
+    GuiThemeMode,
+    /// A GUI theme catalog id (or `custom`).
+    GuiThemeName,
     /// Terminal color: named, `#RRGGBB`, or indexed `0..255`.
     Color,
 }
@@ -710,6 +856,9 @@ const SETTABLE: &[(&str, ValueKind)] = &[
 
 const GUI_SETTABLE: &[(&str, ValueKind)] = &[
     ("gui_theme.preset", ValueKind::GuiThemePreset),
+    ("gui_theme.mode", ValueKind::GuiThemeMode),
+    ("gui_theme.light_theme", ValueKind::GuiThemeName),
+    ("gui_theme.dark_theme", ValueKind::GuiThemeName),
     ("gui_theme.codex_color", ValueKind::Color),
     ("gui_theme.claude_color", ValueKind::Color),
     ("gui_theme.focus_border_color", ValueKind::Color),
@@ -753,6 +902,10 @@ pub enum KeyKind {
     ThemePreset,
     /// `white` / `dark` / `custom`.
     GuiThemePreset,
+    /// `system` / `light` / `dark`.
+    GuiThemeMode,
+    /// A GUI theme catalog id.
+    GuiThemeName,
     /// Terminal color string.
     Color,
 }
@@ -774,6 +927,8 @@ pub fn key_kind(key: &str) -> Option<KeyKind> {
             ValueKind::CapsuleFormat => KeyKind::CapsuleFormat,
             ValueKind::ThemePreset => KeyKind::ThemePreset,
             ValueKind::GuiThemePreset => KeyKind::GuiThemePreset,
+            ValueKind::GuiThemeMode => KeyKind::GuiThemeMode,
+            ValueKind::GuiThemeName => KeyKind::GuiThemeName,
             ValueKind::Color => KeyKind::Color,
         })
 }
@@ -812,6 +967,17 @@ impl ValueKind {
                     ))
                 }
             },
+            ValueKind::GuiThemeMode => match raw {
+                "system" | "light" | "dark" => value(raw),
+                _ => return Err(invalid("expected one of `system`, `light`, `dark`")),
+            },
+            ValueKind::GuiThemeName => {
+                if theme_id_is_known(raw) {
+                    value(raw)
+                } else {
+                    return Err(invalid("unknown GUI theme id"));
+                }
+            }
             ValueKind::GuiThemePreset => match raw {
                 "white" | "dark" | "dark_green" | "custom" => value(raw),
                 _ => {
@@ -971,7 +1137,15 @@ pub fn set_value(existing: Option<&str>, key: &str, raw: &str) -> Result<String,
             );
         }
     }
-    if key.starts_with("gui_theme.") && key != "gui_theme.preset" {
+    // Editing an individual GUI color marks the theme custom. Mode/light/dark
+    // slot selections do not — they pick catalog themes, not ad-hoc colors.
+    const GUI_NON_COLOR_KEYS: [&str; 4] = [
+        "gui_theme.preset",
+        "gui_theme.mode",
+        "gui_theme.light_theme",
+        "gui_theme.dark_theme",
+    ];
+    if key.starts_with("gui_theme.") && !GUI_NON_COLOR_KEYS.contains(&key) {
         table.insert(
             "preset",
             value(gui_theme_preset_str(GuiThemePreset::Custom)),
@@ -1029,6 +1203,9 @@ pub fn get_value(cfg: &Config, key: &str) -> Result<String, ConfigWriteError> {
         "theme.selection_bg_color" => cfg.theme.selection_bg_color.to_string(),
         "theme.selection_fg_color" => cfg.theme.selection_fg_color.to_string(),
         "gui_theme.preset" => gui_theme_preset_str(gui_theme.preset).to_string(),
+        "gui_theme.mode" => gui_theme_mode_str(gui_theme.mode).to_string(),
+        "gui_theme.light_theme" => gui_theme.light_theme.clone(),
+        "gui_theme.dark_theme" => gui_theme.dark_theme.clone(),
         "gui_theme.codex_color" => gui_theme.codex_color.to_string(),
         "gui_theme.claude_color" => gui_theme.claude_color.to_string(),
         "gui_theme.focus_border_color" => gui_theme.focus_border_color.to_string(),
@@ -1493,7 +1670,7 @@ enabled = true
             assert!(get_value(&cfg, key).is_ok(), "key {key} not readable");
             assert!(key_kind(key).is_some(), "no kind for {key}");
         }
-        assert_eq!(gui_settable_keys().count(), 10);
+        assert_eq!(gui_settable_keys().count(), 13);
     }
 
     #[test]
