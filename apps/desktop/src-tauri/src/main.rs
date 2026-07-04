@@ -456,6 +456,19 @@ async fn open_logs_folder() -> Result<MenuCommandResult, String> {
 }
 
 #[tauri::command]
+async fn open_accounts_folder() -> Result<MenuCommandResult, String> {
+    blocking_command("open_accounts_folder", || {
+        let accounts = paths::home().join("accounts");
+        std::fs::create_dir_all(&accounts).map_err(|error| error.to_string())?;
+        open_target(&accounts.to_string_lossy())?;
+        Ok(MenuCommandResult {
+            message: format!("opened accounts folder: {}", accounts.display()),
+        })
+    })
+    .await
+}
+
+#[tauri::command]
 async fn reinstall_hooks() -> Result<MenuCommandResult, String> {
     blocking_command("reinstall_hooks", || {
         let output = run_cli_capture(&["install", "--yes"], false)?;
@@ -1796,6 +1809,7 @@ fn main() {
             run_doctor,
             create_checkpoint,
             open_logs_folder,
+            open_accounts_folder,
             reinstall_hooks,
             ensure_daemon_running,
             open_project_github,

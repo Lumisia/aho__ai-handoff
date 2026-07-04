@@ -1877,13 +1877,13 @@ impl App {
     // --- Account tab ---------------------------------------------------
 
     fn on_account_key(&mut self, key: KeyEvent) {
+        // No automatic fetch on navigation: usage queries hit the provider
+        // API with the slot's credential, so they run only on an explicit
+        // refresh ('r' — see acc_tree_key / acc_detail_key).
         match self.acc_focus {
             AccFocus::Tree => self.acc_tree_key(key),
             AccFocus::Detail => self.acc_detail_key(key),
         }
-        // Whatever moved the selection, make sure the now-selected account's
-        // usage is being fetched (cached after the first time).
-        self.acc_ensure_usage(false);
     }
 
     /// Cache key for an account's fetched usage.
@@ -1987,6 +1987,7 @@ impl App {
             KeyCode::Char('+') | KeyCode::Char('a') => {
                 self.pending = Some(Pending::AddAccount(self.acc_selected_agent()));
             }
+            KeyCode::Char('r') => self.acc_ensure_usage(true),
             KeyCode::Enter | KeyCode::Right | KeyCode::Char(' ') => {
                 match rows.get(self.acc_sel).map(|r| r.target) {
                     Some(AccTarget::Add(agent)) => self.pending = Some(Pending::AddAccount(agent)),
@@ -3494,6 +3495,11 @@ impl App {
                 self.action_style(focused && has_slot),
             ),
             Span::raw("  "),
+            Span::styled(
+                format!(" {} ", t!("account.btn_refresh")),
+                self.action_style(focused && has_slot),
+            ),
+            Span::raw("  "),
         ];
         if self.acc_confirm_delete {
             spans.push(Span::styled(
@@ -3609,7 +3615,11 @@ impl App {
                             five = s.five_hour.clone();
                             weekly = s.weekly.clone();
                         }
-                    } else {
+                    }
+                    // Even the active slot can lack a local statusline sample
+                    // (e.g. Claude Code hasn't replied recently) — say how to
+                    // fetch instead of showing bare dashes.
+                    if five.is_none() && weekly.is_none() {
                         note = Some(
                             Line::from(t!("account.usage_press_r").into_owned())
                                 .fg(Color::DarkGray),
@@ -4652,7 +4662,7 @@ mod tests {
     }
 
     #[test]
-    fn account_slot_selection_queues_usage_fetch() {
+    fn account_slot_selection_does_not_auto_fetch_usage() {
         let mut app = account_app();
         app.tab = Tab::Account;
         app.focus_content = true;
@@ -4661,6 +4671,11 @@ mod tests {
 
         app.on_key(key(KeyCode::Down));
 
+        // Navigation alone must never queue a provider-API fetch.
+        assert!(app.acc_usage.is_empty());
+
+        // An explicit refresh ('r') queues the fetch for the selected slot.
+        app.on_key(key(KeyCode::Char('r')));
         let key = App::usage_key(Agent::Codex, "dev@example.com");
         assert!(matches!(app.acc_usage.get(&key), Some(UsageState::Loading)));
     }

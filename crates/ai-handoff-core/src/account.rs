@@ -313,6 +313,81 @@ pub fn claude_slot_oauth(label: &str) -> Option<(String, Option<String>)> {
     claude_oauth_from_path(&slot_dir(Agent::Claude, label).join(cred_filename(Agent::Claude)))
 }
 
+/// The Claude slot token for a usage fetch, handling snapshot staleness:
+/// Claude Code rotates its OAuth access token every few hours, so a saved
+/// copy goes stale even though it is still the same account.
+///
+/// 1. If the slot holds the active account and the live credential is
+///    fresher, re-sync the snapshot from the live file first (same identity
+///    only — and this runs only from explicit, user-initiated refresh paths).
+/// 2. If the stored token is already expired, fail fast with an actionable
+///    error instead of a doomed network call and a misleading "re-add".
+pub fn claude_slot_fetch_token(label: &str) -> Result<(String, Option<String>), String> {
+    sync_active_claude_slot(label);
+    let path = slot_dir(Agent::Claude, label).join(cred_filename(Agent::Claude));
+    let bytes = std::fs::read(&path).map_err(|_| "no usable token in this account".to_string())?;
+    if let Some(expires_at) = claude_expires_at(&bytes) {
+        // 60s margin so a token expiring mid-request already counts as stale.
+        if expires_at <= chrono::Utc::now().timestamp_millis() + 60_000 {
+            return Err(
+                "token expired; launch this account (l) or open Claude Code to refresh it"
+                    .to_string(),
+            );
+        }
+    }
+    claude_oauth_from_bytes(&bytes).ok_or_else(|| "no usable token in this account".to_string())
+}
+
+/// Unix-ms expiry recorded in a Claude credential file, if present.
+fn claude_expires_at(bytes: &[u8]) -> Option<i64> {
+    let value: Value = serde_json::from_slice(bytes).ok()?;
+    let oauth = value.get("claudeAiOauth").or_else(|| value.get("oauth"))?;
+    oauth
+        .get("expiresAt")
+        .or_else(|| oauth.get("expires_at"))
+        .and_then(Value::as_i64)
+}
+
+/// Re-sync a saved Claude slot from the live credential when both hold the
+/// same account (identity key match) and the live token is fresher. Never
+/// copies a different account's credential, and never replaces a fresher
+/// snapshot with a staler token.
+fn sync_active_claude_slot(label: &str) {
+    let dir = slot_dir(Agent::Claude, label);
+    let cred_path = dir.join(cred_filename(Agent::Claude));
+    let Ok(slot_bytes) = std::fs::read(&cred_path) else {
+        return;
+    };
+    let Some(live_path) = live_auth_path(Agent::Claude) else {
+        return;
+    };
+    let Ok(live_bytes) = std::fs::read(&live_path) else {
+        return;
+    };
+    if live_bytes == slot_bytes {
+        return;
+    }
+    let Some(meta) = read_meta(&dir) else {
+        return;
+    };
+    let live_identity = claude_identity();
+    if identity_key(Agent::Claude, live_identity.as_ref(), &live_bytes)
+        != slot_identity_key(Agent::Claude, &meta, &slot_bytes)
+    {
+        return;
+    }
+    // Only move forward in time.
+    match (
+        claude_expires_at(&live_bytes),
+        claude_expires_at(&slot_bytes),
+    ) {
+        (Some(live_exp), Some(slot_exp)) if live_exp > slot_exp => {}
+        (Some(_), None) => {}
+        _ => return,
+    }
+    let _ = atomic_write(&cred_path, &live_bytes);
+}
+
 /// Read `(access_token, account_id)` from a Codex `auth.json` at `path`.
 fn request_auth_from_path(path: &Path) -> Option<(String, Option<String>)> {
     let value: Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
@@ -326,7 +401,11 @@ fn request_auth_from_path(path: &Path) -> Option<(String, Option<String>)> {
 }
 
 fn claude_oauth_from_path(path: &Path) -> Option<(String, Option<String>)> {
-    let value: Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    claude_oauth_from_bytes(&std::fs::read(path).ok()?)
+}
+
+fn claude_oauth_from_bytes(bytes: &[u8]) -> Option<(String, Option<String>)> {
+    let value: Value = serde_json::from_slice(bytes).ok()?;
     let oauth = value.get("claudeAiOauth").or_else(|| value.get("oauth"))?;
     let access_token = oauth
         .get("accessToken")
@@ -474,8 +553,9 @@ fn read_meta(dir: &Path) -> Option<AccountMeta> {
 }
 
 /// Stable identity for a credential, independent of the display label.
-/// Claude priority: org UUID > email > hash. Codex priority: account id >
-/// email > hash. The hash fallback is the first 12 hex chars of SHA-256.
+/// Claude priority: org UUID > email > hash. Codex priority: account id +
+/// plan > email + plan > hash. The hash fallback is the first 12 hex chars of
+/// SHA-256.
 fn identity_key(agent: Agent, identity: Option<&Identity>, cred_bytes: &[u8]) -> String {
     let hash_key = || {
         use sha2::{Digest, Sha256};
@@ -484,7 +564,20 @@ fn identity_key(agent: Agent, identity: Option<&Identity>, cred_bytes: &[u8]) ->
         let hex = format!("{:x}", h.finalize());
         format!("{}:token:{}", agent.dir(), &hex[..12])
     };
-    let email_key = |email: &str| format!("{}:email:{}", agent.dir(), email.to_ascii_lowercase());
+    let plan_suffix = || {
+        identity
+            .and_then(|i| i.plan_type.as_deref())
+            .map(|plan| format!(":plan:{}", plan.to_ascii_lowercase()))
+            .unwrap_or_default()
+    };
+    let email_key = |email: &str| {
+        format!(
+            "{}:email:{}{}",
+            agent.dir(),
+            email.to_ascii_lowercase(),
+            plan_suffix()
+        )
+    };
     match agent {
         Agent::Claude => claude_org_from_cred_bytes(cred_bytes)
             .map(|org| format!("claude:org:{org}"))
@@ -492,7 +585,7 @@ fn identity_key(agent: Agent, identity: Option<&Identity>, cred_bytes: &[u8]) ->
             .unwrap_or_else(hash_key),
         Agent::Codex => identity
             .and_then(|i| i.account_id.as_deref())
-            .map(|id| format!("codex:account:{id}"))
+            .map(|id| format!("codex:account:{id}{}", plan_suffix()))
             .or_else(|| identity.and_then(|i| i.email.as_deref()).map(email_key))
             .unwrap_or_else(hash_key),
     }
@@ -528,6 +621,14 @@ pub fn claude_org_uuid_from_access_token(access_token: &str) -> Option<String> {
 
 fn slot_identity_key(agent: Agent, meta: &AccountMeta, cred_bytes: &[u8]) -> String {
     if let Some(key) = meta.identity_key.clone() {
+        if agent == Agent::Codex && meta.plan_hint.is_some() && !key.contains(":plan:") {
+            let identity = Identity {
+                email: meta.email.clone(),
+                account_id: meta.account_id.clone(),
+                plan_type: meta.plan_hint.clone(),
+            };
+            return identity_key(agent, Some(&identity), cred_bytes);
+        }
         return key;
     }
     let identity = Identity {
@@ -536,6 +637,64 @@ fn slot_identity_key(agent: Agent, meta: &AccountMeta, cred_bytes: &[u8]) -> Str
         plan_type: meta.plan_hint.clone(),
     };
     identity_key(agent, Some(&identity), cred_bytes)
+}
+
+fn read_slot_record(
+    agent: Agent,
+    dir: PathBuf,
+    live: Option<&[u8]>,
+    live_key: Option<&str>,
+) -> Option<(AccountSlot, String)> {
+    if !dir.is_dir() {
+        return None;
+    }
+    let cred = std::fs::read(dir.join(cred_filename(agent))).ok()?;
+    let label = dir
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("?")
+        .to_string();
+    let meta = read_meta(&dir).unwrap_or(AccountMeta {
+        schema_version: 1,
+        agent: agent.dir().to_string(),
+        label: label.clone(),
+        email: None,
+        plan_hint: None,
+        account_id: None,
+        workspace_id: None,
+        created_at: None,
+        last_verified_at: None,
+        source: None,
+        identity_key: None,
+    });
+    let key = slot_identity_key(agent, &meta, &cred);
+    let active = live.is_some_and(|l| l == cred.as_slice())
+        || live_key.is_some_and(|live_key| live_key == key.as_str());
+    Some((AccountSlot { meta, dir, active }, key))
+}
+
+fn slot_rank(slot: &AccountSlot) -> (u8, u32, String, String, String) {
+    (
+        u8::from(slot.active),
+        slot.meta.schema_version,
+        slot.meta.last_verified_at.clone().unwrap_or_default(),
+        slot.meta.created_at.clone().unwrap_or_default(),
+        slot.meta.label.clone(),
+    )
+}
+
+fn prefer_slot(candidate: &AccountSlot, current: &AccountSlot) -> bool {
+    slot_rank(candidate) > slot_rank(current)
+}
+
+fn upsert_unique_slot(slots: &mut Vec<(AccountSlot, String)>, slot: AccountSlot, key: String) {
+    if let Some((current, _)) = slots.iter_mut().find(|(_, existing)| *existing == key) {
+        if prefer_slot(&slot, current) {
+            *current = slot;
+        }
+    } else {
+        slots.push((slot, key));
+    }
 }
 
 /// List saved account slots, marking which one matches the live credential.
@@ -549,43 +708,19 @@ pub fn list_slots(agent: Agent) -> Vec<AccountSlot> {
         };
         identity_key(agent, identity.as_ref(), bytes)
     });
-    let mut slots = Vec::new();
+    let mut slots = Vec::<(AccountSlot, String)>::new();
     let Ok(entries) = std::fs::read_dir(&root) else {
-        return slots;
+        return Vec::new();
     };
     for entry in entries.flatten() {
         let dir = entry.path();
-        if !dir.is_dir() {
-            continue;
+        if let Some((slot, key)) =
+            read_slot_record(agent, dir, live.as_deref(), live_key.as_deref())
+        {
+            upsert_unique_slot(&mut slots, slot, key);
         }
-        let cred = match std::fs::read(dir.join(cred_filename(agent))) {
-            Ok(b) => b,
-            Err(_) => continue, // not a credential slot
-        };
-        let label = dir
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("?")
-            .to_string();
-        let meta = read_meta(&dir).unwrap_or(AccountMeta {
-            schema_version: 1,
-            agent: agent.dir().to_string(),
-            label: label.clone(),
-            email: None,
-            plan_hint: None,
-            account_id: None,
-            workspace_id: None,
-            created_at: None,
-            last_verified_at: None,
-            source: None,
-            identity_key: None,
-        });
-        let active = live.as_ref().is_some_and(|l| *l == cred)
-            || live_key
-                .as_ref()
-                .is_some_and(|key| *key == slot_identity_key(agent, &meta, &cred));
-        slots.push(AccountSlot { meta, dir, active });
     }
+    let mut slots = slots.into_iter().map(|(slot, _)| slot).collect::<Vec<_>>();
     slots.sort_by(|a, b| a.meta.label.cmp(&b.meta.label));
     slots
 }
@@ -642,6 +777,10 @@ fn resolve_slot_label(
     identity: Option<&Identity>,
     key: &str,
 ) -> String {
+    if let Some(label) = existing_slot_label_for_identity(agent, key) {
+        return label;
+    }
+
     if slot_can_be_reused(agent, base_label, cred_bytes, key) {
         return base_label.to_string();
     }
@@ -660,6 +799,27 @@ fn resolve_slot_label(
         }
     }
     unreachable!("unbounded suffix search must find a slot label")
+}
+
+fn existing_slot_label_for_identity(agent: Agent, key: &str) -> Option<String> {
+    let root = accounts_root(agent);
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return None;
+    };
+    let mut best: Option<AccountSlot> = None;
+    for entry in entries.flatten() {
+        let Some((slot, slot_key)) = read_slot_record(agent, entry.path(), None, None) else {
+            continue;
+        };
+        if slot_key != key {
+            continue;
+        }
+        match best.as_ref() {
+            Some(current) if !prefer_slot(&slot, current) => {}
+            _ => best = Some(slot),
+        }
+    }
+    best.map(|slot| slot.meta.label)
 }
 
 fn slot_can_be_reused(agent: Agent, label: &str, cred_bytes: &[u8], key: &str) -> bool {
@@ -997,6 +1157,124 @@ mod tests {
     }
 
     #[test]
+    fn claude_slot_fetch_token_fails_fast_when_expired() {
+        let _guard = crate::test_support::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let live = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        std::env::set_var("CLAUDE_CONFIG_DIR", live.path());
+
+        let dir = slot_dir(Agent::Claude, "stale@example.com");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(".credentials.json"),
+            br#"{"claudeAiOauth":{"accessToken":"stale-token","subscriptionType":"pro","expiresAt":1000}}"#,
+        )
+        .unwrap();
+
+        let err = claude_slot_fetch_token("stale@example.com").unwrap_err();
+
+        assert!(err.contains("token expired"), "got: {err}");
+        std::env::remove_var("AI_HANDOFF_HOME");
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+    }
+
+    #[test]
+    fn claude_slot_fetch_token_returns_unexpired_token() {
+        let _guard = crate::test_support::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let live = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        std::env::set_var("CLAUDE_CONFIG_DIR", live.path());
+
+        let future = chrono::Utc::now().timestamp_millis() + 3_600_000;
+        let dir = slot_dir(Agent::Claude, "fresh@example.com");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(".credentials.json"),
+            format!(
+                r#"{{"claudeAiOauth":{{"accessToken":"fresh-token","subscriptionType":"pro","expiresAt":{future}}}}}"#
+            ),
+        )
+        .unwrap();
+
+        let (token, plan) = claude_slot_fetch_token("fresh@example.com").expect("token");
+
+        assert_eq!(token, "fresh-token");
+        assert_eq!(plan.as_deref(), Some("pro"));
+        std::env::remove_var("AI_HANDOFF_HOME");
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+    }
+
+    #[test]
+    fn claude_slot_fetch_token_resyncs_active_slot_from_fresher_live() {
+        let _guard = crate::test_support::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let live = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        std::env::set_var("CLAUDE_CONFIG_DIR", live.path());
+
+        // Saved snapshot: expired token for org-123.
+        let stale_token = fake_jwt(r#"{"organizationUUID":"org-123"}"#);
+        let stale = format!(
+            r#"{{"claudeAiOauth":{{"accessToken":"{stale_token}","subscriptionType":"pro","expiresAt":1000}}}}"#
+        );
+        let label = save_slot(Agent::Claude, stale.as_bytes(), None, "test").unwrap();
+
+        // Live credential: same org, rotated token, fresh expiry.
+        let fresh_token = fake_jwt(r#"{"organizationUUID":"org-123","iat":2}"#);
+        let future = chrono::Utc::now().timestamp_millis() + 3_600_000;
+        let fresh = format!(
+            r#"{{"claudeAiOauth":{{"accessToken":"{fresh_token}","subscriptionType":"pro","expiresAt":{future}}}}}"#
+        );
+        std::fs::write(live.path().join(".credentials.json"), fresh.as_bytes()).unwrap();
+
+        let (token, _) = claude_slot_fetch_token(&label).expect("re-synced token");
+
+        assert_eq!(token, fresh_token, "must use the fresher live token");
+        assert_eq!(
+            std::fs::read(slot_dir(Agent::Claude, &label).join(".credentials.json")).unwrap(),
+            fresh.as_bytes(),
+            "snapshot must be re-synced on disk"
+        );
+        std::env::remove_var("AI_HANDOFF_HOME");
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+    }
+
+    #[test]
+    fn claude_slot_fetch_token_never_syncs_a_different_identity() {
+        let _guard = crate::test_support::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let live = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        std::env::set_var("CLAUDE_CONFIG_DIR", live.path());
+
+        let stale_token = fake_jwt(r#"{"organizationUUID":"org-123"}"#);
+        let stale =
+            format!(r#"{{"claudeAiOauth":{{"accessToken":"{stale_token}","expiresAt":1000}}}}"#);
+        let label = save_slot(Agent::Claude, stale.as_bytes(), None, "test").unwrap();
+
+        // Live credential belongs to a *different* org — must never be copied.
+        let other_token = fake_jwt(r#"{"organizationUUID":"org-999"}"#);
+        let future = chrono::Utc::now().timestamp_millis() + 3_600_000;
+        let other = format!(
+            r#"{{"claudeAiOauth":{{"accessToken":"{other_token}","expiresAt":{future}}}}}"#
+        );
+        std::fs::write(live.path().join(".credentials.json"), other.as_bytes()).unwrap();
+
+        let err = claude_slot_fetch_token(&label).unwrap_err();
+
+        assert!(err.contains("token expired"), "got: {err}");
+        assert_eq!(
+            std::fs::read(slot_dir(Agent::Claude, &label).join(".credentials.json")).unwrap(),
+            stale.as_bytes(),
+            "a different account's live credential must never overwrite the slot"
+        );
+        std::env::remove_var("AI_HANDOFF_HOME");
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+    }
+
+    #[test]
     fn claude_login_complete_requires_usable_oauth_token() {
         let dir = tempfile::tempdir().unwrap();
         let cred = dir.path().join(".credentials.json");
@@ -1285,6 +1563,223 @@ mod tests {
             std::fs::read(slot_dir(Agent::Codex, &first).join("auth.json")).unwrap(),
             b"new-token"
         );
+
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn save_slot_reuses_legacy_codex_email_slot_with_same_account_id() {
+        let _guard = crate::test_support::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+
+        let legacy_dir = slot_dir(Agent::Codex, "zh2171@naver.com");
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+        std::fs::write(legacy_dir.join("auth.json"), b"old-token").unwrap();
+        let legacy = AccountMeta {
+            schema_version: 1,
+            agent: "codex".into(),
+            label: "zh2171@naver.com".into(),
+            email: Some("zh2171@naver.com".into()),
+            plan_hint: Some("team".into()),
+            account_id: Some("a4cab892-64cc-47f3-a006-7baab1eb4fe9".into()),
+            workspace_id: None,
+            created_at: Some("2026-07-02T14:37:07Z".into()),
+            last_verified_at: Some("2026-07-02T14:37:07Z".into()),
+            source: Some("official-cli-login".into()),
+            identity_key: None,
+        };
+        std::fs::write(
+            legacy_dir.join("account.json"),
+            serde_json::to_vec_pretty(&legacy).unwrap(),
+        )
+        .unwrap();
+
+        let identity = Identity {
+            email: Some("zh2171@naver.com".into()),
+            account_id: Some("a4cab892-64cc-47f3-a006-7baab1eb4fe9".into()),
+            plan_type: Some("team".into()),
+        };
+        let label = save_slot(
+            Agent::Codex,
+            b"new-token",
+            Some(&identity),
+            "capture-current",
+        )
+        .unwrap();
+
+        assert_eq!(label, "zh2171@naver.com");
+        assert!(!slot_dir(Agent::Codex, "a4cab892-64cc-47f3-a006-7baab1eb4fe9").exists());
+        let slots = list_slots(Agent::Codex);
+        assert_eq!(slots.len(), 1);
+        assert_eq!(
+            slots[0].meta.account_id.as_deref(),
+            Some("a4cab892-64cc-47f3-a006-7baab1eb4fe9")
+        );
+        assert_eq!(
+            std::fs::read(slot_dir(Agent::Codex, &label).join("auth.json")).unwrap(),
+            b"new-token"
+        );
+
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn list_slots_collapses_duplicate_codex_slots_with_same_account_id() {
+        let _guard = crate::test_support::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+
+        for (label, schema_version, source) in [
+            ("zh2171@naver.com", 1, "official-cli-login"),
+            ("a4cab892-64cc-47f3-a006-7baab1eb4fe9", 2, "capture-current"),
+        ] {
+            let dir = slot_dir(Agent::Codex, label);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("auth.json"), format!("{label}-token")).unwrap();
+            let meta = AccountMeta {
+                schema_version,
+                agent: "codex".into(),
+                label: label.into(),
+                email: Some("zh2171@naver.com".into()),
+                plan_hint: Some("team".into()),
+                account_id: Some("a4cab892-64cc-47f3-a006-7baab1eb4fe9".into()),
+                workspace_id: None,
+                created_at: Some("2026-07-04T03:33:28Z".into()),
+                last_verified_at: Some("2026-07-04T03:33:28Z".into()),
+                source: Some(source.into()),
+                identity_key: (schema_version == 2)
+                    .then(|| "codex:account:a4cab892-64cc-47f3-a006-7baab1eb4fe9".into()),
+            };
+            std::fs::write(
+                dir.join("account.json"),
+                serde_json::to_vec_pretty(&meta).unwrap(),
+            )
+            .unwrap();
+        }
+
+        let slots = list_slots(Agent::Codex);
+        assert_eq!(slots.len(), 1);
+        assert_eq!(slots[0].meta.email.as_deref(), Some("zh2171@naver.com"));
+        assert_eq!(
+            slots[0].meta.account_id.as_deref(),
+            Some("a4cab892-64cc-47f3-a006-7baab1eb4fe9")
+        );
+
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn list_slots_keeps_codex_same_email_with_different_account_ids() {
+        let _guard = crate::test_support::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+
+        for (label, account_id, plan) in [
+            ("personal-account", "acc-personal", "plus"),
+            ("business-account", "acc-business", "team"),
+        ] {
+            let dir = slot_dir(Agent::Codex, label);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("auth.json"), format!("{label}-token")).unwrap();
+            let meta = AccountMeta {
+                schema_version: 2,
+                agent: "codex".into(),
+                label: label.into(),
+                email: Some("same@example.com".into()),
+                plan_hint: Some(plan.into()),
+                account_id: Some(account_id.into()),
+                workspace_id: None,
+                created_at: Some("2026-07-04T03:33:28Z".into()),
+                last_verified_at: Some("2026-07-04T03:33:28Z".into()),
+                source: Some("test".into()),
+                identity_key: Some(format!("codex:account:{account_id}")),
+            };
+            std::fs::write(
+                dir.join("account.json"),
+                serde_json::to_vec_pretty(&meta).unwrap(),
+            )
+            .unwrap();
+        }
+
+        let slots = list_slots(Agent::Codex);
+        assert_eq!(slots.len(), 2);
+        assert!(slots
+            .iter()
+            .any(|slot| slot.meta.plan_hint.as_deref() == Some("plus")));
+        assert!(slots
+            .iter()
+            .any(|slot| slot.meta.plan_hint.as_deref() == Some("team")));
+
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn list_slots_keeps_codex_same_account_id_with_different_plans() {
+        let _guard = crate::test_support::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+
+        for (label, plan) in [("personal-account", "plus"), ("business-account", "team")] {
+            let dir = slot_dir(Agent::Codex, label);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("auth.json"), format!("{label}-token")).unwrap();
+            let meta = AccountMeta {
+                schema_version: 2,
+                agent: "codex".into(),
+                label: label.into(),
+                email: Some("same@example.com".into()),
+                plan_hint: Some(plan.into()),
+                account_id: Some("shared-account".into()),
+                workspace_id: None,
+                created_at: Some("2026-07-04T03:33:28Z".into()),
+                last_verified_at: Some("2026-07-04T03:33:28Z".into()),
+                source: Some("test".into()),
+                identity_key: Some("codex:account:shared-account".into()),
+            };
+            std::fs::write(
+                dir.join("account.json"),
+                serde_json::to_vec_pretty(&meta).unwrap(),
+            )
+            .unwrap();
+        }
+
+        let slots = list_slots(Agent::Codex);
+        assert_eq!(slots.len(), 2);
+        assert!(slots
+            .iter()
+            .any(|slot| slot.meta.plan_hint.as_deref() == Some("plus")));
+        assert!(slots
+            .iter()
+            .any(|slot| slot.meta.plan_hint.as_deref() == Some("team")));
+
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn save_slot_keeps_codex_same_account_id_different_plan_as_separate_slot() {
+        let _guard = crate::test_support::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+
+        let personal = Identity {
+            email: Some("same@example.com".into()),
+            account_id: Some("shared-account".into()),
+            plan_type: Some("plus".into()),
+        };
+        let business = Identity {
+            email: Some("same@example.com".into()),
+            account_id: Some("shared-account".into()),
+            plan_type: Some("team".into()),
+        };
+
+        let first = save_slot(Agent::Codex, b"plus-token", Some(&personal), "test").unwrap();
+        let second = save_slot(Agent::Codex, b"team-token", Some(&business), "test").unwrap();
+
+        assert_eq!(first, "shared-account");
+        assert_ne!(second, first);
+        let slots = list_slots(Agent::Codex);
+        assert_eq!(slots.len(), 2);
 
         std::env::remove_var("AI_HANDOFF_HOME");
     }

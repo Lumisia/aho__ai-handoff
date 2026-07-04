@@ -277,6 +277,10 @@ export function openLogsFolder(): Promise<MenuCommandResult> {
   return invoke("open_logs_folder");
 }
 
+export function openAccountsFolder(): Promise<MenuCommandResult> {
+  return invoke("open_accounts_folder");
+}
+
 export function reinstallHooks(): Promise<MenuCommandResult> {
   return invoke<MenuCommandResult>("reinstall_hooks").then((result) => {
     dashboardSnapshotCache = null;

@@ -1346,6 +1346,11 @@ account.btn_launch:
   ko: "[l] CLI로 실행"
   ja: "[l] CLIで起動"
   zh: "[l] 运行 CLI"
+account.btn_refresh:
+  en: "[r] check usage"
+  ko: "[r] 사용량 확인"
+  ja: "[r] 使用量確認"
+  zh: "[r] 查询用量"
 account.btn_add:
   en: "[a] add account"
   ko: "[a] 계정 추가"

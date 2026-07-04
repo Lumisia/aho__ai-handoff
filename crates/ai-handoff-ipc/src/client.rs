@@ -37,9 +37,7 @@ pub fn send(req: &Request, cfg: &ClientConfig) -> Response {
                     return response;
                 }
                 Err(_) => {
-                    cleanup_request(&req.request_id);
-                    cleanup_response(&req.request_id);
-                    return degraded(&req.request_id, "daemon_unavailable");
+                    std::thread::sleep(cfg.poll_interval);
                 }
             },
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -119,6 +117,7 @@ mod tests {
 
         let req = sample_request("req-online");
         let response_path = responses_dir().join("req-online.json");
+        let response_tmp = responses_dir().join("req-online.json.tmp");
         let request_path = requests_dir().join("req-online.json");
         let responder = std::thread::spawn(move || {
             let deadline = Instant::now() + Duration::from_secs(2);
@@ -133,7 +132,9 @@ mod tests {
                 warnings: vec![],
                 diagnostics: json!({}),
             };
-            std::fs::write(response_path, serde_json::to_vec(&resp).unwrap()).unwrap();
+            let bytes = serde_json::to_vec(&resp).unwrap();
+            ai_handoff_core::secure_fs::write_shared_atomic(&response_path, &response_tmp, &bytes)
+                .unwrap();
         });
 
         let resp = send(
@@ -149,6 +150,52 @@ mod tests {
         assert_eq!(resp.hook_stdout["ok"], true);
         assert!(!requests_dir().join("req-online.json").exists());
         assert!(!responses_dir().join("req-online.json").exists());
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn send_waits_for_response_file_to_finish_writing() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        std::fs::create_dir_all(requests_dir()).unwrap();
+        std::fs::create_dir_all(responses_dir()).unwrap();
+
+        let req = sample_request("req-partial");
+        let response_path = responses_dir().join("req-partial.json");
+        let response_tmp = responses_dir().join("req-partial.json.tmp");
+        let request_path = requests_dir().join("req-partial.json");
+        let responder = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !request_path.exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            std::fs::write(&response_path, br#"{"status":"#).unwrap();
+            std::thread::sleep(Duration::from_millis(50));
+            let resp = Response {
+                version: VERSION,
+                request_id: "req-partial".into(),
+                status: Status::Ok,
+                hook_stdout: json!({ "ok": true }),
+                warnings: vec![],
+                diagnostics: json!({}),
+            };
+            let bytes = serde_json::to_vec(&resp).unwrap();
+            ai_handoff_core::secure_fs::write_shared_atomic(&response_path, &response_tmp, &bytes)
+                .unwrap();
+        });
+
+        let resp = send(
+            &req,
+            &ClientConfig {
+                request_timeout: Duration::from_secs(2),
+                poll_interval: Duration::from_millis(5),
+                ..Default::default()
+            },
+        );
+        responder.join().unwrap();
+        assert_eq!(resp.status, Status::Ok);
+        assert_eq!(resp.hook_stdout["ok"], true);
         std::env::remove_var("AI_HANDOFF_HOME");
     }
 

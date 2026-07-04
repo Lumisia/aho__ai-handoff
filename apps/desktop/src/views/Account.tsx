@@ -1,9 +1,9 @@
-import { useEffect, useState } from "react";
+import { FolderOpen, RefreshCw } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import {
-  captureCurrentAccount,
   deleteAccountSlot,
   getAccountReport,
-  launchAccountSlot,
+  openAccountsFolder,
   pollAccountLogin,
   refreshAccountSlotUsage,
   startAccountLogin,
@@ -13,8 +13,10 @@ import type {
   AccountAgentReport,
   AccountLoginSession,
   AccountReport,
+  AccountSlotRow,
   AccountWindow,
   DashboardSnapshot,
+  ResetCreditRow,
   SlotUsageReport,
 } from "../types";
 import type { Translator } from "../i18n";
@@ -25,14 +27,46 @@ function pct(value: number) {
   return `${Math.round(value)}%`;
 }
 
-function resetText(window: AccountWindow | null | undefined, t: Translator) {
-  if (!window?.resets_at) return t("resetUnknown");
-  return new Date(window.resets_at * 1000).toLocaleString();
+function compactDateFromSeconds(value: number) {
+  return new Date(value * 1000).toLocaleString(undefined, {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
-function dateText(value: string) {
+function compactDate(value: string) {
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString(undefined, {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function resetSummary(
+  fiveHour: AccountWindow | null | undefined,
+  weekly: AccountWindow | null | undefined,
+  t: Translator,
+) {
+  const values = [fiveHour?.resets_at, weekly?.resets_at]
+    .filter((value): value is number => typeof value === "number")
+    .map(compactDateFromSeconds);
+  return values.length > 0 ? `${t("reset")} - ${values.join(" / ")}` : `${t("reset")} - ${t("resetUnknown")}`;
+}
+
+function creditSummary(credits: ResetCreditRow[] | undefined) {
+  const first = credits?.[0];
+  if (!first) return null;
+  return `${compactDate(first.granted_at)} / ${compactDate(first.expires_at)}`;
+}
+
+function slotSubline(slot: AccountSlotRow, t: Translator) {
+  const plan = slot.plan ? `${t("plan")}: ${slot.plan}` : `${t("plan")}: unknown`;
+  return slot.source ? `${plan} - ${slot.source}` : plan;
 }
 
 function LimitBar({
@@ -48,15 +82,12 @@ function LimitBar({
 }) {
   const used = value ? Math.max(0, Math.min(100, value.used_percent)) : 0;
   return (
-    <div className="account-limit">
-      <div>
-        <span>{label}</span>
-        <strong>{value ? `${pct(value.remaining_percent)} ${t("left")}` : t("noSample")}</strong>
-      </div>
-      <div className={`usage-bar ${agent}`}>
+    <div className={`account-limit-row ${agent}`}>
+      <strong>{label}</strong>
+      <div className="usage-bar" aria-hidden="true">
         <span style={{ width: `${used}%` }} />
       </div>
-      <small>{resetText(value, t)}</small>
+      <span>{value ? `${pct(value.remaining_percent)} ${t("left")}` : t("noSample")}</span>
     </div>
   );
 }
@@ -79,6 +110,15 @@ function AgentPanel({
   const [message, setMessage] = useState<string | null>(null);
   const [usage, setUsage] = useState<Record<string, SlotUsageReport>>({});
   const [usageBusy, setUsageBusy] = useState<string | null>(null);
+  const autoUsageTried = useRef<Set<string>>(new Set());
+  const activeSlot = data.slots.find((slot) => slot.active);
+  const activeSlotLabel = activeSlot?.label;
+  const activeUsage = activeSlot ? usage[activeSlot.label] : null;
+  const displayFiveHour = activeUsage?.five_hour ?? data.five_hour;
+  const displayWeekly = activeUsage?.weekly ?? data.weekly;
+  const activeCredits = agent === "codex" ? creditSummary(activeUsage?.reset_credit_details) : null;
+  const activeDisplay = activeSlot?.email ?? activeSlot?.label ?? data.active;
+  const activePlan = activeUsage?.plan ?? activeSlot?.plan ?? data.plan;
 
   useEffect(() => {
     if (!login) return;
@@ -99,19 +139,35 @@ function AgentPanel({
     return () => window.clearInterval(timer);
   }, [agent, login, onRefresh]);
 
+  useEffect(() => {
+    if (agent !== "codex" || !activeSlotLabel || autoUsageTried.current.has(activeSlotLabel)) return;
+    let cancelled = false;
+    autoUsageTried.current.add(activeSlotLabel);
+    setUsageBusy(activeSlotLabel);
+    refreshAccountSlotUsage(agent, activeSlotLabel)
+      .then((result) => {
+        if (!cancelled) {
+          setUsage((current) => ({ ...current, [activeSlotLabel]: result }));
+        }
+      })
+      .catch(() => {
+        // Keep the local sample when provider usage is unavailable.
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setUsageBusy((current) => (current === activeSlotLabel ? null : current));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [agent, activeSlotLabel]);
+
   async function addAccount() {
     try {
       const session = await startAccountLogin(agent);
       setLogin(session);
       setMessage(session.message);
-    } catch (err) {
-      onError(err instanceof Error ? err.message : String(err));
-    }
-  }
-
-  async function capture() {
-    try {
-      onRefresh(await captureCurrentAccount(agent));
     } catch (err) {
       onError(err instanceof Error ? err.message : String(err));
     }
@@ -126,22 +182,11 @@ function AgentPanel({
     }
   }
 
-  async function launch(label: string) {
-    try {
-      const result = await launchAccountSlot(agent, label);
-      setMessage(result.message);
-      onRefresh(result.report);
-    } catch (err) {
-      onError(err instanceof Error ? err.message : String(err));
-    }
-  }
-
   async function refreshUsage(label: string) {
     setUsageBusy(label);
     try {
       const result = await refreshAccountSlotUsage(agent, label);
       setUsage((current) => ({ ...current, [label]: result }));
-      setMessage(`${title} "${label}" usage refreshed.`);
     } catch (err) {
       onError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -159,33 +204,33 @@ function AgentPanel({
   }
 
   return (
-    <section className="panel account-panel">
-      <div className="panel-title">
+    <section className={`panel account-panel ${agent}`}>
+      <div className="account-panel-head">
         <div>
           <h3>{title}</h3>
-            <p>{data.active ? `${t("active")}: ${data.active}` : t("noActiveSlot")}</p>
+          <p>{activeDisplay ? `${t("active")}: ${activeDisplay}` : t("noActiveSlot")}</p>
+          {activeDisplay && <p>{`${t("plan")}: ${activePlan ?? "unknown"}`}</p>}
         </div>
-        <div className="actions">
+        <div className="account-actions">
           <button className="ghost" onClick={addAccount} disabled={login !== null}>
             {t("addAccount")}
           </button>
-          <button className="ghost" onClick={capture}>
-            {t("captureCurrent")}
-          </button>
         </div>
       </div>
+
+      <div className="account-limit-stack">
+        <LimitBar agent={agent} label="5h" value={displayFiveHour} t={t} />
+        <LimitBar agent={agent} label={t("weekly")} value={displayWeekly} t={t} />
+        <div className="account-reset-line">{resetSummary(displayFiveHour, displayWeekly, t)}</div>
+        {activeCredits && (
+          <div className="account-credit-summary">
+            {t("resetCredits")} - {activeCredits}
+          </div>
+        )}
+      </div>
+
       {message && <div className="banner">{message}</div>}
-
-      <div className="limit-stack">
-        <LimitBar agent={agent} label="5h" value={data.five_hour} t={t} />
-        <LimitBar agent={agent} label="Weekly" value={data.weekly} t={t} />
-      </div>
       {data.usage_source === "none" && <div className="empty">{t("noSampleHint")}</div>}
-
-      <div className="path-strip">
-        <span>{t("vaultRoot")}</span>
-        <code>{data.root}</code>
-      </div>
 
       <div className="slot-list">
         {data.slots.length === 0 && <div className="empty">{t("noActiveSlot")}</div>}
@@ -193,25 +238,31 @@ function AgentPanel({
           const slotUsage = usage[slot.label];
           return (
             <article className={`slot-row ${slot.active ? "active" : ""}`} key={slot.label}>
-              <div>
-                <strong>{slot.email ?? slot.label}</strong>
-                <span>{slot.plan ?? slot.source ?? t("savedAccount")}</span>
-                <code>{slot.path}</code>
+              <div className="slot-main">
+                <div className="slot-name-line">
+                  <strong>{slot.email ?? slot.label}</strong>
+                  {slot.active && <span>{t("active")}</span>}
+                </div>
+                <small>{slotSubline(slot, t)}</small>
                 {slotUsage && (
                   <div className="slot-usage">
                     <div className="slot-usage-meta">
-                      <span>{t("plan")}: {slotUsage.plan ?? slot.plan ?? "unknown"}</span>
+                      <span>
+                        {t("plan")}: {slotUsage.plan ?? slot.plan ?? "unknown"}
+                      </span>
                       {slotUsage.reset_credits !== null && slotUsage.reset_credits !== undefined && (
-                        <span>{t("resetCredits")}: {slotUsage.reset_credits}</span>
+                        <span>
+                          {t("resetCredits")}: {slotUsage.reset_credits}
+                        </span>
                       )}
                     </div>
                     <LimitBar agent={agent} label="5h" value={slotUsage.five_hour} t={t} />
-                    <LimitBar agent={agent} label="Weekly" value={slotUsage.weekly} t={t} />
+                    <LimitBar agent={agent} label={t("weekly")} value={slotUsage.weekly} t={t} />
                     {slotUsage.reset_credit_details.length > 0 && (
                       <div className="credit-list">
                         {slotUsage.reset_credit_details.slice(0, 3).map((credit) => (
                           <small key={`${credit.granted_at}-${credit.expires_at}`}>
-                            {dateText(credit.expires_at)}
+                            {compactDate(credit.granted_at)} / {compactDate(credit.expires_at)}
                           </small>
                         ))}
                       </div>
@@ -219,16 +270,9 @@ function AgentPanel({
                   </div>
                 )}
               </div>
-              <div className="actions">
-                <button
-                  className="ghost"
-                  disabled={usageBusy === slot.label}
-                  onClick={() => refreshUsage(slot.label)}
-                >
+              <div className="account-actions slot-actions">
+                <button className="ghost" disabled={usageBusy === slot.label} onClick={() => refreshUsage(slot.label)}>
                   {t("usageButton")}
-                </button>
-                <button className="ghost" onClick={() => launch(slot.label)}>
-                  {t("launchCli")}
                 </button>
                 <button className="ghost" disabled={slot.active} onClick={() => switchSlot(slot.label)}>
                   {t("switch")}
@@ -245,11 +289,10 @@ function AgentPanel({
   );
 }
 
-export default function Account({ snapshot, t }: { snapshot: DashboardSnapshot; t: Translator }) {
+export default function Account({ snapshot: _snapshot, t }: { snapshot: DashboardSnapshot; t: Translator }) {
   const [report, setReport] = useState<AccountReport | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const accountRoot = `${snapshot.paths.ai_home}\\accounts`;
 
   useEffect(() => {
     void loadAccounts(false);
@@ -267,30 +310,32 @@ export default function Account({ snapshot, t }: { snapshot: DashboardSnapshot; 
     }
   }
 
+  async function openFolder() {
+    try {
+      await openAccountsFolder();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
   return (
-    <div className="view">
-      <section className="panel">
-        <div className="panel-title">
-          <div>
-            <h3>{t("accounts")}</h3>
-            <p>{t("accountsHelp")}</p>
-          </div>
-          <button className="refresh" onClick={() => void loadAccounts(true)}>
-            {t("refresh")}
+    <div className="view account-view">
+      <div className="account-page-head">
+        <h3>{t("accounts")}</h3>
+        <div className="account-page-actions">
+          <button className="ghost icon-text-button" onClick={() => void openFolder()}>
+            <FolderOpen size={15} aria-hidden="true" />
+            {t("openFolder")}
+          </button>
+          <button className="ghost icon-text-button" onClick={() => void loadAccounts(true)} disabled={loading}>
+            <RefreshCw size={15} aria-hidden="true" />
+            {loading ? t("loadingAccounts") : t("refresh")}
           </button>
         </div>
-        <div className="detail-grid">
-          <span>{t("accountRoot")}</span>
-          <code>{accountRoot}</code>
-          <span>{t("launcher")}</span>
-          <code>{snapshot.install_state.launcher ?? t("notInstalled")}</code>
-          <span>{t("installed")}</span>
-          <code>{snapshot.install_state.installed_at || "missing"}</code>
-        </div>
-      </section>
+      </div>
 
       {error && <section className="banner error">{error}</section>}
-      {loading && <section className="loading-screen">{t("loadingAccounts")}</section>}
+      {loading && !report && <section className="loading-screen">{t("loadingAccounts")}</section>}
       {report && (
         <div className="account-grid">
           <AgentPanel agent="codex" data={report.codex} onRefresh={setReport} onError={setError} t={t} />

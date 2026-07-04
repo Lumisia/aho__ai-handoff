@@ -38,8 +38,9 @@ pub fn fetch_slot_usage(agent: Agent, label: &str) -> Result<UsageData, String> 
             fetch_usage(&token, account_id.as_deref())
         }
         Agent::Claude => {
-            let (token, plan) =
-                account::claude_slot_oauth(label).ok_or("no usable token in this account")?;
+            // Re-syncs the active slot from the (fresher) live credential and
+            // fails fast on an expired token — no doomed network call.
+            let (token, plan) = account::claude_slot_fetch_token(label)?;
             fetch_claude_usage(&token, plan)
         }
     }
