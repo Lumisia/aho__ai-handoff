@@ -1,5 +1,5 @@
 use serde_json::Value;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Rate-limit sample used by the five-hour trigger.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -39,7 +39,13 @@ pub fn codex_trigger_usage_from_jsonl(path: &Path, now_ms: i64) -> Option<Trigge
 
 fn parse_codex_trigger_usage_line(line: &str, now_ms: i64) -> Option<TriggerUsage> {
     let value: Value = serde_json::from_str(line).ok()?;
-    let primary = value.get("payload")?.get("rate_limits")?.get("primary")?;
+    trigger_usage_from_rate_limits(value.get("payload")?.get("rate_limits")?, now_ms)
+}
+
+/// Parse a `rate_limits` object (`primary.used_percent` + reset hints) into a
+/// [`TriggerUsage`]. Shared by the rollout-line parser and the raw hook input.
+fn trigger_usage_from_rate_limits(rate_limits: &Value, now_ms: i64) -> Option<TriggerUsage> {
+    let primary = rate_limits.get("primary")?;
     let used_percent = primary.get("used_percent")?.as_f64()?;
     if !used_percent.is_finite() || !(0.0..=100.0).contains(&used_percent) {
         return None;
@@ -48,6 +54,166 @@ fn parse_codex_trigger_usage_line(line: &str, now_ms: i64) -> Option<TriggerUsag
         used_percent,
         resets_at_ms: reset_at_ms(primary, now_ms),
     })
+}
+
+/// `rate_limits` carried directly by a Codex hook input, either under
+/// `payload.rate_limits` (rollout record shape) or top-level `rate_limits`.
+pub fn codex_trigger_usage_from_raw(raw: &Value, now_ms: i64) -> Option<TriggerUsage> {
+    let rate_limits = raw
+        .get("payload")
+        .and_then(|payload| payload.get("rate_limits"))
+        .or_else(|| raw.get("rate_limits"))?;
+    trigger_usage_from_rate_limits(rate_limits, now_ms)
+}
+
+/// The Codex rollout roots: `<CODEX_HOME>/sessions` and
+/// `<CODEX_HOME>/archived_sessions`.
+pub fn codex_sessions_dirs() -> Vec<PathBuf> {
+    crate::account::codex_home()
+        .map(|home| vec![home.join("sessions"), home.join("archived_sessions")])
+        .unwrap_or_default()
+}
+
+/// Find the newest `rollout-*.jsonl` whose file name contains `session_id`
+/// under the given roots. Only directory entries are inspected — no file
+/// contents are read — so the walk stays cheap even on large session trees.
+pub fn find_codex_rollout(roots: &[PathBuf], session_id: &str) -> Option<PathBuf> {
+    if session_id.is_empty() {
+        return None;
+    }
+    let mut best: Option<(PathBuf, std::time::SystemTime)> = None;
+    let mut stack: Vec<PathBuf> = roots.to_vec();
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if !name.starts_with("rollout-")
+                || !name.ends_with(".jsonl")
+                || !name.contains(session_id)
+            {
+                continue;
+            }
+            let modified = entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            if best.as_ref().is_none_or(|(_, current)| modified > *current) {
+                best = Some((path, modified));
+            }
+        }
+    }
+    best.map(|(path, _)| path)
+}
+
+/// Where a Codex usage sample came from, or why every source yielded nothing.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CodexUsageResolution {
+    pub usage: Option<TriggerUsage>,
+    /// `"raw-rate-limits"`, `"transcript-path"`, or `"session-rollout"`.
+    pub source: Option<&'static str>,
+    /// The rollout file that produced (or should have produced) the sample —
+    /// cacheable by the caller to skip the directory walk next time.
+    pub rollout_path: Option<PathBuf>,
+    /// Why each source failed, in resolution order, when `usage` is `None`.
+    pub unknown_reasons: Vec<&'static str>,
+}
+
+/// Resolve the Codex five-hour usage for a hook event. The hook input is not
+/// guaranteed to carry `transcript_path`, so this tries, in order:
+/// 1. `rate_limits` embedded in the raw hook input (freshest, no I/O),
+/// 2. the transcript JSONL the hook points at,
+/// 3. the session's own rollout file located by `session_id` under
+///    `sessions_dirs` (`cached_rollout` skips the walk when still valid).
+pub fn resolve_codex_trigger_usage(
+    raw: &Value,
+    transcript_path: Option<&Path>,
+    session_id: Option<&str>,
+    sessions_dirs: &[PathBuf],
+    cached_rollout: Option<&Path>,
+    now_ms: i64,
+) -> CodexUsageResolution {
+    let mut reasons = Vec::new();
+
+    match codex_trigger_usage_from_raw(raw, now_ms) {
+        Some(usage) => {
+            return CodexUsageResolution {
+                usage: Some(usage),
+                source: Some("raw-rate-limits"),
+                rollout_path: None,
+                unknown_reasons: Vec::new(),
+            }
+        }
+        None => reasons.push("no-raw-rate-limits"),
+    }
+
+    match transcript_path {
+        Some(path) => match codex_trigger_usage_from_jsonl(path, now_ms) {
+            Some(usage) => {
+                return CodexUsageResolution {
+                    usage: Some(usage),
+                    source: Some("transcript-path"),
+                    rollout_path: Some(path.to_path_buf()),
+                    unknown_reasons: Vec::new(),
+                }
+            }
+            None => reasons.push("transcript-no-rate-limits"),
+        },
+        None => reasons.push("no-transcript-path"),
+    }
+
+    let Some(session_id) = session_id.filter(|sid| !sid.is_empty()) else {
+        reasons.push("no-session-id");
+        return CodexUsageResolution {
+            usage: None,
+            source: None,
+            rollout_path: None,
+            unknown_reasons: reasons,
+        };
+    };
+    let rollout = cached_rollout
+        .filter(|path| path.is_file())
+        .map(Path::to_path_buf)
+        .or_else(|| find_codex_rollout(sessions_dirs, session_id));
+    match rollout {
+        Some(path) => match codex_trigger_usage_from_jsonl(&path, now_ms) {
+            Some(usage) => CodexUsageResolution {
+                usage: Some(usage),
+                source: Some("session-rollout"),
+                rollout_path: Some(path),
+                unknown_reasons: Vec::new(),
+            },
+            None => {
+                reasons.push("rollout-no-rate-limits");
+                CodexUsageResolution {
+                    usage: None,
+                    source: None,
+                    rollout_path: Some(path),
+                    unknown_reasons: reasons,
+                }
+            }
+        },
+        None => {
+            reasons.push("session-rollout-not-found");
+            CodexUsageResolution {
+                usage: None,
+                source: None,
+                rollout_path: None,
+                unknown_reasons: reasons,
+            }
+        }
+    }
 }
 
 fn reset_at_ms(window: &Value, now_ms: i64) -> Option<i64> {
@@ -431,6 +597,161 @@ mod tests {
         let sample = codex_trigger_usage_from_jsonl(&p, 1_750_000_000_000).unwrap();
         assert_eq!(sample.used_percent, 61.0);
         assert_eq!(sample.resets_at_ms, None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Codex usage resolver tests
+    // -----------------------------------------------------------------------
+
+    fn rate_limits_line(used_percent: f64) -> String {
+        format!(
+            "{{\"payload\":{{\"rate_limits\":{{\"primary\":{{\"used_percent\":{used_percent}}}}}}}}}\n"
+        )
+    }
+
+    #[test]
+    fn raw_rate_limits_parsed_from_payload_and_top_level() {
+        let now_ms = 1_750_000_000_000;
+        let nested = serde_json::json!({
+            "payload": { "rate_limits": { "primary": { "used_percent": 29.0 } } }
+        });
+        assert_eq!(
+            codex_trigger_usage_from_raw(&nested, now_ms)
+                .unwrap()
+                .used_percent,
+            29.0
+        );
+        let top_level = serde_json::json!({
+            "rate_limits": { "primary": { "used_percent": 12.0 } }
+        });
+        assert_eq!(
+            codex_trigger_usage_from_raw(&top_level, now_ms)
+                .unwrap()
+                .used_percent,
+            12.0
+        );
+        assert!(codex_trigger_usage_from_raw(&serde_json::json!({}), now_ms).is_none());
+    }
+
+    #[test]
+    fn find_codex_rollout_picks_newest_match_across_roots() {
+        let sessions = tempfile::tempdir().unwrap();
+        let archived = tempfile::tempdir().unwrap();
+        let day_dir = sessions.path().join("2026").join("07").join("05");
+        std::fs::create_dir_all(&day_dir).unwrap();
+        let sid = "0197e5c3-aaaa-bbbb-cccc-1234567890ab";
+
+        let old = archived
+            .path()
+            .join(format!("rollout-2026-07-01T01-00-00-{sid}.jsonl"));
+        std::fs::write(&old, rate_limits_line(10.0)).unwrap();
+        let newer = day_dir.join(format!("rollout-2026-07-05T03-00-00-{sid}.jsonl"));
+        std::fs::write(&newer, rate_limits_line(29.0)).unwrap();
+        // Deterministic mtimes (filesystem timestamps can tie within a test).
+        let times = |secs: u64| filetime::FileTime::from_unix_time(1_750_000_000 + secs as i64, 0);
+        filetime::set_file_mtime(&old, times(0)).unwrap();
+        filetime::set_file_mtime(&newer, times(60)).unwrap();
+        // Unrelated files never match.
+        std::fs::write(day_dir.join("rollout-other.jsonl"), rate_limits_line(99.0)).unwrap();
+
+        let roots = vec![sessions.path().to_path_buf(), archived.path().to_path_buf()];
+        assert_eq!(find_codex_rollout(&roots, sid), Some(newer));
+        assert_eq!(find_codex_rollout(&roots, "no-such-session"), None);
+        assert_eq!(find_codex_rollout(&roots, ""), None);
+    }
+
+    #[test]
+    fn resolver_prefers_raw_then_transcript_then_session_rollout() {
+        let now_ms = 1_750_000_000_000;
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        std::fs::write(&transcript, rate_limits_line(40.0)).unwrap();
+
+        // Raw wins over transcript.
+        let raw = serde_json::json!({
+            "payload": { "rate_limits": { "primary": { "used_percent": 29.0 } } }
+        });
+        let r = resolve_codex_trigger_usage(&raw, Some(&transcript), None, &[], None, now_ms);
+        assert_eq!(r.usage.unwrap().used_percent, 29.0);
+        assert_eq!(r.source, Some("raw-rate-limits"));
+
+        // Transcript wins when raw has nothing.
+        let r = resolve_codex_trigger_usage(
+            &serde_json::json!({}),
+            Some(&transcript),
+            None,
+            &[],
+            None,
+            now_ms,
+        );
+        assert_eq!(r.usage.unwrap().used_percent, 40.0);
+        assert_eq!(r.source, Some("transcript-path"));
+        assert_eq!(r.rollout_path.as_deref(), Some(transcript.as_path()));
+    }
+
+    #[test]
+    fn resolver_falls_back_to_session_rollout_without_transcript_path() {
+        let now_ms = 1_750_000_000_000;
+        let sessions = tempfile::tempdir().unwrap();
+        let day_dir = sessions.path().join("2026").join("07").join("05");
+        std::fs::create_dir_all(&day_dir).unwrap();
+        let sid = "0197e5c3-dddd-eeee-ffff-1234567890ab";
+        let rollout = day_dir.join(format!("rollout-2026-07-05T03-00-00-{sid}.jsonl"));
+        std::fs::write(&rollout, rate_limits_line(29.0)).unwrap();
+
+        let roots = vec![sessions.path().to_path_buf()];
+        let r = resolve_codex_trigger_usage(
+            &serde_json::json!({}),
+            None,
+            Some(sid),
+            &roots,
+            None,
+            now_ms,
+        );
+        assert_eq!(r.usage.unwrap().used_percent, 29.0);
+        assert_eq!(r.source, Some("session-rollout"));
+        assert_eq!(r.rollout_path.as_deref(), Some(rollout.as_path()));
+
+        // A valid cached path skips the walk entirely (empty roots).
+        let r = resolve_codex_trigger_usage(
+            &serde_json::json!({}),
+            None,
+            Some(sid),
+            &[],
+            Some(&rollout),
+            now_ms,
+        );
+        assert_eq!(r.usage.unwrap().used_percent, 29.0);
+        assert_eq!(r.source, Some("session-rollout"));
+    }
+
+    #[test]
+    fn resolver_reports_unknown_reasons_per_missing_source() {
+        let now_ms = 1_750_000_000_000;
+        let r = resolve_codex_trigger_usage(&serde_json::json!({}), None, None, &[], None, now_ms);
+        assert!(r.usage.is_none());
+        assert_eq!(
+            r.unknown_reasons,
+            vec!["no-raw-rate-limits", "no-transcript-path", "no-session-id"]
+        );
+
+        let sessions = tempfile::tempdir().unwrap();
+        let r = resolve_codex_trigger_usage(
+            &serde_json::json!({}),
+            None,
+            Some("sid-missing"),
+            &[sessions.path().to_path_buf()],
+            None,
+            now_ms,
+        );
+        assert_eq!(
+            r.unknown_reasons,
+            vec![
+                "no-raw-rate-limits",
+                "no-transcript-path",
+                "session-rollout-not-found"
+            ]
+        );
     }
 
     // -----------------------------------------------------------------------

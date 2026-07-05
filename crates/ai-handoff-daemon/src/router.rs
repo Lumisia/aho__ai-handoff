@@ -12,7 +12,7 @@ use ai_handoff_core::{
     fingerprint::fingerprint,
     hook_event::{normalize, HookEventKind},
     redaction::redact,
-    sensor::{claude_trigger_usage, codex_trigger_usage_from_jsonl},
+    sensor::{claude_trigger_usage, codex_sessions_dirs, resolve_codex_trigger_usage},
     trigger::{evaluate_trigger, TriggerAction, TriggerMode},
 };
 use ai_handoff_ipc::{
@@ -21,6 +21,8 @@ use ai_handoff_ipc::{
 };
 use chrono::{SecondsFormat, Utc};
 use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 pub struct Router {
@@ -28,6 +30,9 @@ pub struct Router {
     /// Once-per-session marks: threshold-trigger firings and pending-capsule
     /// notices, keyed by `<kind>:<agent>:<session_id-or-project_id>`.
     session_marks: Mutex<Deduper>,
+    /// Resolved Codex rollout files by session id, so the sessions-directory
+    /// walk runs at most once per session instead of on every hook event.
+    codex_rollouts: Mutex<HashMap<String, PathBuf>>,
 }
 
 impl Router {
@@ -35,6 +40,7 @@ impl Router {
         Self {
             deduper: Mutex::new(Deduper::new(1024)),
             session_marks: Mutex::new(Deduper::new(1024)),
+            codex_rollouts: Mutex::new(HashMap::new()),
         }
     }
 
@@ -129,89 +135,156 @@ impl Handler for Router {
                 Self::ok(req, json!({}), json!({}))
             }
             HookEventKind::PostToolUse => {
-                let now_ms = Utc::now().timestamp_millis();
-                let usage = match normalized.agent {
-                    // Claude usage comes from statusline samples (a sample
-                    // whose 5h window is still open is a valid lower bound);
-                    // the Claude transcript JSONL has no rate-limit payload.
-                    AgentKind::ClaudeCode => claude_trigger_usage(now_ms),
-                    AgentKind::Codex => normalized
-                        .transcript_path
-                        .as_deref()
-                        .and_then(|path| codex_trigger_usage_from_jsonl(path, now_ms)),
-                };
-                let used = usage.map(|sample| sample.used_percent);
-                let cfg = ai_handoff_core::config::load();
-                let resolved = ai_handoff_core::config::resolve(&cfg, &project_id);
-                let mode = if resolved.enabled {
-                    resolved.mode
-                } else {
-                    TriggerMode::Off
-                };
-                let outcome = evaluate_trigger(
-                    used,
-                    resolved.threshold,
-                    mode,
-                    false,
-                    &[], // burn-rate samples: SP4d
-                    &resolved.burn,
-                );
-                let mut fired = false;
-                let mut suppressed = false;
-                let mut trigger_expires_at_ms = None;
-                let stdout = match outcome.action {
-                    TriggerAction::None => json!({}),
-                    action => {
-                        let mark = trigger_mark::check_and_record(
-                            &normalized.agent,
-                            now_ms,
-                            usage.and_then(|sample| sample.resets_at_ms),
-                        );
-                        trigger_expires_at_ms = Some(mark.expires_at_ms);
-                        if !mark.fired {
-                            suppressed = true;
-                            json!({})
-                        } else {
-                            fired = true;
-                            let context = render_trigger_context(
-                                action,
-                                used.unwrap_or_default(),
-                                resolved.threshold,
-                                &req.agent,
-                                cfg.capsule.language,
-                            );
-                            json!({
-                                "decision": "block",
-                                "reason": trigger_block_reason(action),
-                                "hookSpecificOutput": {
-                                    "hookEventName": "PostToolUse",
-                                    "additionalContext": context,
-                                }
-                            })
-                        }
-                    }
-                };
-                Self::ok(
-                    req,
-                    stdout,
-                    json!({
-                        "used_percent": used,
-                        "trigger_reason": outcome.reason,
-                        "trigger_fired": fired,
-                        "trigger_suppressed": suppressed,
-                        "trigger_expires_at_ms": trigger_expires_at_ms,
-                    }),
-                )
+                let (stdout, diagnostics) =
+                    self.evaluate_five_hour_trigger(req, &normalized, &project_id, event);
+                Self::ok(req, stdout, diagnostics)
             }
             HookEventKind::Stop => {
                 if let Some(payload) = extract_capsule_payload(&normalized.raw) {
                     let capsule = build_capsule(&payload, &project_id, &normalized);
                     let _ = save_project_label(&project_id, &normalized.cwd);
                     let _ = save_capsule(&capsule);
+                    // The turn just checkpointed — asking again would be noise.
+                    return Self::ok(req, json!({}), json!({ "capsule_saved": true }));
                 }
-                Self::ok(req, json!({}), json!({}))
+                // Claude's PostToolUse hook only matches Write|Edit|Bash, so a
+                // read-heavy turn would otherwise never reach the threshold
+                // check; Stop covers every turn for both agents.
+                let (stdout, diagnostics) =
+                    self.evaluate_five_hour_trigger(req, &normalized, &project_id, event);
+                Self::ok(req, stdout, diagnostics)
             }
         }
+    }
+}
+
+impl Router {
+    /// Five-hour threshold evaluation shared by PostToolUse and Stop.
+    /// Returns `(hook_stdout, diagnostics)`.
+    fn evaluate_five_hour_trigger(
+        &self,
+        req: &ai_handoff_ipc::protocol::Request,
+        normalized: &ai_handoff_core::hook_event::NormalizedHookEvent,
+        project_id: &str,
+        event: HookEventKind,
+    ) -> (Value, Value) {
+        let now_ms = Utc::now().timestamp_millis();
+        let (usage, usage_source, usage_unknown) = match normalized.agent {
+            // Claude usage comes from statusline samples (a sample whose 5h
+            // window is still open is a valid lower bound); the Claude
+            // transcript JSONL has no rate-limit payload.
+            AgentKind::ClaudeCode => {
+                let usage = claude_trigger_usage(now_ms);
+                let source = usage.is_some().then_some("claude-statusline");
+                let unknown = if usage.is_none() {
+                    vec!["no-fresh-statusline-sample"]
+                } else {
+                    Vec::new()
+                };
+                (usage, source, unknown)
+            }
+            AgentKind::Codex => {
+                let session_id = normalized.session_id.as_deref();
+                let cached = session_id.and_then(|sid| {
+                    self.codex_rollouts
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .get(sid)
+                        .cloned()
+                });
+                let resolution = resolve_codex_trigger_usage(
+                    &normalized.raw,
+                    normalized.transcript_path.as_deref(),
+                    session_id,
+                    &codex_sessions_dirs(),
+                    cached.as_deref(),
+                    now_ms,
+                );
+                if let (Some(sid), Some(path)) = (session_id, resolution.rollout_path.as_ref()) {
+                    self.codex_rollouts
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .insert(sid.to_string(), path.clone());
+                }
+                (
+                    resolution.usage,
+                    resolution.source,
+                    resolution.unknown_reasons,
+                )
+            }
+        };
+        let used = usage.map(|sample| sample.used_percent);
+        let cfg = ai_handoff_core::config::load();
+        let resolved = ai_handoff_core::config::resolve(&cfg, project_id);
+        let mode = if resolved.enabled {
+            resolved.mode
+        } else {
+            TriggerMode::Off
+        };
+        let outcome = evaluate_trigger(
+            used,
+            resolved.threshold,
+            mode,
+            false,
+            &[], // burn-rate samples: SP4d
+            &resolved.burn,
+        );
+        let mut fired = false;
+        let mut suppressed = false;
+        let mut trigger_expires_at_ms = None;
+        let stdout = match outcome.action {
+            TriggerAction::None => json!({}),
+            action => {
+                let mark = trigger_mark::check_and_record(
+                    &normalized.agent,
+                    now_ms,
+                    usage.and_then(|sample| sample.resets_at_ms),
+                );
+                trigger_expires_at_ms = Some(mark.expires_at_ms);
+                if !mark.fired {
+                    suppressed = true;
+                    json!({})
+                } else {
+                    fired = true;
+                    let context = render_trigger_context(
+                        action,
+                        used.unwrap_or_default(),
+                        resolved.threshold,
+                        &req.agent,
+                        cfg.capsule.language,
+                    );
+                    if event == HookEventKind::Stop {
+                        // Stop hooks carry no additionalContext channel; the
+                        // block reason is what the agent reads to continue.
+                        json!({
+                            "decision": "block",
+                            "reason": context,
+                        })
+                    } else {
+                        json!({
+                            "decision": "block",
+                            "reason": trigger_block_reason(action),
+                            "hookSpecificOutput": {
+                                "hookEventName": "PostToolUse",
+                                "additionalContext": context,
+                            }
+                        })
+                    }
+                }
+            }
+        };
+        (
+            stdout,
+            json!({
+                "used_percent": used,
+                "usage_source": usage_source,
+                "usage_unknown_reasons": usage_unknown,
+                "trigger_reason": outcome.reason,
+                "trigger_fired": fired,
+                "trigger_suppressed": suppressed,
+                "trigger_expires_at_ms": trigger_expires_at_ms,
+            }),
+        )
     }
 }
 
@@ -1014,6 +1087,194 @@ mod tests {
         assert_eq!(suppressed.hook_stdout, json!({}));
         assert_eq!(suppressed.diagnostics["trigger_fired"], false);
         assert_eq!(suppressed.diagnostics["trigger_suppressed"], true);
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn post_tool_use_codex_fires_from_session_rollout_without_transcript_path() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let codex_home = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        std::env::set_var("CODEX_HOME", codex_home.path());
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[triggers.five_hour]\nenabled = true\nthreshold_percent = 10\nmode = \"ask\"\n[capsule]\nlanguage = \"ko\"\n",
+        )
+        .unwrap();
+
+        let sid = "0197e5c3-1111-2222-3333-444455556666";
+        let day_dir = codex_home.path().join("sessions/2026/07/05");
+        std::fs::create_dir_all(&day_dir).unwrap();
+        std::fs::write(
+            day_dir.join(format!("rollout-2026-07-05T03-00-00-{sid}.jsonl")),
+            "{\"payload\":{\"rate_limits\":{\"primary\":{\"used_percent\":29.0,\"resets_at\":4102444800}}}}\n",
+        )
+        .unwrap();
+
+        // No transcript_path in the hook input — only cwd + session_id.
+        let router = Router::new();
+        let req = request(
+            "turn-codex-rollout",
+            "post-tool-use",
+            "codex",
+            cwd.path(),
+            json!({ "cwd": cwd.path().to_string_lossy(), "session_id": sid }),
+        );
+        let resp = router.handle(&req);
+        assert_eq!(resp.status, Status::Ok);
+        assert_eq!(
+            resp.diagnostics["trigger_fired"], true,
+            "{:?}",
+            resp.diagnostics
+        );
+        assert_eq!(resp.diagnostics["used_percent"], 29.0);
+        assert_eq!(resp.diagnostics["usage_source"], "session-rollout");
+        assert_eq!(resp.hook_stdout["decision"], "block");
+        assert!(resp.hook_stdout["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+            .contains("네"));
+
+        std::env::remove_var("CODEX_HOME");
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn post_tool_use_codex_fires_from_raw_rate_limits() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let codex_home = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        std::env::set_var("CODEX_HOME", codex_home.path());
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[triggers.five_hour]\nenabled = true\nthreshold_percent = 10\nmode = \"ask\"\n",
+        )
+        .unwrap();
+
+        let router = Router::new();
+        let req = request(
+            "turn-codex-raw",
+            "post-tool-use",
+            "codex",
+            cwd.path(),
+            json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "session_id": "s-raw",
+                "payload": { "rate_limits": { "primary": { "used_percent": 29.0 } } }
+            }),
+        );
+        let resp = router.handle(&req);
+        assert_eq!(
+            resp.diagnostics["trigger_fired"], true,
+            "{:?}",
+            resp.diagnostics
+        );
+        assert_eq!(resp.diagnostics["usage_source"], "raw-rate-limits");
+        assert_eq!(resp.hook_stdout["decision"], "block");
+        std::env::remove_var("CODEX_HOME");
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn post_tool_use_codex_reports_unknown_reasons_when_nothing_found() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let codex_home = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        std::env::set_var("CODEX_HOME", codex_home.path());
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[triggers.five_hour]\nenabled = true\nthreshold_percent = 10\nmode = \"ask\"\n",
+        )
+        .unwrap();
+
+        let router = Router::new();
+        let req = request(
+            "turn-codex-unknown",
+            "post-tool-use",
+            "codex",
+            cwd.path(),
+            json!({ "cwd": cwd.path().to_string_lossy(), "session_id": "s-none" }),
+        );
+        let resp = router.handle(&req);
+        assert_eq!(resp.diagnostics["trigger_fired"], false);
+        assert_eq!(resp.diagnostics["trigger_reason"], "unknown");
+        assert_eq!(
+            resp.diagnostics["usage_unknown_reasons"],
+            json!([
+                "no-raw-rate-limits",
+                "no-transcript-path",
+                "session-rollout-not-found"
+            ])
+        );
+        std::env::remove_var("CODEX_HOME");
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn stop_fires_claude_trigger_for_read_only_turns() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[triggers.five_hour]\nenabled = true\nthreshold_percent = 10\nmode = \"ask\"\n[capsule]\nlanguage = \"ko\"\n",
+        )
+        .unwrap();
+        let now_ms = Utc::now().timestamp_millis();
+        assert!(ai_handoff_core::sensor::record_claude_rate_limit(
+            &json!({
+                "session_id": "sid-stop-trigger",
+                "rate_limits": { "five_hour": { "used_percentage": 29.0 } }
+            }),
+            now_ms,
+        ));
+
+        // A read-only turn never runs the PostToolUse hook (matcher is
+        // Write|Edit|Bash) — Stop must still evaluate the threshold.
+        let router = Router::new();
+        let req = request(
+            "turn-stop-trigger",
+            "stop",
+            "claude-code",
+            cwd.path(),
+            json!({ "cwd": cwd.path().to_string_lossy(), "session_id": "s-stop" }),
+        );
+        let resp = router.handle(&req);
+        assert_eq!(
+            resp.diagnostics["trigger_fired"], true,
+            "{:?}",
+            resp.diagnostics
+        );
+        assert_eq!(resp.hook_stdout["decision"], "block");
+        // Stop hooks have no additionalContext channel; the full ask context
+        // rides in the block reason instead.
+        let reason = resp.hook_stdout["reason"].as_str().unwrap();
+        assert!(reason.contains("AskUserQuestion"));
+        assert!(reason.contains("ai-handoff checkpoint --agent claude-code"));
+        assert!(resp.hook_stdout.get("hookSpecificOutput").is_none());
+
+        // A Stop that ships a capsule skips the trigger entirely.
+        let with_capsule = request(
+            "turn-stop-capsule",
+            "stop",
+            "claude-code",
+            cwd.path(),
+            json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "session_id": "s-stop-2",
+                "last_assistant_message": "```ai-handoff-capsule\n{\"goal\":\"done\"}\n```"
+            }),
+        );
+        let resp2 = router.handle(&with_capsule);
+        assert_eq!(resp2.hook_stdout, json!({}));
+        assert_eq!(resp2.diagnostics["capsule_saved"], true);
         std::env::remove_var("AI_HANDOFF_HOME");
     }
 

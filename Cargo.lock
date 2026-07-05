@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "ai-handoff-cli"
-version = "2.1.2"
+version = "2.1.3"
 dependencies = [
  "ai-handoff-core",
  "ai-handoff-daemon",
@@ -39,12 +39,13 @@ dependencies = [
 
 [[package]]
 name = "ai-handoff-core"
-version = "2.1.2"
+version = "2.1.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
  "chrono",
  "directories",
+ "filetime",
  "regex",
  "serde",
  "serde_json",
@@ -58,7 +59,7 @@ dependencies = [
 
 [[package]]
 name = "ai-handoff-daemon"
-version = "2.1.2"
+version = "2.1.3"
 dependencies = [
  "ai-handoff-core",
  "ai-handoff-ipc",
@@ -73,7 +74,7 @@ dependencies = [
 
 [[package]]
 name = "ai-handoff-desktop"
-version = "2.1.2"
+version = "2.1.3"
 dependencies = [
  "ai-handoff-core",
  "ai-handoff-ipc",
@@ -90,7 +91,7 @@ dependencies = [
 
 [[package]]
 name = "ai-handoff-ipc"
-version = "2.1.2"
+version = "2.1.3"
 dependencies = [
  "ai-handoff-core",
  "serde",
@@ -102,7 +103,7 @@ dependencies = [
 
 [[package]]
 name = "ai-handoff-tui"
-version = "2.1.2"
+version = "2.1.3"
 dependencies = [
  "ai-handoff-core",
  "ai-handoff-usage",
@@ -118,7 +119,7 @@ dependencies = [
 
 [[package]]
 name = "ai-handoff-usage"
-version = "2.1.2"
+version = "2.1.3"
 dependencies = [
  "chrono",
  "directories",
@@ -1091,6 +1092,16 @@ checksum = "38e2275cc4e4fc009b0669731a1e5ab7ebf11f469eaede2bab9309a5b4d6057f"
 dependencies = [
  "memoffset",
  "rustc_version",
+]
+
+[[package]]
+name = "filetime"
+version = "0.2.29"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c287a33c7f0a620c38e641e7f60827713987b3c0f26e8ddc9462cc69cf75759"
+dependencies = [
+ "cfg-if",
+ "libc",
 ]
 
 [[package]]
