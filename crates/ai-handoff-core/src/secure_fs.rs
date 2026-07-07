@@ -121,6 +121,43 @@ pub fn write_private_atomic(path: &Path, tmp: &Path, bytes: &[u8]) -> std::io::R
     harden_file(path)
 }
 
+/// Atomically write a PRIVATE file without re-ACLing its parent directory.
+///
+/// For live agent credential files (`~/.claude/.credentials.json`,
+/// `~/.codex/auth.json`): the file itself must stay private (Claude Code
+/// creates it 0600), but the parent is the AGENT'S home — hardening it with an
+/// explicit private ACL could strip a sandbox ACE the agent depends on, the
+/// same failure mode `ensure_inherited_subdir` exists to repair for the IPC
+/// dirs. So the parent is only created when missing, never re-ACLed.
+pub fn write_private_atomic_file(path: &Path, tmp: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.is_dir() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    write_file_with_private_mode(tmp, bytes)?;
+    harden_file(tmp)?;
+    match std::fs::rename(tmp, path) {
+        Ok(()) => {}
+        Err(error) if path.exists() => {
+            std::fs::remove_file(path)?;
+            std::fs::rename(tmp, path).map_err(|second_error| {
+                let _ = std::fs::remove_file(tmp);
+                if second_error.kind() == std::io::ErrorKind::Other {
+                    error
+                } else {
+                    second_error
+                }
+            })?;
+        }
+        Err(error) => {
+            let _ = std::fs::remove_file(tmp);
+            return Err(error);
+        }
+    }
+    harden_file(path)
+}
+
 pub fn touch_private_file(path: &Path) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         ensure_private_dir(parent)?;

@@ -10,13 +10,22 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub fn run(json_output: bool) -> anyhow::Result<i32> {
+pub fn run(json_output: bool, fix: bool) -> anyhow::Result<i32> {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
-    Ok(run_io(json_output, &mut out))
+    Ok(run_io_fix(json_output, fix, &mut out))
 }
 
+/// Diagnostics-only entry point (kept so existing callers/tests read the
+/// same signature semantics: no repairs, just the report).
 pub fn run_io(json_output: bool, out: &mut dyn Write) -> i32 {
+    run_io_fix(json_output, false, out)
+}
+
+pub fn run_io_fix(json_output: bool, fix: bool, out: &mut dyn Write) -> i32 {
+    // --fix runs the repairs FIRST so the printed report shows the state the
+    // user actually ends up with.
+    let fixes = if fix { apply_fixes() } else { Vec::new() };
     let req = Request {
         version: VERSION,
         request_id: uuid::Uuid::new_v4().to_string(),
@@ -62,6 +71,7 @@ pub fn run_io(json_output: bool, out: &mut dyn Write) -> i32 {
     let st = ai_handoff_core::install::state::load(&ai_handoff_core::paths::home());
     let claude_plugin = claude_plugin_state(&st.claude.plugin);
     let codex_plugin = codex_plugin_state(&st.codex.plugin);
+    let next_steps = next_steps(daemon == "reachable", fix, &claude_plugin, &codex_plugin);
 
     let report = json!({
         "daemon": daemon,
@@ -74,6 +84,8 @@ pub fn run_io(json_output: bool, out: &mut dyn Write) -> i32 {
             "claude": claude_plugin,
             "codex": codex_plugin,
         },
+        "fixes": fixes,
+        "next_steps": next_steps,
     });
 
     if json_output {
@@ -141,8 +153,91 @@ pub fn run_io(json_output: bool, out: &mut dyn Write) -> i32 {
                 "trust needed"
             )
         );
+        for fixed in report["fixes"].as_array().into_iter().flatten() {
+            let _ = writeln!(out, "fix: {}", fixed.as_str().unwrap_or(""));
+        }
+        for step in report["next_steps"].as_array().into_iter().flatten() {
+            let _ = writeln!(out, "next step: {}", step.as_str().unwrap_or(""));
+        }
     }
     0
+}
+
+/// The `--fix` pass: repair what a local command can safely repair, and
+/// describe each action taken. Anything needing the vendor CLI or user
+/// interaction stays in `next_steps` instead.
+fn apply_fixes() -> Vec<String> {
+    let mut fixes = Vec::new();
+
+    // 1. Runtime tree: recreate/re-harden home, IPC (root private, subdirs
+    //    inheriting), store, and logs — the same repairs daemon startup and
+    //    `install --yes` perform.
+    match repair_runtime_dirs() {
+        Ok(()) => fixes.push(
+            "repaired runtime directories (home, ipc requests/responses/dead-letter, store, logs)"
+                .to_string(),
+        ),
+        Err(error) => fixes.push(format!("runtime directory repair FAILED: {error}")),
+    }
+
+    // 2. Daemon: spawn one when unreachable and wait until it answers.
+    if super::hook::ping_daemon(Duration::from_millis(150)) {
+        return fixes;
+    }
+    if super::hook::start_daemon_logged() && super::hook::ping_daemon(Duration::from_millis(2500)) {
+        fixes.push("started the daemon (it was unreachable)".to_string());
+    } else {
+        fixes.push(
+            "daemon start FAILED — run `ai-handoff daemon run` manually and check logs".to_string(),
+        );
+    }
+    fixes
+}
+
+/// Mirror of the daemon's `ensure_runtime_dirs`, callable without a daemon.
+fn repair_runtime_dirs() -> std::io::Result<()> {
+    use ai_handoff_core::{paths, secure_fs};
+    secure_fs::ensure_private_dir(&paths::home())?;
+    secure_fs::ensure_private_dir(&paths::ipc_dir())?;
+    secure_fs::ensure_inherited_subdir(&paths::requests_dir())?;
+    secure_fs::ensure_inherited_subdir(&paths::responses_dir())?;
+    secure_fs::ensure_inherited_subdir(&paths::dead_letter_dir())?;
+    secure_fs::ensure_private_dir(&paths::store_dir())?;
+    secure_fs::ensure_private_dir(&paths::logs_dir())?;
+    secure_fs::touch_private_file(&paths::logs_dir().join("daemon.log"))
+}
+
+/// Actionable follow-ups the user must do themselves (UX: a first-run doctor
+/// should say exactly what to do next, especially for the Codex trust step,
+/// which no command can perform on the user's behalf).
+fn next_steps(
+    daemon_reachable: bool,
+    fix_ran: bool,
+    claude_plugin: &serde_json::Value,
+    codex_plugin: &serde_json::Value,
+) -> Vec<String> {
+    let mut steps = Vec::new();
+    let installed = |plugin: &serde_json::Value| plugin["installed"].as_bool().unwrap_or(false);
+    if !installed(claude_plugin) || !installed(codex_plugin) {
+        steps.push(
+            "plugin hooks are not installed for every agent — run `ai-handoff install --yes`"
+                .to_string(),
+        );
+    }
+    if installed(codex_plugin) && !codex_plugin["trusted"].as_bool().unwrap_or(false) {
+        steps.push(
+            "Codex hooks are not trusted yet: open Codex, run /hooks, select each ai-handoff \
+             entry and choose Trust, then re-run `ai-handoff doctor`"
+                .to_string(),
+        );
+    }
+    if !daemon_reachable && !fix_ran {
+        steps.push(
+            "daemon unreachable — run `ai-handoff doctor --fix` or `ai-handoff daemon run`"
+                .to_string(),
+        );
+    }
+    steps
 }
 
 fn mark(ok: bool, yes: &'static str, no: &'static str) -> &'static str {

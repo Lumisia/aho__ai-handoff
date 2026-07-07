@@ -256,6 +256,22 @@ struct MenuCommandResult {
     message: String,
 }
 
+/// One "the five-hour limit is reached — switch accounts?" popup payload.
+/// Ask-only: the GUI shows this and the USER decides; nothing switches
+/// automatically for either agent.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+struct LimitAlert {
+    agent: String,
+    used_percent: f64,
+    threshold_percent: f64,
+    resets_at: Option<i64>,
+    /// A live switch while the agent runs may leave that session on the old
+    /// account — the popup shows a warning when true.
+    agent_running: bool,
+    /// Saved slots the user could switch to (non-active only).
+    slots: Vec<AccountSlotRow>,
+}
+
 #[tauri::command]
 async fn get_dashboard_snapshot() -> Result<DashboardSnapshot, String> {
     blocking_command("get_dashboard_snapshot", || {
@@ -341,6 +357,21 @@ async fn refresh_account_slot_usage(
 async fn run_repair_action(action_id: String) -> Result<RepairRunResult, String> {
     blocking_command("run_repair_action", move || {
         run_repair_action_by_id(&action_id)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn get_limit_alerts() -> Result<Vec<LimitAlert>, String> {
+    blocking_command("get_limit_alerts", || Ok(limit_alerts())).await
+}
+
+#[tauri::command]
+async fn dismiss_limit_alert(agent: String) -> Result<(), String> {
+    blocking_command("dismiss_limit_alert", move || {
+        let agent = parse_agent(&agent)?;
+        dismiss_limit_alert_for(agent);
+        Ok(())
     })
     .await
 }
@@ -722,7 +753,10 @@ fn category_for_key(key: &str) -> &'static str {
         "language"
     } else if key.starts_with("gui_theme.") || key.starts_with("theme.") {
         "theme"
-    } else if key.starts_with("autostart.") || key.starts_with("daemon.") {
+    } else if key == "gui.limit_switch_prompt"
+        || key.starts_with("autostart.")
+        || key.starts_with("daemon.")
+    {
         "automation"
     } else if key.starts_with("statusline.") {
         "agents"
@@ -743,6 +777,9 @@ fn description_for_key(key: &str) -> &'static str {
         "triggers.five_hour.burn_rate.enabled" => "Use recent burn rate to estimate runway.",
         "triggers.five_hour.burn_rate.runway_minutes" => {
             "Warn when estimated runway falls under this many minutes."
+        }
+        "gui.limit_switch_prompt" => {
+            "Ask via a popup whether to switch accounts when the five-hour limit is reached (never switches automatically)."
         }
         "autostart.enabled" => "Start the daemon automatically when the user logs in.",
         "daemon.idle_timeout_seconds" => {
@@ -1043,6 +1080,19 @@ fn agent_status_resolved(
     (local, if has_window { "local_sample" } else { "none" })
 }
 
+fn slot_row(slot: account::AccountSlot) -> AccountSlotRow {
+    AccountSlotRow {
+        label: slot.meta.label,
+        email: slot.meta.email,
+        plan: slot.meta.plan_hint,
+        account_id: slot.meta.account_id,
+        source: slot.meta.source,
+        created_at: slot.meta.created_at,
+        active: slot.active,
+        path: slot.dir.display().to_string(),
+    }
+}
+
 fn account_agent_report(
     agent: Agent,
     status: Option<account::AccountStatus>,
@@ -1050,16 +1100,7 @@ fn account_agent_report(
 ) -> AccountAgentReport {
     let slots = account::list_slots(agent)
         .into_iter()
-        .map(|slot| AccountSlotRow {
-            label: slot.meta.label,
-            email: slot.meta.email,
-            plan: slot.meta.plan_hint,
-            account_id: slot.meta.account_id,
-            source: slot.meta.source,
-            created_at: slot.meta.created_at,
-            active: slot.active,
-            path: slot.dir.display().to_string(),
-        })
+        .map(slot_row)
         .collect::<Vec<_>>();
     let active = slots
         .iter()
@@ -1120,6 +1161,134 @@ fn agent_name(agent: Agent) -> &'static str {
         Agent::Codex => "codex",
         Agent::Claude => "claude",
     }
+}
+
+// ---------------------------------------------------------------------------
+// Limit-reached account-switch popup (ask-only; never auto-switches)
+// ---------------------------------------------------------------------------
+
+const FIVE_HOUR_MS: i64 = 5 * 60 * 60 * 1000;
+
+/// Per-window dismissal marks so a popup fires at most once per reset window
+/// per agent (mirrors the daemon's trigger-mark file, kept separate so GUI
+/// dismissals never interfere with the hook trigger's own dedupe).
+fn limit_marks_path() -> PathBuf {
+    paths::store_dir().join("gui-limit-prompt-marks.json")
+}
+
+fn read_limit_marks() -> std::collections::BTreeMap<String, i64> {
+    std::fs::read(limit_marks_path())
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+fn write_limit_marks(marks: &std::collections::BTreeMap<String, i64>) {
+    let _ = secure_fs::ensure_private_dir(&paths::store_dir());
+    if let Ok(json) = serde_json::to_vec_pretty(marks) {
+        let path = limit_marks_path();
+        let tmp = path.with_extension("json.tmp");
+        let _ = secure_fs::write_private_atomic(&path, &tmp, &json);
+    }
+}
+
+/// Record a dismissal for `agent` until the current window resets, so the popup
+/// does not reappear every poll. Called on both "switch" and "later".
+fn dismiss_limit_alert_for(agent: Agent) {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let status = match agent {
+        Agent::Codex => account::codex_status(),
+        Agent::Claude => account::claude_status(),
+    };
+    let expires = status
+        .as_ref()
+        .and_then(|s| s.five_hour.as_ref())
+        .and_then(|w| w.resets_at)
+        .map(|reset_secs| reset_secs * 1000)
+        .filter(|reset_ms| *reset_ms > now_ms)
+        .unwrap_or(now_ms + FIVE_HOUR_MS);
+    let mut marks = read_limit_marks();
+    marks.insert(agent_name(agent).to_string(), expires);
+    write_limit_marks(&marks);
+}
+
+struct LimitAlertDecision {
+    prompt_enabled: bool,
+    trigger_enabled: bool,
+    trigger_off: bool,
+    used_percent: Option<f64>,
+    threshold: f64,
+    dismiss_expires_ms: Option<i64>,
+    now_ms: i64,
+    has_switch_target: bool,
+}
+
+/// Pure decision: should the popup fire for this agent? Isolated from all IO
+/// (config/status/slots/marks are passed in) so it is unit-testable.
+fn should_alert_limit(decision: LimitAlertDecision) -> bool {
+    if !decision.prompt_enabled
+        || !decision.trigger_enabled
+        || decision.trigger_off
+        || !decision.has_switch_target
+    {
+        return false;
+    }
+    let Some(used) = decision.used_percent else {
+        return false;
+    };
+    if used < decision.threshold {
+        return false;
+    }
+    // Still inside a dismissed window → stay quiet.
+    decision
+        .dismiss_expires_ms
+        .is_none_or(|expires| expires <= decision.now_ms)
+}
+
+/// Build the popup list: one alert per agent whose five-hour usage is at/above
+/// the configured threshold, that is enabled, not currently dismissed, and has
+/// at least one OTHER saved slot to switch to.
+fn limit_alerts() -> Vec<LimitAlert> {
+    let cfg = config::load();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let marks = read_limit_marks();
+    let resolved = config::resolve(&cfg, ""); // global trigger settings
+    let trigger_off = matches!(resolved.mode, ai_handoff_core::trigger::TriggerMode::Off);
+    let mut alerts = Vec::new();
+    for agent in [Agent::Codex, Agent::Claude] {
+        let status = match agent {
+            Agent::Codex => account::codex_status(),
+            Agent::Claude => account::claude_status(),
+        };
+        let window = status.as_ref().and_then(|s| s.five_hour.as_ref());
+        let switch_targets = account::list_slots(agent)
+            .into_iter()
+            .filter(|slot| !slot.active)
+            .map(slot_row)
+            .collect::<Vec<_>>();
+        if !should_alert_limit(LimitAlertDecision {
+            prompt_enabled: cfg.gui.limit_switch_prompt,
+            trigger_enabled: resolved.enabled,
+            trigger_off,
+            used_percent: window.map(|w| w.used_percent),
+            threshold: resolved.threshold,
+            dismiss_expires_ms: marks.get(agent_name(agent)).copied(),
+            now_ms,
+            has_switch_target: !switch_targets.is_empty(),
+        }) {
+            continue;
+        }
+        let window = window.expect("should_alert_limit requires a window");
+        alerts.push(LimitAlert {
+            agent: agent_name(agent).to_string(),
+            used_percent: window.used_percent,
+            threshold_percent: resolved.threshold,
+            resets_at: window.resets_at,
+            agent_running: account::agent_running(agent),
+            slots: switch_targets,
+        });
+    }
+    alerts
 }
 
 fn parse_agent(agent: &str) -> Result<Agent, String> {
@@ -1913,6 +2082,8 @@ fn main() {
             capture_current_account,
             switch_account_slot,
             delete_account_slot,
+            get_limit_alerts,
+            dismiss_limit_alert,
             get_config_settings,
             set_config_value,
             reset_config_value,
@@ -1965,6 +2136,7 @@ mod tests {
             },
             files: vec![],
             next_prompt: None,
+            workspace: None,
             redaction: RedactionMeta {
                 applied: false,
                 ruleset: "none".into(),
@@ -1975,6 +2147,70 @@ mod tests {
                 consumed_at: None,
             },
         }
+    }
+
+    #[test]
+    fn limit_alert_fires_only_when_over_threshold_with_a_target_and_no_dismiss() {
+        fn baseline() -> LimitAlertDecision {
+            LimitAlertDecision {
+                prompt_enabled: true,
+                trigger_enabled: true,
+                trigger_off: false,
+                used_percent: Some(85.0),
+                threshold: 80.0,
+                dismiss_expires_ms: None,
+                now_ms: 1_000,
+                has_switch_target: true,
+            }
+        }
+
+        // Baseline: over threshold, enabled, has a switch target, not dismissed.
+        assert!(should_alert_limit(baseline()));
+        // Under threshold: no popup.
+        assert!(!should_alert_limit(LimitAlertDecision {
+            used_percent: Some(50.0),
+            ..baseline()
+        }));
+        // No other slot to switch to: no popup.
+        assert!(!should_alert_limit(LimitAlertDecision {
+            used_percent: Some(90.0),
+            has_switch_target: false,
+            ..baseline()
+        }));
+        // Prompt disabled in config: no popup.
+        assert!(!should_alert_limit(LimitAlertDecision {
+            prompt_enabled: false,
+            used_percent: Some(90.0),
+            ..baseline()
+        }));
+        // Trigger disabled / off mode: no popup (respects existing behavior).
+        assert!(!should_alert_limit(LimitAlertDecision {
+            trigger_enabled: false,
+            used_percent: Some(90.0),
+            ..baseline()
+        }));
+        assert!(!should_alert_limit(LimitAlertDecision {
+            trigger_off: true,
+            used_percent: Some(90.0),
+            ..baseline()
+        }));
+        // Unknown usage: no popup.
+        assert!(!should_alert_limit(LimitAlertDecision {
+            used_percent: None,
+            ..baseline()
+        }));
+        // Dismissed and still inside the window: silent.
+        assert!(!should_alert_limit(LimitAlertDecision {
+            used_percent: Some(90.0),
+            dismiss_expires_ms: Some(5_000),
+            ..baseline()
+        }));
+        // Dismiss window elapsed: fires again.
+        assert!(should_alert_limit(LimitAlertDecision {
+            used_percent: Some(90.0),
+            dismiss_expires_ms: Some(500),
+            ..baseline()
+        }));
     }
 
     fn usage_event(source: Source, model: &str, day: &str, tokens: u64) -> UsageEvent {

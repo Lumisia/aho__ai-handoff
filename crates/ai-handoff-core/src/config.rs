@@ -23,8 +23,27 @@ pub struct Config {
     pub language: Language,
     pub capsule: CapsuleConfig,
     pub theme: ThemeConfig,
+    pub gui: GuiConfig,
     pub gui_theme: GuiThemeConfig,
     pub project_overrides: HashMap<String, ProjectOverride>,
+}
+
+/// Desktop-GUI behavior toggles (theme options live in [`GuiThemeConfig`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct GuiConfig {
+    /// When the five-hour usage hits the trigger threshold, the running GUI
+    /// shows a popup asking whether to switch to another saved account slot.
+    /// Ask-only — the GUI never switches accounts by itself.
+    pub limit_switch_prompt: bool,
+}
+
+impl Default for GuiConfig {
+    fn default() -> Self {
+        Self {
+            limit_switch_prompt: true,
+        }
+    }
 }
 
 /// UI language preference. Serialized as a short code; defaults to English.
@@ -1045,6 +1064,7 @@ const SETTABLE: &[(&str, ValueKind)] = &[
 ];
 
 const GUI_SETTABLE: &[(&str, ValueKind)] = &[
+    ("gui.limit_switch_prompt", ValueKind::Bool),
     ("gui_theme.preset", ValueKind::GuiThemePreset),
     ("gui_theme.mode", ValueKind::GuiThemeMode),
     ("gui_theme.light_theme", ValueKind::GuiThemeName),
@@ -1392,6 +1412,7 @@ pub fn get_value(cfg: &Config, key: &str) -> Result<String, ConfigWriteError> {
         "theme.focus_border_color" => cfg.theme.focus_border_color.to_string(),
         "theme.selection_bg_color" => cfg.theme.selection_bg_color.to_string(),
         "theme.selection_fg_color" => cfg.theme.selection_fg_color.to_string(),
+        "gui.limit_switch_prompt" => cfg.gui.limit_switch_prompt.to_string(),
         "gui_theme.preset" => gui_theme_preset_str(gui_theme.preset).to_string(),
         "gui_theme.mode" => gui_theme_mode_str(gui_theme.mode).to_string(),
         "gui_theme.light_theme" => gui_theme.light_theme.clone(),
@@ -1860,7 +1881,21 @@ enabled = true
             assert!(get_value(&cfg, key).is_ok(), "key {key} not readable");
             assert!(key_kind(key).is_some(), "no kind for {key}");
         }
-        assert_eq!(gui_settable_keys().count(), 13);
+        assert_eq!(gui_settable_keys().count(), 14);
+    }
+
+    #[test]
+    fn gui_limit_switch_prompt_defaults_on_and_round_trips() {
+        assert!(Config::default().gui.limit_switch_prompt);
+        assert_eq!(
+            get_value(&Config::default(), "gui.limit_switch_prompt").unwrap(),
+            "true"
+        );
+
+        let text = set_value(None, "gui.limit_switch_prompt", "false").unwrap();
+        let cfg = parse(&text).unwrap();
+        assert!(!cfg.gui.limit_switch_prompt);
+        assert_eq!(get_value(&cfg, "gui.limit_switch_prompt").unwrap(), "false");
     }
 
     #[test]

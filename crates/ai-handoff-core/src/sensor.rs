@@ -66,6 +66,29 @@ pub fn codex_trigger_usage_from_raw(raw: &Value, now_ms: i64) -> Option<TriggerU
     trigger_usage_from_rate_limits(rate_limits, now_ms)
 }
 
+/// `rate_limits` carried directly by a Claude hook/statusline-shaped payload.
+/// Claude names the 5-hour window `five_hour` and the usage field
+/// `used_percentage`, so it cannot share the Codex `primary.used_percent`
+/// parser.
+pub fn claude_trigger_usage_from_raw(raw: &Value, now_ms: i64) -> Option<TriggerUsage> {
+    let rate_limits = raw
+        .get("payload")
+        .and_then(|payload| payload.get("rate_limits"))
+        .or_else(|| raw.get("rate_limits"))?;
+    let window = rate_limits.get("five_hour")?;
+    let used_percent = window
+        .get("used_percentage")
+        .or_else(|| window.get("used_percent"))?
+        .as_f64()?;
+    if !used_percent.is_finite() || !(0.0..=100.0).contains(&used_percent) {
+        return None;
+    }
+    Some(TriggerUsage {
+        used_percent,
+        resets_at_ms: reset_at_ms(window, now_ms),
+    })
+}
+
 /// The Codex rollout roots: `<CODEX_HOME>/sessions` and
 /// `<CODEX_HOME>/archived_sessions`.
 pub fn codex_sessions_dirs() -> Vec<PathBuf> {
@@ -81,6 +104,20 @@ pub fn find_codex_rollout(roots: &[PathBuf], session_id: &str) -> Option<PathBuf
     if session_id.is_empty() {
         return None;
     }
+    find_best_codex_rollout(roots, |name| name.contains(session_id))
+}
+
+/// Find the newest `rollout-*.jsonl` under the given roots, regardless of
+/// session id. This is a best-effort fallback for hook payloads that do not
+/// expose the session id shape used in the rollout file name.
+pub fn find_latest_codex_rollout(roots: &[PathBuf]) -> Option<PathBuf> {
+    find_best_codex_rollout(roots, |_| true)
+}
+
+fn find_best_codex_rollout<F>(roots: &[PathBuf], mut matches_name: F) -> Option<PathBuf>
+where
+    F: FnMut(&str) -> bool,
+{
     let mut best: Option<(PathBuf, std::time::SystemTime)> = None;
     let mut stack: Vec<PathBuf> = roots.to_vec();
     while let Some(dir) = stack.pop() {
@@ -99,10 +136,7 @@ pub fn find_codex_rollout(roots: &[PathBuf], session_id: &str) -> Option<PathBuf
             let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
                 continue;
             };
-            if !name.starts_with("rollout-")
-                || !name.ends_with(".jsonl")
-                || !name.contains(session_id)
-            {
+            if !name.starts_with("rollout-") || !name.ends_with(".jsonl") || !matches_name(name) {
                 continue;
             }
             let modified = entry
@@ -121,7 +155,8 @@ pub fn find_codex_rollout(roots: &[PathBuf], session_id: &str) -> Option<PathBuf
 #[derive(Clone, Debug, PartialEq)]
 pub struct CodexUsageResolution {
     pub usage: Option<TriggerUsage>,
-    /// `"raw-rate-limits"`, `"transcript-path"`, or `"session-rollout"`.
+    /// `"raw-rate-limits"`, `"transcript-path"`, `"session-rollout"`, or
+    /// `"latest-rollout"`.
     pub source: Option<&'static str>,
     /// The rollout file that produced (or should have produced) the sample —
     /// cacheable by the caller to skip the directory walk next time.
@@ -135,7 +170,8 @@ pub struct CodexUsageResolution {
 /// 1. `rate_limits` embedded in the raw hook input (freshest, no I/O),
 /// 2. the transcript JSONL the hook points at,
 /// 3. the session's own rollout file located by `session_id` under
-///    `sessions_dirs` (`cached_rollout` skips the walk when still valid).
+///    `sessions_dirs` (`cached_rollout` skips the walk when still valid),
+/// 4. the newest rollout file under `sessions_dirs` as a last local fallback.
 pub fn resolve_codex_trigger_usage(
     raw: &Value,
     transcript_path: Option<&Path>,
@@ -175,12 +211,7 @@ pub fn resolve_codex_trigger_usage(
 
     let Some(session_id) = session_id.filter(|sid| !sid.is_empty()) else {
         reasons.push("no-session-id");
-        return CodexUsageResolution {
-            usage: None,
-            source: None,
-            rollout_path: None,
-            unknown_reasons: reasons,
-        };
+        return latest_codex_rollout_resolution(sessions_dirs, now_ms, reasons);
     };
     let rollout = cached_rollout
         .filter(|path| path.is_file())
@@ -196,6 +227,31 @@ pub fn resolve_codex_trigger_usage(
             },
             None => {
                 reasons.push("rollout-no-rate-limits");
+                latest_codex_rollout_resolution(sessions_dirs, now_ms, reasons)
+            }
+        },
+        None => {
+            reasons.push("session-rollout-not-found");
+            latest_codex_rollout_resolution(sessions_dirs, now_ms, reasons)
+        }
+    }
+}
+
+fn latest_codex_rollout_resolution(
+    sessions_dirs: &[PathBuf],
+    now_ms: i64,
+    mut reasons: Vec<&'static str>,
+) -> CodexUsageResolution {
+    match find_latest_codex_rollout(sessions_dirs) {
+        Some(path) => match codex_trigger_usage_from_jsonl(&path, now_ms) {
+            Some(usage) => CodexUsageResolution {
+                usage: Some(usage),
+                source: Some("latest-rollout"),
+                rollout_path: Some(path),
+                unknown_reasons: Vec::new(),
+            },
+            None => {
+                reasons.push("latest-rollout-no-rate-limits");
                 CodexUsageResolution {
                     usage: None,
                     source: None,
@@ -205,7 +261,7 @@ pub fn resolve_codex_trigger_usage(
             }
         },
         None => {
-            reasons.push("session-rollout-not-found");
+            reasons.push("latest-rollout-not-found");
             CodexUsageResolution {
                 usage: None,
                 source: None,
@@ -732,7 +788,12 @@ mod tests {
         assert!(r.usage.is_none());
         assert_eq!(
             r.unknown_reasons,
-            vec!["no-raw-rate-limits", "no-transcript-path", "no-session-id"]
+            vec![
+                "no-raw-rate-limits",
+                "no-transcript-path",
+                "no-session-id",
+                "latest-rollout-not-found"
+            ]
         );
 
         let sessions = tempfile::tempdir().unwrap();
@@ -749,9 +810,37 @@ mod tests {
             vec![
                 "no-raw-rate-limits",
                 "no-transcript-path",
-                "session-rollout-not-found"
+                "session-rollout-not-found",
+                "latest-rollout-not-found"
             ]
         );
+    }
+
+    #[test]
+    fn resolver_falls_back_to_latest_rollout_when_hook_lacks_session_match() {
+        let now_ms = 1_750_000_000_000;
+        let sessions = tempfile::tempdir().unwrap();
+        let day_dir = sessions.path().join("2026").join("07").join("05");
+        std::fs::create_dir_all(&day_dir).unwrap();
+        let old = day_dir.join("rollout-2026-07-05T01-00-00-old-session.jsonl");
+        let latest = day_dir.join("rollout-2026-07-05T03-00-00-current-session.jsonl");
+        std::fs::write(&old, rate_limits_line(12.0)).unwrap();
+        std::fs::write(&latest, rate_limits_line(78.0)).unwrap();
+        let times = |secs: u64| filetime::FileTime::from_unix_time(1_750_000_000 + secs as i64, 0);
+        filetime::set_file_mtime(&old, times(0)).unwrap();
+        filetime::set_file_mtime(&latest, times(60)).unwrap();
+
+        let r = resolve_codex_trigger_usage(
+            &serde_json::json!({}),
+            None,
+            Some("session-id-not-in-filename"),
+            &[sessions.path().to_path_buf()],
+            None,
+            now_ms,
+        );
+        assert_eq!(r.usage.unwrap().used_percent, 78.0);
+        assert_eq!(r.source, Some("latest-rollout"));
+        assert_eq!(r.rollout_path.as_deref(), Some(latest.as_path()));
     }
 
     // -----------------------------------------------------------------------
@@ -798,6 +887,23 @@ mod tests {
                 }
             }
         })
+    }
+
+    #[test]
+    fn claude_raw_rate_limits_can_drive_trigger_usage() {
+        let now_ms = 1_750_000_000_000;
+        let raw = serde_json::json!({
+            "rate_limits": {
+                "five_hour": {
+                    "used_percentage": 78.0,
+                    "resets_at": 1_750_001_800.0
+                }
+            }
+        });
+        let sample = claude_trigger_usage_from_raw(&raw, now_ms).expect("raw usage");
+        assert_eq!(sample.used_percent, 78.0);
+        assert_eq!(sample.resets_at_ms, Some(1_750_001_800_000));
+        assert!(claude_trigger_usage_from_raw(&serde_json::json!({}), now_ms).is_none());
     }
 
     #[test]

@@ -158,10 +158,7 @@ pub(crate) fn try_start_daemon() -> std::io::Result<()> {
         .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
     {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "daemon autostart disabled",
-        ));
+        return Err(std::io::Error::other("daemon autostart disabled"));
     }
 
     let exe = std::env::current_exe()?;

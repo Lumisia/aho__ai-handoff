@@ -1316,7 +1316,7 @@ impl App {
             .filter_map(|(idx, row)| {
                 let in_category = self.settings_category_idx == 0
                     || setting_category_index(row.key) == self.settings_category_idx;
-                let matches_search = search.as_ref().map_or(true, |needle| {
+                let matches_search = search.as_ref().is_none_or(|needle| {
                     row.key.to_ascii_lowercase().contains(needle)
                         || row.value.to_ascii_lowercase().contains(needle)
                         || setting_desc(row.key).to_ascii_lowercase().contains(needle)
@@ -2443,7 +2443,7 @@ impl App {
 
     fn draw_integration_page(&self, f: &mut Frame, area: Rect) {
         match self.integration_page {
-            IntegrationPage::Home => return,
+            IntegrationPage::Home => (),
             IntegrationPage::Detail => self.draw_text_panel_with_focus(
                 f,
                 area,
@@ -2910,7 +2910,7 @@ impl App {
                 ),
             ));
         }
-        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        rows.sort_by_key(|row| row.0);
         let mut lines = rows.into_iter().map(|(_, line)| line).collect::<Vec<_>>();
         if lines.is_empty() {
             lines.push(format!("ok {}", t!("overview.all_integrations_normal")));
@@ -5572,6 +5572,7 @@ mod tests {
             },
             files: vec![],
             next_prompt: None,
+            workspace: None,
             redaction: RedactionMeta {
                 applied: true,
                 ruleset: "default-v2".into(),
@@ -5728,6 +5729,7 @@ mod tests {
             },
             files: vec![],
             next_prompt: None,
+            workspace: None,
             redaction: RedactionMeta {
                 applied: false,
                 ruleset: "none".into(),

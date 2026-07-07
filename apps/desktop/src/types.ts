@@ -128,6 +128,15 @@ export interface AccountReport {
   claude: AccountAgentReport;
 }
 
+export interface LimitAlert {
+  agent: "codex" | "claude";
+  used_percent: number;
+  threshold_percent: number;
+  resets_at?: number | null;
+  agent_running: boolean;
+  slots: AccountSlotRow[];
+}
+
 export interface AccountLoginSession {
   agent: "codex" | "claude";
   home: string;

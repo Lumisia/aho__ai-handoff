@@ -103,6 +103,114 @@ fn doctor_flags_hardened_ipc_subdirs_as_broken() {
 }
 
 #[test]
+fn doctor_fix_repairs_runtime_dirs_and_reports_next_steps() {
+    let _guard = lock();
+    let home = tempfile::tempdir().unwrap();
+    std::env::set_var("AI_HANDOFF_HOME", home.path());
+
+    // Keep the daemon-serving side alive so --fix's spawned daemon (or the
+    // report ping) can be answered locally without a real spawned binary.
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop_worker = stop.clone();
+    let worker = std::thread::spawn(move || {
+        let router = Router::new();
+        while !stop_worker.load(std::sync::atomic::Ordering::Relaxed) {
+            serve_once(&router);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    });
+
+    let mut out = Vec::new();
+    let code = doctor::run_io_fix(true, true, &mut out);
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    worker.join().unwrap();
+    assert_eq!(code, 0);
+    let report: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    // The fix pass must have (re)created the whole IPC tree.
+    assert_eq!(report["ipc_requests"]["status"], "ok", "{report}");
+    assert_eq!(report["ipc_responses"]["status"], "ok", "{report}");
+    let fixes = report["fixes"].as_array().unwrap();
+    assert!(
+        fixes
+            .iter()
+            .any(|fix| fix.as_str().unwrap_or("").contains("runtime directories")),
+        "{report}"
+    );
+    // No plugins are installed in this fixture: doctor must say what to do.
+    assert!(
+        report["next_steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|step| step
+                .as_str()
+                .unwrap_or("")
+                .contains("ai-handoff install --yes")),
+        "{report}"
+    );
+
+    std::env::remove_var("AI_HANDOFF_HOME");
+}
+
+#[test]
+fn doctor_reports_codex_trust_next_step_when_untrusted() {
+    let _guard = lock();
+    let user_home = tempfile::tempdir().unwrap();
+    let ai_home = user_home.path().join("ai-home");
+    let codex_root = user_home
+        .path()
+        .join(".agents")
+        .join("plugins")
+        .join("ai-handoff");
+    std::fs::create_dir_all(codex_root.join(".codex-plugin")).unwrap();
+    std::fs::write(codex_root.join(".codex-plugin/plugin.json"), "{}").unwrap();
+    let marketplace = user_home
+        .path()
+        .join(".agents")
+        .join("plugins")
+        .join("marketplace.json");
+    std::fs::write(&marketplace, "{}").unwrap();
+    let codex_config = user_home.path().join(".codex").join("config.toml");
+    std::fs::create_dir_all(codex_config.parent().unwrap()).unwrap();
+    // Plugin enabled, but no trusted hook hashes recorded.
+    std::fs::write(
+        &codex_config,
+        "[plugins.\"ai-handoff@claude-codex-auto-handoff\"]\nenabled = true\n",
+    )
+    .unwrap();
+    state::save(
+        &ai_home,
+        &InstallState {
+            codex: state::CodexState {
+                plugin: Some(PluginRecord {
+                    root: codex_root.to_string_lossy().into_owned(),
+                    files: vec![],
+                    marketplace_file: Some(marketplace.to_string_lossy().into_owned()),
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    std::env::set_var("AI_HANDOFF_HOME", &ai_home);
+    let mut out = Vec::new();
+    doctor::run_io(true, &mut out);
+    let report: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(report["plugin"]["codex"]["trusted"], false, "{report}");
+    assert!(
+        report["next_steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|step| step.as_str().unwrap_or("").contains("/hooks")),
+        "{report}"
+    );
+    std::env::remove_var("AI_HANDOFF_HOME");
+}
+
+#[test]
 fn doctor_json_reports_plugin_install_enable_and_trust_state() {
     let _guard = lock();
     let user_home = tempfile::tempdir().unwrap();

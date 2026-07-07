@@ -13,13 +13,13 @@ use serde_json::json;
 use std::io::Write;
 use std::time::Duration;
 
-pub fn run(agent: AgentArg) -> anyhow::Result<i32> {
+pub fn run(agent: AgentArg, peek: bool) -> anyhow::Result<i32> {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
-    Ok(run_io(agent.as_str(), &mut out, true))
+    Ok(run_io(agent.as_str(), peek, &mut out, true))
 }
 
-pub fn run_io(agent: &str, out: &mut dyn Write, autostart_daemon: bool) -> i32 {
+pub fn run_io(agent: &str, peek: bool, out: &mut dyn Write, autostart_daemon: bool) -> i32 {
     let cwd = std::env::current_dir()
         .map(|path| path.to_string_lossy().into_owned())
         .unwrap_or_default();
@@ -27,7 +27,12 @@ pub fn run_io(agent: &str, out: &mut dyn Write, autostart_daemon: bool) -> i32 {
     let req = Request {
         version: VERSION,
         request_id: uuid::Uuid::new_v4().to_string(),
-        kind: "handoff_consume".to_string(),
+        // --peek previews the pending capsule without marking it consumed.
+        kind: if peek {
+            "handoff_peek".to_string()
+        } else {
+            "handoff_consume".to_string()
+        },
         agent: agent.to_string(),
         event: "handoff".to_string(),
         received_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),

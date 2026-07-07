@@ -35,6 +35,16 @@ pub fn serve_once(handler: &dyn Handler) -> usize {
                 continue;
             }
         };
+        // The response path is `responses/<request_id>.json`, and the id comes
+        // straight from the request body. Reject anything that could escape
+        // the responses dir (e.g. `../../…`) BEFORE handling: on Windows the
+        // request dir is deliberately writable by sandboxed agent hooks, so an
+        // unvalidated id would let a sandboxed process use the unsandboxed
+        // daemon to write files at arbitrary paths.
+        if !valid_request_id(&req.request_id) {
+            move_to_dead_letter(&path);
+            continue;
+        }
 
         let response = handler.handle(&req);
         if write_response(&response).is_ok() {
@@ -106,6 +116,16 @@ fn ensure_ipc_dirs() {
     let _ = ai_handoff_core::secure_fs::ensure_inherited_subdir(&requests_dir());
     let _ = ai_handoff_core::secure_fs::ensure_inherited_subdir(&responses_dir());
     let _ = ai_handoff_core::secure_fs::ensure_inherited_subdir(&dead_letter_dir());
+}
+
+/// A request id must be a plain token (UUIDs and the test ids qualify): it is
+/// used verbatim as a file name under `responses/`.
+fn valid_request_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
 }
 
 fn is_request_file(path: &Path) -> bool {
@@ -197,6 +217,47 @@ mod tests {
         assert_eq!(resp.request_id, "req-server");
         assert_eq!(resp.hook_stdout["ok"], true);
         std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn serve_once_dead_letters_path_traversal_request_ids() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        std::fs::create_dir_all(requests_dir()).unwrap();
+        std::fs::create_dir_all(responses_dir()).unwrap();
+        // A well-formed request whose id tries to escape the responses dir.
+        let req = sample_request("../../escape");
+        let req_path = requests_dir().join("evil.json");
+        std::fs::write(&req_path, serde_json::to_vec(&req).unwrap()).unwrap();
+
+        assert_eq!(serve_once(&EchoHandler), 0);
+        assert!(!req_path.exists(), "request must be consumed");
+        assert!(
+            dead_letter_dir().join("evil.json").exists(),
+            "invalid ids go to dead-letter"
+        );
+        // Nothing may be written outside responses/ — the traversal target
+        // would land at <home>/escape.json.
+        assert!(!home.path().join("escape.json").exists());
+        assert_eq!(
+            std::fs::read_dir(responses_dir()).unwrap().count(),
+            0,
+            "no response file for a rejected id"
+        );
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn valid_request_id_accepts_uuid_and_rejects_separators() {
+        assert!(valid_request_id("0197e5c3-1111-2222-3333-444455556666"));
+        assert!(valid_request_id("req-server_1"));
+        assert!(!valid_request_id(""));
+        assert!(!valid_request_id("../../escape"));
+        assert!(!valid_request_id("a/b"));
+        assert!(!valid_request_id("a\\b"));
+        assert!(!valid_request_id("a.b"));
+        assert!(!valid_request_id(&"x".repeat(65)));
     }
 
     #[test]

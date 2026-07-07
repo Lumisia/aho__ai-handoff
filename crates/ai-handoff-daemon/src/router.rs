@@ -12,7 +12,10 @@ use ai_handoff_core::{
     fingerprint::fingerprint,
     hook_event::{normalize, HookEventKind},
     redaction::redact,
-    sensor::{claude_trigger_usage, codex_sessions_dirs, resolve_codex_trigger_usage},
+    sensor::{
+        claude_trigger_usage, claude_trigger_usage_from_raw, codex_sessions_dirs,
+        resolve_codex_trigger_usage,
+    },
     trigger::{evaluate_trigger, TriggerAction, TriggerMode},
 };
 use ai_handoff_ipc::{
@@ -85,6 +88,9 @@ impl Handler for Router {
         }
         if req.kind == "handoff_consume" {
             return handle_handoff_consume(req);
+        }
+        if req.kind == "handoff_peek" {
+            return handle_handoff_peek(req);
         }
         if req.kind != "hook_event" {
             return degraded(&req.request_id, "unsupported_request");
@@ -174,14 +180,18 @@ impl Router {
             // window is still open is a valid lower bound); the Claude
             // transcript JSONL has no rate-limit payload.
             AgentKind::ClaudeCode => {
-                let usage = claude_trigger_usage(now_ms);
-                let source = usage.is_some().then_some("claude-statusline");
-                let unknown = if usage.is_none() {
-                    vec!["no-fresh-statusline-sample"]
+                if let Some(usage) = claude_trigger_usage_from_raw(&normalized.raw, now_ms) {
+                    (Some(usage), Some("raw-rate-limits"), Vec::new())
                 } else {
-                    Vec::new()
-                };
-                (usage, source, unknown)
+                    let usage = claude_trigger_usage(now_ms);
+                    let source = usage.is_some().then_some("claude-statusline");
+                    let unknown = if usage.is_none() {
+                        vec!["no-raw-rate-limits", "no-fresh-statusline-sample"]
+                    } else {
+                        vec!["no-raw-rate-limits"]
+                    };
+                    (usage, source, unknown)
+                }
             }
             AgentKind::Codex => {
                 let session_id = normalized.session_id.as_deref();
@@ -200,7 +210,12 @@ impl Router {
                     cached.as_deref(),
                     now_ms,
                 );
-                if let (Some(sid), Some(path)) = (session_id, resolution.rollout_path.as_ref()) {
+                if let (Some(sid), Some(path)) = (
+                    session_id,
+                    (resolution.source == Some("session-rollout"))
+                        .then_some(resolution.rollout_path.as_ref())
+                        .flatten(),
+                ) {
                     self.codex_rollouts
                         .lock()
                         .unwrap_or_else(|poison| poison.into_inner())
@@ -348,7 +363,7 @@ fn handle_handoff_consume(req: &ai_handoff_ipc::protocol::Request) -> Response {
 
     match find_pending(&project_id) {
         Some(capsule) if capsule.target_agent == agent => {
-            let context = render_capsule_context(&capsule);
+            let context = render_capsule_context_for_cwd(&capsule, &cwd);
             if mark_consumed(&project_id, &capsule.capsule_id, agent, Utc::now()).is_err() {
                 return degraded(&req.request_id, "daemon_error");
             }
@@ -366,6 +381,37 @@ fn handle_handoff_consume(req: &ai_handoff_ipc::protocol::Request) -> Response {
             )
         }
         _ => Router::ok(req, json!({}), json!({ "pending": false })),
+    }
+}
+
+/// Read-only preview of the pending capsule (`ai-handoff handoff --peek`).
+/// Returns the same rendered context a consume would inject, but never marks
+/// the capsule consumed — so the user can inspect what would enter the
+/// context before deciding to run the real handoff.
+fn handle_handoff_peek(req: &ai_handoff_ipc::protocol::Request) -> Response {
+    let raw = raw_with_request_fallbacks(req);
+    let cwd = raw
+        .get("cwd")
+        .and_then(Value::as_str)
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(&req.cwd));
+    let project_id = fingerprint(&cwd);
+    let Some(agent) = parse_agent(&req.agent) else {
+        return degraded(&req.request_id, "daemon_error");
+    };
+
+    match find_pending(&project_id) {
+        Some(capsule) if capsule.target_agent == agent => Router::ok(
+            req,
+            json!({
+                "pending": true,
+                "capsule_id": capsule.capsule_id,
+                "created_at": capsule.created_at,
+                "preview": render_capsule_context_for_cwd(&capsule, &cwd),
+            }),
+            json!({}),
+        ),
+        _ => Router::ok(req, json!({ "pending": false }), json!({})),
     }
 }
 
@@ -570,7 +616,60 @@ fn render_capsule_context(capsule: &Capsule) -> String {
     if let Some(next) = &capsule.next_prompt {
         lines.push(format!("next_prompt: {next}"));
     }
+    if let Some(ws) = &capsule.workspace {
+        let mut parts = Vec::new();
+        if let Some(branch) = &ws.branch {
+            parts.push(format!("branch {branch}"));
+        }
+        if let Some(sha) = &ws.head_sha {
+            parts.push(format!("HEAD {}", short_sha(sha)));
+        }
+        if let Some(dirty) = ws.dirty_files {
+            parts.push(format!("{dirty} dirty file(s)"));
+        }
+        if !parts.is_empty() {
+            lines.push(format!("workspace: {}", parts.join(", ")));
+        }
+    }
     lines.join("\n")
+}
+
+fn render_capsule_context_for_cwd(capsule: &Capsule, cwd: &std::path::Path) -> String {
+    let mut context = render_capsule_context(capsule);
+    if let Some(note) = workspace_drift_note(capsule, cwd) {
+        context.push('\n');
+        context.push_str(&note);
+    }
+    context
+}
+
+/// The git snapshot for a capsule (best-effort; `None` outside a repo).
+fn workspace_snapshot(cwd: &std::path::Path) -> Option<ai_handoff_core::capsule::Workspace> {
+    let snap = ai_handoff_core::git_info::collect(cwd)?;
+    Some(ai_handoff_core::capsule::Workspace {
+        branch: snap.branch,
+        head_sha: snap.head_sha,
+        dirty_files: snap.dirty_files,
+    })
+}
+
+fn short_sha(sha: &str) -> &str {
+    &sha[..sha.len().min(10)]
+}
+
+/// A note appended to consumed-capsule context when the workspace moved since
+/// the capsule was created (resume-time drift detection).
+fn workspace_drift_note(capsule: &Capsule, cwd: &std::path::Path) -> Option<String> {
+    let capsule_sha = capsule.workspace.as_ref()?.head_sha.as_deref()?;
+    let current_sha = ai_handoff_core::git_info::head_sha(cwd)?;
+    if current_sha == capsule_sha {
+        return None;
+    }
+    Some(format!(
+        "[workspace drift] This capsule was created at commit {} but the workspace is now at {} — verify the capsule still matches the checkout before acting on it.",
+        short_sha(capsule_sha),
+        short_sha(&current_sha),
+    ))
 }
 
 fn extract_capsule_payload(raw: &Value) -> Option<Value> {
@@ -649,6 +748,9 @@ fn build_capsule(
         },
         files: file_changes(payload),
         next_prompt,
+        // Collected by the daemon itself, never taken from the agent payload,
+        // so the consuming side can trust it for drift detection.
+        workspace: workspace_snapshot(&event.cwd),
         redaction: RedactionMeta {
             applied: redacted,
             ruleset: "default-v2".to_string(),
@@ -802,6 +904,7 @@ mod tests {
             },
             files: vec![],
             next_prompt: Some("pick up".into()),
+            workspace: None,
             redaction: RedactionMeta {
                 applied: true,
                 ruleset: "default-v2".into(),
@@ -840,6 +943,157 @@ mod tests {
         assert_eq!(pending.summary.goal, "ship MVP");
         assert_eq!(pending.source_agent, AgentKind::Codex);
         assert_eq!(pending.target_agent, AgentKind::ClaudeCode);
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    fn run_git(dir: &std::path::Path, args: &[&str]) -> bool {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn stop_capsule_attaches_git_workspace_metadata() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        // Skip silently when git is unavailable (the daemon behaves the same:
+        // capsules simply carry no workspace block).
+        if !run_git(cwd.path(), &["init", "-b", "main"]) {
+            return;
+        }
+        assert!(run_git(
+            cwd.path(),
+            &["config", "user.email", "t@example.com"]
+        ));
+        assert!(run_git(cwd.path(), &["config", "user.name", "t"]));
+        std::fs::write(cwd.path().join("a.txt"), b"one").unwrap();
+        assert!(run_git(cwd.path(), &["add", "."]));
+        assert!(run_git(
+            cwd.path(),
+            &["commit", "--no-gpg-sign", "-m", "init"]
+        ));
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+
+        let router = Router::new();
+        let req = request(
+            "turn-git",
+            "stop",
+            "codex",
+            cwd.path(),
+            json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "last_assistant_message": "```ai-handoff-capsule\n{\"goal\":\"git meta\"}\n```"
+            }),
+        );
+        assert_eq!(router.handle(&req).status, Status::Ok);
+
+        let project_id = fingerprint(cwd.path());
+        let pending = crate::store::find_pending(&project_id).unwrap();
+        let ws = pending.workspace.expect("workspace snapshot in a git repo");
+        assert_eq!(ws.branch.as_deref(), Some("main"));
+        assert_eq!(ws.head_sha.map(|sha| sha.len()), Some(40));
+        assert_eq!(ws.dirty_files, Some(0));
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn handoff_consume_appends_workspace_drift_note() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        if !run_git(cwd.path(), &["init", "-b", "main"]) {
+            return;
+        }
+        assert!(run_git(
+            cwd.path(),
+            &["config", "user.email", "t@example.com"]
+        ));
+        assert!(run_git(cwd.path(), &["config", "user.name", "t"]));
+        std::fs::write(cwd.path().join("a.txt"), b"one").unwrap();
+        assert!(run_git(cwd.path(), &["add", "."]));
+        assert!(run_git(
+            cwd.path(),
+            &["commit", "--no-gpg-sign", "-m", "init"]
+        ));
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+
+        // Pending capsule recorded at a different (fake) commit.
+        let project_id = fingerprint(cwd.path());
+        let mut capsule = pending_capsule(&project_id);
+        capsule.workspace = Some(ai_handoff_core::capsule::Workspace {
+            branch: Some("main".into()),
+            head_sha: Some("0123456789abcdef0123456789abcdef01234567".into()),
+            dirty_files: Some(0),
+        });
+        crate::store::save_capsule(&capsule).unwrap();
+
+        let router = Router::new();
+        let mut req = request(
+            "turn-drift",
+            "handoff",
+            "claude-code",
+            cwd.path(),
+            json!({ "cwd": cwd.path().to_string_lossy() }),
+        );
+        req.kind = "handoff_consume".into();
+        let resp = router.handle(&req);
+        let context = resp.hook_stdout["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(context.contains("[workspace drift]"), "got: {context}");
+        assert!(context.contains("0123456789"));
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn handoff_peek_appends_workspace_drift_note_without_consuming() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        if !run_git(cwd.path(), &["init", "-b", "main"]) {
+            return;
+        }
+        assert!(run_git(
+            cwd.path(),
+            &["config", "user.email", "t@example.com"]
+        ));
+        assert!(run_git(cwd.path(), &["config", "user.name", "t"]));
+        std::fs::write(cwd.path().join("a.txt"), b"one").unwrap();
+        assert!(run_git(cwd.path(), &["add", "."]));
+        assert!(run_git(
+            cwd.path(),
+            &["commit", "--no-gpg-sign", "-m", "init"]
+        ));
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+
+        let project_id = fingerprint(cwd.path());
+        let mut capsule = pending_capsule(&project_id);
+        capsule.workspace = Some(ai_handoff_core::capsule::Workspace {
+            branch: Some("main".into()),
+            head_sha: Some("fedcba9876543210fedcba9876543210fedcba98".into()),
+            dirty_files: Some(0),
+        });
+        crate::store::save_capsule(&capsule).unwrap();
+
+        let router = Router::new();
+        let mut req = request(
+            "turn-drift-peek",
+            "handoff",
+            "claude-code",
+            cwd.path(),
+            json!({ "cwd": cwd.path().to_string_lossy() }),
+        );
+        req.kind = "handoff_peek".into();
+        let resp = router.handle(&req);
+        let preview = resp.hook_stdout["preview"].as_str().unwrap();
+        assert!(preview.contains("[workspace drift]"), "got: {preview}");
+        assert!(preview.contains("fedcba9876"));
+        assert!(crate::store::find_pending(&project_id).is_some());
         std::env::remove_var("AI_HANDOFF_HOME");
     }
 
@@ -947,6 +1201,49 @@ mod tests {
     }
 
     #[test]
+    fn handoff_peek_previews_without_consuming() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        let project_id = fingerprint(cwd.path());
+        crate::store::save_capsule(&pending_capsule(&project_id)).unwrap();
+
+        let router = Router::new();
+        let mut req = request(
+            "turn-peek",
+            "handoff",
+            "claude-code",
+            cwd.path(),
+            json!({ "cwd": cwd.path().to_string_lossy() }),
+        );
+        req.kind = "handoff_peek".into();
+        let resp = router.handle(&req);
+        assert_eq!(resp.status, Status::Ok);
+        assert_eq!(resp.hook_stdout["pending"], true);
+        assert_eq!(resp.hook_stdout["capsule_id"], "cap_20260625_120000_abcd");
+        assert!(resp.hook_stdout["preview"]
+            .as_str()
+            .unwrap()
+            .contains("continue router"));
+        // Peek never consumes: the capsule must still be pending.
+        assert!(crate::store::find_pending(&project_id).is_some());
+
+        // Wrong agent sees nothing.
+        let mut wrong = request(
+            "turn-peek-wrong",
+            "handoff",
+            "codex",
+            cwd.path(),
+            json!({ "cwd": cwd.path().to_string_lossy() }),
+        );
+        wrong.kind = "handoff_peek".into();
+        let resp2 = router.handle(&wrong);
+        assert_eq!(resp2.hook_stdout["pending"], false);
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
     fn handoff_consume_ignores_capsule_for_other_agent() {
         let _guard = env_lock();
         let home = tempfile::tempdir().unwrap();
@@ -1032,6 +1329,44 @@ mod tests {
         assert_eq!(resp2.hook_stdout, json!({}));
         assert_eq!(resp2.diagnostics["trigger_fired"], false);
         assert_eq!(resp2.diagnostics["trigger_suppressed"], true);
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn post_tool_use_claude_fires_from_raw_rate_limits_without_statusline_sample() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[triggers.five_hour]\nenabled = true\nthreshold_percent = 10\nmode = \"ask\"\n[capsule]\nlanguage = \"en\"\n",
+        )
+        .unwrap();
+
+        let router = Router::new();
+        let req = request(
+            "turn-claude-raw",
+            "post-tool-use",
+            "claude-code",
+            cwd.path(),
+            json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "session_id": "s-claude-raw",
+                "rate_limits": {
+                    "five_hour": { "used_percentage": 78.0, "resets_at": 4102444800.0 }
+                }
+            }),
+        );
+        let resp = router.handle(&req);
+        assert_eq!(
+            resp.diagnostics["trigger_fired"], true,
+            "{:?}",
+            resp.diagnostics
+        );
+        assert_eq!(resp.diagnostics["used_percent"], 78.0);
+        assert_eq!(resp.diagnostics["usage_source"], "raw-rate-limits");
+        assert_eq!(resp.hook_stdout["decision"], "block");
         std::env::remove_var("AI_HANDOFF_HOME");
     }
 
@@ -1142,6 +1477,51 @@ mod tests {
     }
 
     #[test]
+    fn post_tool_use_codex_fires_from_latest_rollout_without_session_match() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let codex_home = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        std::env::set_var("CODEX_HOME", codex_home.path());
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[triggers.five_hour]\nenabled = true\nthreshold_percent = 10\nmode = \"ask\"\n[capsule]\nlanguage = \"en\"\n",
+        )
+        .unwrap();
+
+        let day_dir = codex_home.path().join("sessions/2026/07/05");
+        std::fs::create_dir_all(&day_dir).unwrap();
+        let latest = day_dir.join("rollout-2026-07-05T03-00-00-current-session.jsonl");
+        std::fs::write(
+            &latest,
+            "{\"payload\":{\"rate_limits\":{\"primary\":{\"used_percent\":78.0,\"resets_at\":4102444800}}}}\n",
+        )
+        .unwrap();
+
+        let router = Router::new();
+        let req = request(
+            "turn-codex-latest-rollout",
+            "post-tool-use",
+            "codex",
+            cwd.path(),
+            json!({ "cwd": cwd.path().to_string_lossy(), "session_id": "not-in-rollout-name" }),
+        );
+        let resp = router.handle(&req);
+        assert_eq!(
+            resp.diagnostics["trigger_fired"], true,
+            "{:?}",
+            resp.diagnostics
+        );
+        assert_eq!(resp.diagnostics["used_percent"], 78.0);
+        assert_eq!(resp.diagnostics["usage_source"], "latest-rollout");
+        assert_eq!(resp.hook_stdout["decision"], "block");
+
+        std::env::remove_var("CODEX_HOME");
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
     fn post_tool_use_codex_fires_from_raw_rate_limits() {
         let _guard = env_lock();
         let home = tempfile::tempdir().unwrap();
@@ -1209,7 +1589,8 @@ mod tests {
             json!([
                 "no-raw-rate-limits",
                 "no-transcript-path",
-                "session-rollout-not-found"
+                "session-rollout-not-found",
+                "latest-rollout-not-found"
             ])
         );
         std::env::remove_var("CODEX_HOME");

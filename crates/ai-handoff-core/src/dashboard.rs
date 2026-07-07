@@ -735,6 +735,7 @@ mod tests {
             },
             files: vec![],
             next_prompt: Some("continue".into()),
+            workspace: None,
             redaction: RedactionMeta {
                 applied: false,
                 ruleset: "none".into(),

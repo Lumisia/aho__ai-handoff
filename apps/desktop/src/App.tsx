@@ -28,9 +28,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   createCheckpoint,
   deleteCapsule,
+  dismissLimitAlert,
   ensureDaemonRunning,
   getAccountReport,
   getDashboardSnapshot,
+  getLimitAlerts,
   getTheme,
   openCapsuleExternal,
   openCapsuleFolder,
@@ -40,10 +42,11 @@ import {
   reinstallHooks,
   runDoctor,
   startAccountLogin,
+  switchAccountSlot,
 } from "./api";
 import { createTranslator, normalizeLanguage } from "./i18n";
 import type { CSSProperties, MouseEvent, PointerEvent as ReactPointerEvent, ReactNode } from "react";
-import type { AccountLoginSession, CapsuleSummary, DashboardSnapshot, ThemeReport } from "./types";
+import type { AccountLoginSession, CapsuleSummary, DashboardSnapshot, LimitAlert, ThemeReport } from "./types";
 import type { Translator } from "./i18n";
 import Account from "./views/Account";
 import Capsules from "./views/Capsules";
@@ -304,6 +307,71 @@ function WindowControls({ t }: { t: Translator }) {
       <button className="window-control close" title={t("close")} onClick={() => void appWindow.close()}>
         <X size={15} />
       </button>
+    </div>
+  );
+}
+
+function fmtTemplate(template: string, vars: Record<string, string>) {
+  return template.replace(/\{(\w+)\}/g, (_, key) => vars[key] ?? `{${key}}`);
+}
+
+function LimitSwitchModal({
+  alert,
+  t,
+  onSwitch,
+  onDismiss,
+}: {
+  alert: LimitAlert | null;
+  t: Translator;
+  onSwitch: (alert: LimitAlert, label: string) => void;
+  onDismiss: (alert: LimitAlert) => void;
+}) {
+  if (!alert) return null;
+  const agentName = alert.agent === "claude" ? "Claude" : "Codex";
+  const body = fmtTemplate(t("limitSwitchBody"), {
+    agent: agentName,
+    used: String(Math.round(alert.used_percent)),
+    threshold: String(Math.round(alert.threshold_percent)),
+  });
+  return (
+    <div className="modal-backdrop" onMouseDown={() => onDismiss(alert)}>
+      <section
+        className="limit-switch-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="limit-switch-title"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header className="modal-header">
+          <h2 id="limit-switch-title">
+            <AgentLogo agent={agentName} /> {t("limitSwitchTitle")}
+          </h2>
+        </header>
+        <p className="limit-switch-body">{body}</p>
+        {alert.agent_running && (
+          <p className="limit-switch-warning">
+            {fmtTemplate(t("limitSwitchRunningWarning"), { agent: agentName })}
+          </p>
+        )}
+        <div className="limit-switch-slots">
+          {alert.slots.map((slot) => (
+            <button
+              key={slot.path}
+              className="limit-switch-slot"
+              onClick={() => onSwitch(alert, slot.label)}
+              title={t("limitSwitchPick")}
+            >
+              <strong>{slot.email || slot.label}</strong>
+              {slot.plan && <small>{slot.plan}</small>}
+            </button>
+          ))}
+        </div>
+        <footer className="limit-switch-actions">
+          <button className="limit-switch-later" onClick={() => onDismiss(alert)}>
+            {t("limitSwitchLater")}
+          </button>
+        </footer>
+      </section>
     </div>
   );
 }
@@ -597,12 +665,14 @@ export default function App() {
   const [capsuleMenu, setCapsuleMenu] = useState<CapsuleContextMenuState | null>(null);
   const [titleStatus, setTitleStatus] = useState<string | null>(null);
   const [titlebarLogin, setTitlebarLogin] = useState<AccountLoginSession | null>(null);
+  const [limitAlert, setLimitAlert] = useState<LimitAlert | null>(null);
   const [osDark, setOsDark] = useState(
     () => window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false,
   );
   const refreshSeq = useRef(0);
   const seededProjectRef = useRef(false);
   const sidebarDragOffset = useRef(0);
+  const suppressedLimitAlerts = useRef(new Set<string>());
   const language = normalizeLanguage(theme?.language);
   const t = useMemo(() => createTranslator(language), [language]);
 
@@ -670,6 +740,70 @@ export default function App() {
     }, 2000);
     return () => window.clearInterval(timer);
   }, [titlebarLogin]);
+
+  // Poll for limit-reached account-switch popups. Only shows one at a time; a
+  // dismiss/switch marks the reset window so it does not immediately reappear.
+  useEffect(() => {
+    let cancelled = false;
+    function poll() {
+      if (limitAlert) return;
+      getLimitAlerts()
+        .then((alerts) => {
+          const next = alerts.find((alert) => !suppressedLimitAlerts.current.has(limitAlertKey(alert)));
+          if (!cancelled && next && !limitAlert) {
+            setLimitAlert(next);
+          }
+        })
+        .catch(() => {
+          /* best-effort: a failed poll must never disrupt the app */
+        });
+    }
+    poll();
+    const timer = window.setInterval(poll, 60_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [limitAlert]);
+
+  function limitAlertKey(alert: LimitAlert) {
+    return `${alert.agent}:${alert.resets_at ?? "unknown"}`;
+  }
+
+  function handleLimitDismiss(alert: LimitAlert) {
+    const key = limitAlertKey(alert);
+    suppressedLimitAlerts.current.add(key);
+    setLimitAlert(null);
+    void dismissLimitAlert(alert.agent)
+      .then(() => {
+        suppressedLimitAlerts.current.delete(key);
+      })
+      .catch(() => {
+        /* keep this alert quiet for the current app session */
+      });
+  }
+
+  function handleLimitSwitch(alert: LimitAlert, label: string) {
+    const key = limitAlertKey(alert);
+    suppressedLimitAlerts.current.add(key);
+    setActive("account");
+    setLimitAlert(null);
+    void runTitlebarAction(async () => {
+      try {
+        await switchAccountSlot(alert.agent, label);
+        return { message: fmtTemplate(t("limitSwitchDone"), { label }) };
+      } finally {
+        // Either way, quiet the popup for this reset window.
+        try {
+          await dismissLimitAlert(alert.agent);
+          suppressedLimitAlerts.current.delete(key);
+        } catch {
+          /* keep this alert quiet for the current app session */
+        }
+        await refresh({ force: true });
+      }
+    });
+  }
 
   useEffect(() => {
     if (!snapshot || seededProjectRef.current) return;
@@ -971,6 +1105,12 @@ export default function App() {
         onCopyPath={copyCapsulePath}
         onOpenFolder={openCapsuleFolderFromMenu}
         onOpenWith={openCapsuleWithFromMenu}
+      />
+      <LimitSwitchModal
+        alert={limitAlert}
+        t={t}
+        onSwitch={handleLimitSwitch}
+        onDismiss={handleLimitDismiss}
       />
     </div>
   );

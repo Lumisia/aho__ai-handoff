@@ -89,8 +89,23 @@ fn stop_then_peer_session_start_roundtrips_capsule() {
     // Explicit /handoff (ai-handoff handoff) consumes it and prints the capsule.
     let prev_dir = std::env::current_dir().unwrap();
     std::env::set_current_dir(cwd.path()).unwrap();
+
+    // --peek first: previews the capsule and leaves it pending.
+    let mut peek_out = Vec::new();
+    let peek_code = handoff::run_io("claude-code", true, &mut peek_out, false);
+    assert_eq!(peek_code, 0);
+    let peek_text = String::from_utf8(peek_out).unwrap();
+    assert!(peek_text.contains("\"pending\":true"));
+    assert!(peek_text.contains("handoff e2e"));
+    let after_peek: ai_handoff_core::capsule::Capsule =
+        serde_json::from_slice(&std::fs::read(&capsule_path).unwrap()).unwrap();
+    assert_eq!(
+        after_peek.consumption.state,
+        ai_handoff_core::capsule::ConsumptionState::Pending
+    );
+
     let mut consume_out = Vec::new();
-    let consume_code = handoff::run_io("claude-code", &mut consume_out, false);
+    let consume_code = handoff::run_io("claude-code", false, &mut consume_out, false);
     std::env::set_current_dir(prev_dir).unwrap();
     assert_eq!(consume_code, 0);
     let consume_text = String::from_utf8(consume_out).unwrap();

@@ -151,6 +151,7 @@ mod tests {
             },
             files: vec![],
             next_prompt: Some("continue".into()),
+            workspace: None,
             redaction: RedactionMeta {
                 applied: true,
                 ruleset: "default-v2".into(),

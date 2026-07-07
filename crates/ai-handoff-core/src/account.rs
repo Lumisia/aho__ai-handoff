@@ -178,6 +178,23 @@ fn live_auth_path(agent: Agent) -> Option<PathBuf> {
     }
 }
 
+fn read_live_auth(agent: Agent) -> std::io::Result<Vec<u8>> {
+    let live = live_auth_path(agent).ok_or_else(|| std::io::Error::other("no home dir"))?;
+    match std::fs::read(&live) {
+        Ok(bytes) => Ok(bytes),
+        // macOS Claude: the live credential may only exist as a Keychain item.
+        #[cfg(target_os = "macos")]
+        Err(_) if agent == Agent::Claude && crate::keychain::claude_item_exists() => {
+            crate::keychain::read_claude_credentials()
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn live_credential_bytes(agent: Agent) -> Option<Vec<u8>> {
+    read_live_auth(agent).ok()
+}
+
 // ---------------------------------------------------------------------------
 // Codex usage (local rollout files)
 // ---------------------------------------------------------------------------
@@ -358,10 +375,7 @@ fn sync_active_claude_slot(label: &str) {
     let Ok(slot_bytes) = std::fs::read(&cred_path) else {
         return;
     };
-    let Some(live_path) = live_auth_path(Agent::Claude) else {
-        return;
-    };
-    let Ok(live_bytes) = std::fs::read(&live_path) else {
+    let Some(live_bytes) = live_credential_bytes(Agent::Claude) else {
         return;
     };
     if live_bytes == slot_bytes {
@@ -385,7 +399,7 @@ fn sync_active_claude_slot(label: &str) {
         (Some(_), None) => {}
         _ => return,
     }
-    let _ = atomic_write(&cred_path, &live_bytes);
+    let _ = private_write(&cred_path, &live_bytes);
 }
 
 /// Read `(access_token, account_id)` from a Codex `auth.json` at `path`.
@@ -712,7 +726,7 @@ fn upsert_unique_slot(slots: &mut Vec<(AccountSlot, String)>, slot: AccountSlot,
 /// List saved account slots, marking which one matches the live credential.
 pub fn list_slots(agent: Agent) -> Vec<AccountSlot> {
     let root = accounts_root(agent);
-    let live = live_auth_path(agent).and_then(|p| std::fs::read(p).ok());
+    let live = live_credential_bytes(agent);
     let live_key = live.as_ref().map(|bytes| {
         let identity = match agent {
             Agent::Codex => codex_identity(),
@@ -740,8 +754,7 @@ pub fn list_slots(agent: Agent) -> Vec<AccountSlot> {
 /// Capture the agent's current live credential into a new slot (with metadata).
 /// Returns the slot label.
 pub fn snapshot_current(agent: Agent) -> std::io::Result<String> {
-    let live = live_auth_path(agent).ok_or_else(|| std::io::Error::other("no home dir"))?;
-    let bytes = std::fs::read(&live)?;
+    let bytes = read_live_auth(agent)?;
     let identity = match agent {
         Agent::Codex => codex_identity(),
         Agent::Claude => claude_identity(),
@@ -761,8 +774,11 @@ pub fn save_slot(
     let base_label = sanitize(&label_from_identity(agent, identity));
     let label = resolve_slot_label(agent, &base_label, cred_bytes, identity, &key);
     let dir = slot_dir(agent, &label);
-    std::fs::create_dir_all(&dir)?;
-    atomic_write(&dir.join(cred_filename(agent)), cred_bytes)?;
+    // The vault holds raw OAuth tokens: harden the tree and write the
+    // credential private+atomic, matching how capsules are already written.
+    crate::secure_fs::ensure_private_dir(&accounts_root(agent))?;
+    crate::secure_fs::ensure_private_dir(&dir)?;
+    private_write(&dir.join(cred_filename(agent)), cred_bytes)?;
     let now = now_rfc3339();
     let meta = AccountMeta {
         schema_version: 2,
@@ -778,7 +794,7 @@ pub fn save_slot(
         identity_key: Some(key),
     };
     let json = serde_json::to_vec_pretty(&meta).map_err(std::io::Error::other)?;
-    atomic_write(&dir.join("account.json"), &json)?;
+    private_write(&dir.join("account.json"), &json)?;
     Ok(label)
 }
 
@@ -932,20 +948,30 @@ fn claude_identity_from_dir(dir: &Path) -> Option<Identity> {
 /// matches — the rest of that large shared config is left intact.
 pub fn switch_slot(agent: Agent, label: &str) -> std::io::Result<()> {
     // macOS Claude keeps its token in the Keychain, not the file — a file swap
-    // would not change the live login. Guard until a Keychain adapter exists.
+    // would not change the live login. Swap the Keychain item instead when one
+    // exists (the real login); with neither a file nor an item, fail honestly.
     #[cfg(target_os = "macos")]
     if agent == Agent::Claude && live_auth_path(agent).map(|p| !p.exists()).unwrap_or(false) {
+        if crate::keychain::claude_item_exists() {
+            let dir = slot_dir(agent, label);
+            let bytes = std::fs::read(dir.join(cred_filename(agent)))?;
+            crate::keychain::write_claude_credentials(&bytes)?;
+            let _ = patch_claude_oauth_account(read_meta(&dir).and_then(|m| m.email));
+            return Ok(());
+        }
         return Err(std::io::Error::other(
-            "macOS Claude stores credentials in the Keychain; file switch isn't supported yet — use launch (l)",
+            "no live Claude credential found (no credential file and no Keychain item) — sign in with Claude Code once, then switch",
         ));
     }
     let dir = slot_dir(agent, label);
     let bytes = std::fs::read(dir.join(cred_filename(agent)))?;
     let live = live_auth_path(agent).ok_or_else(|| std::io::Error::other("no home dir"))?;
-    if let Some(parent) = live.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    atomic_write(&live, &bytes)?;
+    // Private-file write: a plain fs::write would recreate the credential with
+    // the umask default (0644 on most unix), silently downgrading the 0600 the
+    // agent itself uses. Only the file is hardened — never the agent's home
+    // dir, whose ACL the agent's sandbox may depend on.
+    let tmp = live.with_extension("tmp");
+    crate::secure_fs::write_private_atomic_file(&live, &tmp, &bytes)?;
     if agent == Agent::Claude {
         let _ = patch_claude_oauth_account(read_meta(&dir).and_then(|m| m.email));
     }
@@ -1037,7 +1063,16 @@ pub fn delete_slot(agent: Agent, label: &str) -> std::io::Result<()> {
     }
 }
 
+/// Private (0600 / user-only ACL) atomic write for vault slot files. The tmp
+/// file lives in the same (already-hardened) slot directory.
+fn private_write(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = target.with_extension("tmp");
+    crate::secure_fs::write_private_atomic(target, &tmp, bytes)
+}
+
 /// Write `bytes` to `target` atomically (tmp in the same dir, then rename).
+/// Only for non-credential files (`.claude.json` config patching); credential
+/// writes must go through `private_write` / `write_private_atomic_file`.
 fn atomic_write(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let tmp = target.with_extension("tmp");
     std::fs::write(&tmp, bytes)?;
@@ -1339,12 +1374,14 @@ mod tests {
 
     #[test]
     #[cfg(target_os = "macos")]
-    fn switch_slot_rejects_claude_keychain_file_switch() {
+    fn switch_slot_without_file_or_keychain_item_fails_honestly() {
         let _guard = crate::test_support::env_lock();
         let home = tempfile::tempdir().unwrap();
         let live = tempfile::tempdir().unwrap();
         std::env::set_var("AI_HANDOFF_HOME", home.path());
         std::env::set_var("CLAUDE_CONFIG_DIR", live.path());
+        // Never touch a real developer/CI Keychain from the test suite.
+        std::env::set_var("AI_HANDOFF_NO_KEYCHAIN", "1");
 
         let dir = slot_dir(Agent::Claude, "dev@example.com");
         std::fs::create_dir_all(&dir).unwrap();
@@ -1355,11 +1392,12 @@ mod tests {
         .unwrap();
 
         let error = switch_slot(Agent::Claude, "dev@example.com")
-            .expect_err("macOS Claude file switching should be blocked");
+            .expect_err("no live file and no Keychain item: the switch must fail");
 
         assert!(error.to_string().contains("Keychain"));
         assert!(!live.path().join(".credentials.json").exists());
 
+        std::env::remove_var("AI_HANDOFF_NO_KEYCHAIN");
         std::env::remove_var("AI_HANDOFF_HOME");
         std::env::remove_var("CLAUDE_CONFIG_DIR");
     }
@@ -1846,6 +1884,64 @@ mod tests {
         assert_eq!(slots.len(), 2);
 
         std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn save_slot_writes_private_slot_dir_and_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let _guard = crate::test_support::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+
+        let label = save_slot(
+            Agent::Claude,
+            br#"{"claudeAiOauth":{"accessToken":"secret-token"}}"#,
+            None,
+            "test",
+        )
+        .unwrap();
+
+        let dir = slot_dir(Agent::Claude, &label);
+        let mode =
+            |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir) & 0o077, 0, "slot dir mode {:o}", mode(&dir));
+        let cred = dir.join(".credentials.json");
+        assert_eq!(mode(&cred) & 0o077, 0, "cred mode {:o}", mode(&cred));
+        let meta = dir.join("account.json");
+        assert_eq!(mode(&meta) & 0o077, 0, "meta mode {:o}", mode(&meta));
+
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn switch_slot_keeps_live_credential_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let _guard = crate::test_support::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let codex = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        std::env::set_var("CODEX_HOME", codex.path());
+
+        let live = codex.path().join("auth.json");
+        std::fs::write(
+            &live,
+            br#"{"tokens":{"id_token":"x","account_id":"alice"}}"#,
+        )
+        .unwrap();
+        let label = snapshot_current(Agent::Codex).unwrap();
+        switch_slot(Agent::Codex, &label).unwrap();
+
+        let mode = std::fs::metadata(&live).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode & 0o077,
+            0,
+            "live credential must stay private after a switch, got {mode:o}"
+        );
+
+        std::env::remove_var("AI_HANDOFF_HOME");
+        std::env::remove_var("CODEX_HOME");
     }
 
     #[test]

@@ -25,6 +25,10 @@ pub enum Commands {
     Doctor {
         #[arg(long)]
         json: bool,
+        /// Repair what a local command can (runtime dirs, daemon start) and
+        /// print next steps for anything that needs the user.
+        #[arg(long)]
+        fix: bool,
     },
     Checkpoint {
         #[arg(long)]
@@ -44,6 +48,9 @@ pub enum Commands {
         /// The agent consuming the capsule (sets which capsules match).
         #[arg(long, value_enum, default_value_t = AgentArg::Codex)]
         agent: AgentArg,
+        /// Preview the pending capsule without consuming it.
+        #[arg(long)]
+        peek: bool,
     },
     Tui,
     Dashboard,
@@ -199,13 +206,13 @@ pub fn run_cli(cli: Cli) -> anyhow::Result<i32> {
         None | Some(Commands::Tui) => commands::tui::run(),
         Some(Commands::Hook { event, agent }) => commands::hook::run(&event, agent),
         Some(Commands::Daemon { action, stay_alive }) => commands::daemon::run(action, stay_alive),
-        Some(Commands::Doctor { json }) => commands::doctor::run(json),
+        Some(Commands::Doctor { json, fix }) => commands::doctor::run(json, fix),
         Some(Commands::Checkpoint {
             message,
             agent,
             file,
         }) => commands::checkpoint::run(message, agent, file),
-        Some(Commands::Handoff { agent }) => commands::handoff::run(agent),
+        Some(Commands::Handoff { agent, peek }) => commands::handoff::run(agent, peek),
         Some(Commands::Dashboard) => commands::dashboard::run(),
         Some(Commands::Install {
             dry_run,
@@ -285,7 +292,10 @@ mod tests {
     fn parses_handoff_command_with_agent() {
         let cli = Cli::try_parse_from(["ai-handoff", "handoff", "--agent", "claude-code"]).unwrap();
         match cli.command {
-            Some(Commands::Handoff { agent }) => assert_eq!(agent, AgentArg::ClaudeCode),
+            Some(Commands::Handoff { agent, peek }) => {
+                assert_eq!(agent, AgentArg::ClaudeCode);
+                assert!(!peek);
+            }
             other => panic!("unexpected command: {other:?}"),
         }
 
@@ -294,8 +304,16 @@ mod tests {
         assert!(matches!(
             bare.command,
             Some(Commands::Handoff {
-                agent: AgentArg::Codex
+                agent: AgentArg::Codex,
+                peek: false
             })
+        ));
+
+        // --peek previews without consuming.
+        let peek = Cli::try_parse_from(["ai-handoff", "handoff", "--peek"]).unwrap();
+        assert!(matches!(
+            peek.command,
+            Some(Commands::Handoff { peek: true, .. })
         ));
     }
 

@@ -8,6 +8,7 @@ import type {
   ConfigRow,
   DashboardSnapshot,
   IntegrationReport,
+  LimitAlert,
   LogFile,
   ReadTextResult,
   RepairRunResult,
@@ -192,6 +193,14 @@ export function captureCurrentAccount(agent: "codex" | "claude"): Promise<Accoun
 
 export function switchAccountSlot(agent: "codex" | "claude", label: string): Promise<AccountReport> {
   return invoke<AccountReport>("switch_account_slot", { agent, label }).then(cacheAccountReport);
+}
+
+export function getLimitAlerts(): Promise<LimitAlert[]> {
+  return invoke<LimitAlert[]>("get_limit_alerts");
+}
+
+export function dismissLimitAlert(agent: "codex" | "claude"): Promise<void> {
+  return invoke<void>("dismiss_limit_alert", { agent });
 }
 
 export function deleteAccountSlot(agent: "codex" | "claude", label: string): Promise<AccountReport> {

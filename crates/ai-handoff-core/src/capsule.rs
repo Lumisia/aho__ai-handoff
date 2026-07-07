@@ -43,6 +43,20 @@ pub struct RedactionMeta {
     pub ruleset: String,
 }
 
+/// Git state of the workspace at capsule-creation time. Attached automatically
+/// by the daemon (never trusted from the agent payload) so the consuming side
+/// can detect drift between the capsule and the current checkout. All fields
+/// optional: absent when the project is not a git repo.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+pub struct Workspace {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_sha: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dirty_files: Option<u32>,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Consumption {
     pub state: ConsumptionState,
@@ -117,6 +131,10 @@ pub struct Capsule {
     pub files: Vec<FileChange>,
     #[serde(default)]
     pub next_prompt: Option<String>,
+    /// Auto-collected git snapshot (schema v2 stays compatible: optional and
+    /// omitted when absent, so old capsules and old readers both keep working).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<Workspace>,
     pub redaction: RedactionMeta,
     pub consumption: Consumption,
 }
@@ -221,6 +239,7 @@ mod tests {
             },
             files: vec![],
             next_prompt: Some("do x".into()),
+            workspace: None,
             redaction: RedactionMeta {
                 applied: true,
                 ruleset: "default-v2".into(),

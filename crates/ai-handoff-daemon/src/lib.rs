@@ -53,6 +53,7 @@ pub fn acquire_singleton_lock() -> Option<std::fs::File> {
     let path = ai_handoff_core::paths::ipc_dir().join("daemon.lock");
     let file = std::fs::OpenOptions::new()
         .create(true)
+        .truncate(false)
         .write(true)
         .open(path)
         .ok()?;
