@@ -2980,12 +2980,13 @@ body {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  width: min(460px, calc(100vw - 40px));
+  width: min(580px, calc(100vw - 40px));
+  max-height: calc(100vh - 40px);
   border: 1px solid var(--border-strong-color);
   border-radius: 10px;
   background: var(--app-bg-color);
   box-shadow: 0 24px 70px rgba(31, 36, 43, 0.24);
-  padding: 0 18px 18px;
+  padding: 0 18px 0;
   overflow: hidden;
 }
 
@@ -3044,9 +3045,146 @@ body {
   opacity: 0.7;
 }
 
+/* Two-column body: current account (left) beside the switch targets (right). */
+.limit-switch-columns {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.limit-switch-col {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.limit-switch-col-current {
+  flex: 0 0 42%;
+}
+
+.limit-switch-col-others {
+  flex: 1 1 auto;
+}
+
+.limit-switch-others-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 44vh;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.limit-switch-section-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--subtle-color);
+}
+
+.limit-switch-account {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 9px 10px;
+  border: 1px solid var(--border-strong-color);
+  border-radius: 10px;
+  background: var(--panel-bg-color);
+}
+
+/* The active account that hit the limit — accented so it reads as context. */
+.limit-switch-account.current {
+  border-color: var(--focus-border-color);
+  background: var(--soft-bg-color);
+}
+
+.limit-switch-account-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.limit-switch-account-id {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.limit-switch-account-id strong {
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.limit-switch-account-id small {
+  font-size: 11px;
+  color: var(--muted-color);
+}
+
+.limit-switch-account-head .ghost {
+  flex: none;
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+.limit-switch-account-loading {
+  font-size: 12px;
+  color: var(--muted-color);
+  padding: 2px 0;
+}
+
+.limit-switch-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+/* Slim single-line usage bar for the popup cards. */
+.account-limit-compact {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+}
+
+.account-limit-compact .alc-label {
+  flex: none;
+  width: 24px;
+  color: var(--muted-color);
+}
+
+.account-limit-compact .usage-bar {
+  flex: 1 1 auto;
+}
+
+.account-limit-compact .alc-pct {
+  flex: none;
+  min-width: 54px;
+  text-align: right;
+  white-space: nowrap;
+  color: var(--muted-color);
+}
+
+.account-limit-compact.codex .usage-bar span {
+  background: var(--agent-codex-color);
+}
+
+.account-limit-compact.claude .usage-bar span {
+  background: var(--agent-claude-color);
+}
+
+/* Footer pinned below the (scrolling) columns — always reachable without scroll. */
 .limit-switch-actions {
   display: flex;
   justify-content: flex-end;
+  margin: 2px -18px 0;
+  padding: 12px 18px;
+  border-top: 1px solid var(--border-strong-color);
 }
 
 .limit-switch-later {

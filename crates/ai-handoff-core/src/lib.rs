@@ -1,5 +1,6 @@
 // modules added per task
 pub mod account;
+pub mod account_api;
 pub mod capsule;
 pub mod capsule_codec;
 pub mod config;

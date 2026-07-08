@@ -4,6 +4,7 @@ use crate::{
     trigger_mark,
 };
 use ai_handoff_core::{
+    account, account_api,
     capsule::{
         new_capsule_id, AgentKind, Capsule, Consumption, ConsumptionState, FileChange,
         RedactionMeta, Session, Summary,
@@ -14,7 +15,7 @@ use ai_handoff_core::{
     redaction::redact,
     sensor::{
         claude_trigger_usage, claude_trigger_usage_from_raw, codex_sessions_dirs,
-        resolve_codex_trigger_usage,
+        resolve_codex_trigger_usage, TriggerUsage,
     },
     trigger::{evaluate_trigger, TriggerAction, TriggerMode},
 };
@@ -36,7 +37,23 @@ pub struct Router {
     /// Resolved Codex rollout files by session id, so the sessions-directory
     /// walk runs at most once per session instead of on every hook event.
     codex_rollouts: Mutex<HashMap<String, PathBuf>>,
+    /// TTL-cached provider usage per agent ("codex"/"claude"), so the hook-time
+    /// fallback fetch hits the network at most once per [`PROVIDER_USAGE_TTL_MS`]
+    /// rather than on every tool use.
+    provider_usage: Mutex<HashMap<&'static str, ProviderUsageEntry>>,
 }
+
+/// One cached provider-usage reading (or a cached miss) for an agent.
+#[derive(Clone, Copy)]
+struct ProviderUsageEntry {
+    usage: Option<TriggerUsage>,
+    fetched_at_ms: i64,
+}
+
+/// How long a hook-time provider-usage fetch (or its failure) is reused before
+/// the next hook event refetches. Five-hour limits move slowly, so a few
+/// minutes keeps the trigger responsive without per-tool network calls.
+const PROVIDER_USAGE_TTL_MS: i64 = 3 * 60 * 1000;
 
 impl Router {
     pub fn new() -> Self {
@@ -44,6 +61,7 @@ impl Router {
             deduper: Mutex::new(Deduper::new(1024)),
             session_marks: Mutex::new(Deduper::new(1024)),
             codex_rollouts: Mutex::new(HashMap::new()),
+            provider_usage: Mutex::new(HashMap::new()),
         }
     }
 
@@ -228,7 +246,6 @@ impl Router {
                 )
             }
         };
-        let used = usage.map(|sample| sample.used_percent);
         let cfg = ai_handoff_core::config::load();
         let resolved = ai_handoff_core::config::resolve(&cfg, project_id);
         let mode = if resolved.enabled {
@@ -236,6 +253,25 @@ impl Router {
         } else {
             TriggerMode::Off
         };
+
+        // Local samples are the only usage the trigger normally sees, but they
+        // can be missing (Claude Code's statusline never records a five-hour
+        // sample) or below threshold while the account is actually over. When
+        // that leaves us unable to confirm an overage, consult the ACTIVE
+        // account's real usage from the provider API — hook-time only (never
+        // while idle), TTL-cached, short timeout, fail-open.
+        let mut usage = usage;
+        let mut usage_source = usage_source;
+        if should_consult_provider(mode, usage.map(|s| s.used_percent), resolved.threshold) {
+            if let Some(provider) = self.provider_trigger_usage(&normalized.agent, now_ms) {
+                if usage.is_none_or(|local| provider.used_percent > local.used_percent) {
+                    usage_source = Some("provider-api");
+                }
+                usage = Some(pick_higher_usage(usage, provider));
+            }
+        }
+
+        let used = usage.map(|sample| sample.used_percent);
         let outcome = evaluate_trigger(
             used,
             resolved.threshold,
@@ -301,6 +337,84 @@ impl Router {
             }),
         )
     }
+
+    /// Active-account provider usage for the five-hour trigger, TTL-cached so a
+    /// burst of hook events costs at most one network round-trip per window.
+    /// Caches misses too, so a failed or below-threshold read does not refetch
+    /// on the next tool use.
+    fn provider_trigger_usage(&self, agent: &AgentKind, now_ms: i64) -> Option<TriggerUsage> {
+        let (acct, key) = match agent {
+            AgentKind::Codex => (account::Agent::Codex, "codex"),
+            AgentKind::ClaudeCode => (account::Agent::Claude, "claude"),
+        };
+        {
+            let cache = self
+                .provider_usage
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            if let Some(entry) = cache.get(key) {
+                if now_ms - entry.fetched_at_ms <= PROVIDER_USAGE_TTL_MS {
+                    return entry.usage;
+                }
+            }
+        }
+        // Fetch outside the lock (network I/O).
+        let usage = fetch_provider_trigger_usage(acct);
+        let mut cache = self
+            .provider_usage
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        cache.insert(
+            key,
+            ProviderUsageEntry {
+                usage,
+                fetched_at_ms: now_ms,
+            },
+        );
+        usage
+    }
+}
+
+/// Whether to spend a provider fetch: only when the trigger is active and the
+/// local sample cannot already confirm an overage (missing, or below the
+/// threshold). If the local sample already meets the threshold we fire without
+/// any network call.
+fn should_consult_provider(mode: TriggerMode, local_used: Option<f64>, threshold: f64) -> bool {
+    if matches!(mode, TriggerMode::Off) {
+        return false;
+    }
+    match local_used {
+        Some(used) => used < threshold,
+        None => true,
+    }
+}
+
+/// Keep whichever reading reports higher usage (usage only grows within a
+/// window, so the higher number is the safer lower bound), preferring the
+/// provider when there is no local sample.
+fn pick_higher_usage(local: Option<TriggerUsage>, provider: TriggerUsage) -> TriggerUsage {
+    match local {
+        Some(local) if local.used_percent >= provider.used_percent => local,
+        _ => provider,
+    }
+}
+
+/// One-shot: the active slot's real five-hour usage from the provider API, or
+/// `None` when there is no active slot or the (short-timeout) fetch fails.
+fn fetch_provider_trigger_usage(agent: account::Agent) -> Option<TriggerUsage> {
+    let active = account::list_slots(agent)
+        .into_iter()
+        .find(|slot| slot.active)?;
+    let timeouts = account_api::FetchTimeouts {
+        connect: std::time::Duration::from_secs(2),
+        read: std::time::Duration::from_secs(3),
+    };
+    let usage = account_api::fetch_slot_usage_with(agent, &active.meta.label, timeouts).ok()?;
+    let window = usage.five_hour?;
+    Some(TriggerUsage {
+        used_percent: window.used_percent,
+        resets_at_ms: window.resets_at.map(|secs| secs * 1000),
+    })
 }
 
 fn handle_checkpoint(req: &ai_handoff_ipc::protocol::Request) -> Response {
@@ -843,6 +957,51 @@ fn file_changes(payload: &Value) -> Vec<FileChange> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod provider_fallback_tests {
+    use super::*;
+
+    fn usage(used: f64) -> TriggerUsage {
+        TriggerUsage {
+            used_percent: used,
+            resets_at_ms: None,
+        }
+    }
+
+    #[test]
+    fn consult_provider_only_when_local_cannot_confirm() {
+        // Off mode never consults.
+        assert!(!should_consult_provider(TriggerMode::Off, None, 10.0));
+        // No local sample → consult.
+        assert!(should_consult_provider(TriggerMode::Ask, None, 10.0));
+        // Local below threshold → consult (it might be a stale/other-account low).
+        assert!(should_consult_provider(TriggerMode::Ask, Some(5.0), 10.0));
+        // Local already over threshold → fire without a network call.
+        assert!(!should_consult_provider(
+            TriggerMode::Auto,
+            Some(40.0),
+            10.0
+        ));
+        assert!(!should_consult_provider(TriggerMode::Ask, Some(10.0), 10.0));
+    }
+
+    #[test]
+    fn pick_higher_usage_prefers_larger_and_falls_back_to_provider() {
+        // No local → provider.
+        assert_eq!(pick_higher_usage(None, usage(46.0)).used_percent, 46.0);
+        // Provider higher → provider (real overage the stale local missed).
+        assert_eq!(
+            pick_higher_usage(Some(usage(3.0)), usage(46.0)).used_percent,
+            46.0
+        );
+        // Local higher → keep local (never regress a known-higher reading).
+        assert_eq!(
+            pick_higher_usage(Some(usage(80.0)), usage(46.0)).used_percent,
+            80.0
+        );
+    }
 }
 
 #[cfg(test)]

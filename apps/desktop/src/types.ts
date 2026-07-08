@@ -134,6 +134,8 @@ export interface LimitAlert {
   threshold_percent: number;
   resets_at?: number | null;
   agent_running: boolean;
+  active_slot: AccountSlotRow;
+  active_usage: SlotUsageReport;
   slots: AccountSlotRow[];
 }
 

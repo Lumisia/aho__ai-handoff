@@ -39,14 +39,24 @@ import {
   openLogsFolder,
   openProjectGithub,
   pollAccountLogin,
+  refreshAccountSlotUsage,
   reinstallHooks,
   runDoctor,
   startAccountLogin,
   switchAccountSlot,
 } from "./api";
 import { createTranslator, normalizeLanguage } from "./i18n";
+import { LimitBar, ResetCreditsBlock } from "./components/AccountUsage";
 import type { CSSProperties, MouseEvent, PointerEvent as ReactPointerEvent, ReactNode } from "react";
-import type { AccountLoginSession, CapsuleSummary, DashboardSnapshot, LimitAlert, ThemeReport } from "./types";
+import type {
+  AccountLoginSession,
+  AccountSlotRow,
+  CapsuleSummary,
+  DashboardSnapshot,
+  LimitAlert,
+  SlotUsageReport,
+  ThemeReport,
+} from "./types";
 import type { Translator } from "./i18n";
 import Account from "./views/Account";
 import Capsules from "./views/Capsules";
@@ -315,6 +325,50 @@ function fmtTemplate(template: string, vars: Record<string, string>) {
   return template.replace(/\{(\w+)\}/g, (_, key) => vars[key] ?? `{${key}}`);
 }
 
+function LimitSwitchAccountCard({
+  agent,
+  slot,
+  usage,
+  busy,
+  t,
+  onActivate,
+  current,
+}: {
+  agent: "codex" | "claude";
+  slot: AccountSlotRow;
+  usage?: SlotUsageReport | null;
+  busy?: boolean;
+  t: Translator;
+  onActivate?: () => void;
+  current?: boolean;
+}) {
+  const plan = usage?.plan ?? slot.plan;
+  return (
+    <article className={`limit-switch-account${current ? " current" : ""}`}>
+      <div className="limit-switch-account-head">
+        <div className="limit-switch-account-id">
+          <strong>{slot.email || slot.label}</strong>
+          {plan && <small>{plan}</small>}
+        </div>
+        {onActivate && (
+          <button className="ghost" onClick={onActivate} title={t("limitSwitchPick")}>
+            {t("switch")}
+          </button>
+        )}
+      </div>
+      {busy ? (
+        <div className="limit-switch-account-loading">{t("loadingAccounts")}</div>
+      ) : (
+        <div className="limit-switch-bars">
+          <LimitBar agent={agent} label="5h" value={usage?.five_hour} t={t} compact />
+          <LimitBar agent={agent} label={t("weekly")} value={usage?.weekly} t={t} compact />
+          <ResetCreditsBlock usage={usage} t={t} />
+        </div>
+      )}
+    </article>
+  );
+}
+
 function LimitSwitchModal({
   alert,
   t,
@@ -326,6 +380,42 @@ function LimitSwitchModal({
   onSwitch: (alert: LimitAlert, label: string) => void;
   onDismiss: (alert: LimitAlert) => void;
 }) {
+  const [usage, setUsage] = useState<Record<string, SlotUsageReport>>({});
+  const [busy, setBusy] = useState<Set<string>>(new Set());
+  const agent = alert?.agent;
+  // Re-run the lazy fetch whenever the popup opens for a different alert.
+  const slotKey = alert ? alert.slots.map((slot) => slot.label).join(",") : "";
+
+  useEffect(() => {
+    if (!alert) return;
+    let cancelled = false;
+    // Fetch each candidate slot's real provider usage when the popup opens —
+    // same explicit per-slot path the Account tab uses.
+    setUsage({});
+    setBusy(new Set(alert.slots.map((slot) => slot.label)));
+    for (const slot of alert.slots) {
+      refreshAccountSlotUsage(alert.agent, slot.label)
+        .then((result) => {
+          if (!cancelled) setUsage((current) => ({ ...current, [slot.label]: result }));
+        })
+        .catch(() => {
+          /* leave this slot without a sample; the card shows "no sample" */
+        })
+        .finally(() => {
+          if (!cancelled) {
+            setBusy((current) => {
+              const next = new Set(current);
+              next.delete(slot.label);
+              return next;
+            });
+          }
+        });
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [agent, slotKey]);
+
   if (!alert) return null;
   const agentName = alert.agent === "claude" ? "Claude" : "Codex";
   const body = fmtTemplate(t("limitSwitchBody"), {
@@ -353,19 +443,36 @@ function LimitSwitchModal({
             {fmtTemplate(t("limitSwitchRunningWarning"), { agent: agentName })}
           </p>
         )}
-        <div className="limit-switch-slots">
-          {alert.slots.map((slot) => (
-            <button
-              key={slot.path}
-              className="limit-switch-slot"
-              onClick={() => onSwitch(alert, slot.label)}
-              title={t("limitSwitchPick")}
-            >
-              <strong>{slot.email || slot.label}</strong>
-              {slot.plan && <small>{slot.plan}</small>}
-            </button>
-          ))}
+
+        <div className="limit-switch-columns">
+          <div className="limit-switch-col limit-switch-col-current">
+            <div className="limit-switch-section-label">{t("limitSwitchCurrent")}</div>
+            <LimitSwitchAccountCard
+              agent={alert.agent}
+              slot={alert.active_slot}
+              usage={alert.active_usage}
+              t={t}
+              current
+            />
+          </div>
+          <div className="limit-switch-col limit-switch-col-others">
+            <div className="limit-switch-section-label">{t("limitSwitchOthers")}</div>
+            <div className="limit-switch-others-list">
+              {alert.slots.map((slot) => (
+                <LimitSwitchAccountCard
+                  key={slot.path}
+                  agent={alert.agent}
+                  slot={slot}
+                  usage={usage[slot.label]}
+                  busy={busy.has(slot.label)}
+                  t={t}
+                  onActivate={() => onSwitch(alert, slot.label)}
+                />
+              ))}
+            </div>
+          </div>
         </div>
+
         <footer className="limit-switch-actions">
           <button className="limit-switch-later" onClick={() => onDismiss(alert)}>
             {t("limitSwitchLater")}
@@ -759,7 +866,9 @@ export default function App() {
         });
     }
     poll();
-    const timer = window.setInterval(poll, 60_000);
+    // 5-minute cadence: each poll may do a live provider-usage fetch for the
+    // active account, and five-hour limits move slowly, so 60s would be wasteful.
+    const timer = window.setInterval(poll, 300_000);
     return () => {
       cancelled = true;
       window.clearInterval(timer);

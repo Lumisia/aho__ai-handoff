@@ -1025,10 +1025,18 @@ pub fn agent_running(agent: Agent) -> bool {
 }
 
 fn running_process_names() -> Vec<String> {
+    // On Windows a GUI process spawning a console subprocess flashes a cmd
+    // window; CREATE_NO_WINDOW keeps `tasklist` (polled by the limit popup)
+    // invisible. Mirrors git_info.rs / secure_fs.rs.
     #[cfg(windows)]
-    let output = std::process::Command::new("tasklist")
-        .args(["/FO", "CSV", "/NH"])
-        .output();
+    let output = {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        std::process::Command::new("tasklist")
+            .args(["/FO", "CSV", "/NH"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+    };
     #[cfg(not(windows))]
     let output = std::process::Command::new("ps")
         .args(["-A", "-o", "comm="])

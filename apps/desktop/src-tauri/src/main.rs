@@ -262,12 +262,18 @@ struct MenuCommandResult {
 #[derive(Serialize, Clone, Debug, PartialEq)]
 struct LimitAlert {
     agent: String,
+    /// The ACTIVE account's real five-hour usage (provider API), so the popup
+    /// never fires or reports for a non-active account.
     used_percent: f64,
     threshold_percent: f64,
     resets_at: Option<i64>,
     /// A live switch while the agent runs may leave that session on the old
     /// account — the popup shows a warning when true.
     agent_running: bool,
+    /// The currently active account (the one that hit the limit).
+    active_slot: AccountSlotRow,
+    /// The active account's own usage (5h/weekly/reset credits) for display.
+    active_usage: SlotUsageReport,
     /// Saved slots the user could switch to (non-active only).
     slots: Vec<AccountSlotRow>,
 }
@@ -743,7 +749,9 @@ fn key_kind_name(kind: config::KeyKind) -> &'static str {
 }
 
 fn category_for_key(key: &str) -> &'static str {
-    if key.starts_with("triggers.") {
+    if key.starts_with("triggers.") || key == "gui.limit_switch_prompt" {
+        // The limit-switch popup is a trigger-adjacent on/off, shown under the
+        // Triggers section so users toggle it beside the five-hour trigger.
         "triggers"
     } else if key == "capsule.language" {
         "language"
@@ -753,10 +761,7 @@ fn category_for_key(key: &str) -> &'static str {
         "language"
     } else if key.starts_with("gui_theme.") || key.starts_with("theme.") {
         "theme"
-    } else if key == "gui.limit_switch_prompt"
-        || key.starts_with("autostart.")
-        || key.starts_with("daemon.")
-    {
+    } else if key.starts_with("autostart.") || key.starts_with("daemon.") {
         "automation"
     } else if key.starts_with("statusline.") {
         "agents"
@@ -1220,6 +1225,10 @@ struct LimitAlertDecision {
     threshold: f64,
     dismiss_expires_ms: Option<i64>,
     now_ms: i64,
+    /// There is a currently-active saved slot for this agent.
+    has_active_slot: bool,
+    /// There is at least one OTHER (non-active) saved slot to switch to.
+    /// Together with `has_active_slot` this means >1 saved account.
     has_switch_target: bool,
 }
 
@@ -1229,6 +1238,7 @@ fn should_alert_limit(decision: LimitAlertDecision) -> bool {
     if !decision.prompt_enabled
         || !decision.trigger_enabled
         || decision.trigger_off
+        || !decision.has_active_slot
         || !decision.has_switch_target
     {
         return false;
@@ -1245,9 +1255,16 @@ fn should_alert_limit(decision: LimitAlertDecision) -> bool {
         .is_none_or(|expires| expires <= decision.now_ms)
 }
 
-/// Build the popup list: one alert per agent whose five-hour usage is at/above
-/// the configured threshold, that is enabled, not currently dismissed, and has
-/// at least one OTHER saved slot to switch to.
+/// Build the popup list: one alert per agent whose ACTIVE account's five-hour
+/// usage is at/above the configured threshold, that is enabled, not currently
+/// dismissed, and has >1 saved account (an active slot plus at least one other
+/// to switch to).
+///
+/// The usage gate reads the *active* account's real usage from the provider
+/// API (`fetch_slot_usage`) rather than a local session sample: local samples
+/// carry no account tag, so a stale sample from a previously-active account
+/// could otherwise fire the popup for the wrong account. Fail-closed — a failed
+/// fetch means we cannot confirm an overage, so no popup.
 fn limit_alerts() -> Vec<LimitAlert> {
     let cfg = config::load();
     let now_ms = chrono::Utc::now().timestamp_millis();
@@ -1256,35 +1273,60 @@ fn limit_alerts() -> Vec<LimitAlert> {
     let trigger_off = matches!(resolved.mode, ai_handoff_core::trigger::TriggerMode::Off);
     let mut alerts = Vec::new();
     for agent in [Agent::Codex, Agent::Claude] {
-        let status = match agent {
-            Agent::Codex => account::codex_status(),
-            Agent::Claude => account::claude_status(),
-        };
-        let window = status.as_ref().and_then(|s| s.five_hour.as_ref());
-        let switch_targets = account::list_slots(agent)
-            .into_iter()
+        let all_slots = account::list_slots(agent);
+        let active = all_slots.iter().find(|slot| slot.active).cloned();
+        let switch_targets = all_slots
+            .iter()
             .filter(|slot| !slot.active)
+            .cloned()
             .map(slot_row)
             .collect::<Vec<_>>();
+        let dismiss_expires_ms = marks.get(agent_name(agent)).copied();
+
+        // Cheap pre-gate before any network call: only the eligible, undismissed,
+        // >1-account agents get a live usage fetch.
+        let cheap_ok = cfg.gui.limit_switch_prompt
+            && resolved.enabled
+            && !trigger_off
+            && active.is_some()
+            && !switch_targets.is_empty()
+            && dismiss_expires_ms.is_none_or(|expires| expires <= now_ms);
+        if !cheap_ok {
+            continue;
+        }
+        let active = active.expect("cheap_ok requires an active slot");
+
+        // Authoritative, account-scoped usage for the ACTIVE account.
+        let Ok(active_usage) =
+            ai_handoff_tui::account_api::fetch_slot_usage(agent, &active.meta.label)
+        else {
+            continue; // fail-closed: cannot confirm the active account is over
+        };
+        let five_used = active_usage.five_hour.as_ref().map(|w| w.used_percent);
+        let five_reset = active_usage.five_hour.as_ref().and_then(|w| w.resets_at);
+
         if !should_alert_limit(LimitAlertDecision {
             prompt_enabled: cfg.gui.limit_switch_prompt,
             trigger_enabled: resolved.enabled,
             trigger_off,
-            used_percent: window.map(|w| w.used_percent),
+            used_percent: five_used,
             threshold: resolved.threshold,
-            dismiss_expires_ms: marks.get(agent_name(agent)).copied(),
+            dismiss_expires_ms,
             now_ms,
+            has_active_slot: true,
             has_switch_target: !switch_targets.is_empty(),
         }) {
             continue;
         }
-        let window = window.expect("should_alert_limit requires a window");
+        let used_percent = five_used.expect("should_alert_limit requires a window");
         alerts.push(LimitAlert {
             agent: agent_name(agent).to_string(),
-            used_percent: window.used_percent,
+            used_percent,
             threshold_percent: resolved.threshold,
-            resets_at: window.resets_at,
+            resets_at: five_reset,
             agent_running: account::agent_running(agent),
+            active_slot: slot_row(active),
+            active_usage: slot_usage_report_from_data(active_usage),
             slots: switch_targets,
         });
     }
@@ -2160,15 +2202,22 @@ mod tests {
                 threshold: 80.0,
                 dismiss_expires_ms: None,
                 now_ms: 1_000,
+                has_active_slot: true,
                 has_switch_target: true,
             }
         }
 
-        // Baseline: over threshold, enabled, has a switch target, not dismissed.
+        // Baseline: over threshold, enabled, active + a switch target, not dismissed.
         assert!(should_alert_limit(baseline()));
         // Under threshold: no popup.
         assert!(!should_alert_limit(LimitAlertDecision {
             used_percent: Some(50.0),
+            ..baseline()
+        }));
+        // No active slot (>1-account guard): no popup.
+        assert!(!should_alert_limit(LimitAlertDecision {
+            used_percent: Some(90.0),
+            has_active_slot: false,
             ..baseline()
         }));
         // No other slot to switch to: no popup.
