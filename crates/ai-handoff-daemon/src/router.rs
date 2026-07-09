@@ -101,7 +101,16 @@ impl Default for Router {
 impl Handler for Router {
     fn handle(&self, req: &ai_handoff_ipc::protocol::Request) -> Response {
         if req.kind == "ping" {
-            return Self::ok(req, json!({ "pong": true }), json!({}));
+            // Health flags ride on the ping so doctor can see THIS daemon's
+            // effective permissions — a sandboxed daemon may read the store
+            // yet fail every consume/checkpoint write, which the doctor
+            // process's own probes cannot detect.
+            let store_writable = crate::store_write_preflight().is_ok();
+            return Self::ok(
+                req,
+                json!({ "pong": true, "store_writable": store_writable }),
+                json!({}),
+            );
         }
         if req.kind == "checkpoint" {
             return handle_checkpoint(req);
@@ -178,7 +187,15 @@ impl Handler for Router {
                         normalized.agent.as_canonical_str(),
                     );
                     let _ = save_project_label(&project_id, &normalized.cwd);
-                    let _ = save_capsule(&capsule);
+                    // A failed save must not masquerade as a checkpoint — the
+                    // capsule the agent just emitted would silently vanish.
+                    if let Err(error) = save_capsule(&capsule) {
+                        crate::log_daemon(&format!(
+                            "stop-hook capsule save failed ({}): {error}",
+                            capsule.capsule_id
+                        ));
+                        return degraded(&req.request_id, store_error_reason(&error));
+                    }
                     // The turn just checkpointed — asking again would be noise.
                     return Self::ok(req, json!({}), json!({ "capsule_saved": true }));
                 }
@@ -467,7 +484,23 @@ fn handle_checkpoint(req: &ai_handoff_ipc::protocol::Request) -> Response {
             json!({ "saved": true, "path": path.to_string_lossy() }),
             json!({}),
         ),
-        Err(_) => degraded(&req.request_id, "daemon_error"),
+        Err(error) => {
+            crate::log_daemon(&format!(
+                "checkpoint save failed ({}): {error}",
+                capsule.capsule_id
+            ));
+            degraded(&req.request_id, store_error_reason(&error))
+        }
+    }
+}
+
+/// A typed warning for a store write/read failure: `PermissionDenied` gets its
+/// own name so a sandboxed daemon (writable IPC, read-only store) is
+/// distinguishable from a genuine internal error.
+fn store_error_reason(error: &std::io::Error) -> &'static str {
+    match error.kind() {
+        std::io::ErrorKind::PermissionDenied => "store_permission_denied",
+        _ => "daemon_error",
     }
 }
 
@@ -491,6 +524,13 @@ fn handle_handoff_consume(req: &ai_handoff_ipc::protocol::Request) -> Response {
         return degraded(&req.request_id, "daemon_error");
     };
     let force = raw.get("force").and_then(Value::as_bool).unwrap_or(false);
+
+    // An unreadable store must not answer "{}" as if nothing were pending —
+    // the silent-empty listing below would disguise it exactly that way.
+    if let Err(error) = crate::store::store_readable(&project_id) {
+        crate::log_daemon(&format!("consume: store unreadable: {error}"));
+        return degraded(&req.request_id, "store_unreadable");
+    }
 
     // Explicit claim: `--id <capsule>` names exactly one capsule and consumes
     // it regardless of target (naming it IS the consent) — the safe path when
@@ -522,16 +562,26 @@ fn handle_handoff_consume(req: &ai_handoff_ipc::protocol::Request) -> Response {
                 .as_deref()
                 .is_some_and(|target| target != agent);
             let context = render_capsule_context_for_cwd(&capsule, &cwd);
-            if mark_consumed(
+            if let Err(error) = mark_consumed(
                 &project_id,
                 &capsule.capsule_id,
                 &agent,
                 Utc::now(),
                 despite_target,
-            )
-            .is_err()
-            {
-                return degraded(&req.request_id, "daemon_error");
+            ) {
+                // A racing consumer may have claimed the capsule between the
+                // pending listing and this write — report that as a distinct
+                // reason so the caller knows the handoff went elsewhere.
+                let reason = match error.kind() {
+                    std::io::ErrorKind::InvalidInput => "capsule_not_pending",
+                    std::io::ErrorKind::NotFound => "capsule_not_found",
+                    _ => store_error_reason(&error),
+                };
+                crate::log_daemon(&format!(
+                    "consume failed ({}): {reason}: {error}",
+                    capsule.capsule_id
+                ));
+                return degraded(&req.request_id, reason);
             }
             Router::ok(
                 req,
@@ -579,6 +629,12 @@ fn handle_handoff_peek(req: &ai_handoff_ipc::protocol::Request) -> Response {
     let Some(agent) = canonical_agent_id(&req.agent) else {
         return degraded(&req.request_id, "daemon_error");
     };
+
+    // Same disguise-guard as consume: unreadable store ≠ "nothing pending".
+    if let Err(error) = crate::store::store_readable(&project_id) {
+        crate::log_daemon(&format!("peek: store unreadable: {error}"));
+        return degraded(&req.request_id, "store_unreadable");
+    }
 
     let others = other_pending_summaries(&project_id, &agent);
     match find_pending(&project_id, &agent) {
@@ -633,7 +689,10 @@ fn handle_handoff_retarget(req: &ai_handoff_ipc::protocol::Request) -> Response 
         Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => {
             degraded(&req.request_id, "capsule_not_pending")
         }
-        Err(_) => degraded(&req.request_id, "daemon_error"),
+        Err(error) => {
+            crate::log_daemon(&format!("retarget failed ({capsule_id}): {error}"));
+            degraded(&req.request_id, store_error_reason(&error))
+        }
     }
 }
 
@@ -1008,6 +1067,7 @@ fn build_capsule(
     let next_prompt = string_field(payload, "next_prompt")
         .map(|value| redact_string(value, &mut redacted))
         .map(|value| limit_next_prompt(value, limits.next_prompt_limit()));
+    let files = file_changes(payload, &mut redacted);
 
     Capsule {
         schema_version: 2,
@@ -1029,7 +1089,7 @@ fn build_capsule(
             remaining,
             risks,
         },
-        files: file_changes(payload),
+        files,
         next_prompt,
         // Collected by the daemon itself, never taken from the agent payload,
         // so the consuming side can trust it for drift detection.
@@ -1111,7 +1171,10 @@ fn redact_strings(values: Vec<String>, hit: &mut bool) -> Vec<String> {
         .collect()
 }
 
-fn file_changes(payload: &Value) -> Vec<FileChange> {
+/// Extract `files[]` from the payload, redacting every text field — file
+/// entries come from the agent and can carry secrets (URLs with tokens in
+/// paths, credentials pasted into summaries) just like the summary fields.
+fn file_changes(payload: &Value, hit: &mut bool) -> Vec<FileChange> {
     payload
         .get("files")
         .and_then(Value::as_array)
@@ -1120,15 +1183,15 @@ fn file_changes(payload: &Value) -> Vec<FileChange> {
                 .iter()
                 .filter_map(|file| {
                     Some(FileChange {
-                        path: file.get("path")?.as_str()?.to_string(),
+                        path: redact_string(file.get("path")?.as_str()?.to_string(), hit),
                         status: file
                             .get("status")
                             .and_then(Value::as_str)
-                            .map(str::to_string),
+                            .map(|value| redact_string(value.to_string(), hit)),
                         summary: file
                             .get("summary")
                             .and_then(Value::as_str)
-                            .map(str::to_string),
+                            .map(|value| redact_string(value.to_string(), hit)),
                     })
                 })
                 .collect()
@@ -1290,6 +1353,53 @@ mod tests {
         assert_eq!(pending.source_agent, "codex");
         // No target in the payload → open capsule, not "the opposite agent".
         assert_eq!(pending.target_agent, None);
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn ping_reports_store_write_health() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        crate::ensure_runtime_dirs().unwrap();
+
+        let router = Router::new();
+        let mut req = request("turn-ping", "ping", "codex", cwd.path(), json!({}));
+        req.kind = "ping".into();
+        let resp = router.handle(&req);
+        assert_eq!(resp.status, Status::Ok);
+        assert_eq!(resp.hook_stdout["pong"], json!(true));
+        // Writable temp home → the daemon reports a healthy store.
+        assert_eq!(resp.hook_stdout["store_writable"], json!(true));
+
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn file_entries_are_redacted() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+
+        let payload = json!({
+            "goal": "clean goal",
+            "files": [{
+                "path": "src/config.rs",
+                "status": "modified",
+                "summary": "added token ghp_abcdefghijklmnopqrstuvwxyz0123"
+            }]
+        });
+        let capsule = build_capsule(&payload, "projX", cwd.path(), None, "codex");
+
+        let summary = capsule.files[0].summary.as_deref().unwrap();
+        assert!(!summary.contains("ghp_"), "secret leaked: {summary}");
+        assert!(capsule.redaction.applied);
+        // A clean path passes through unchanged.
+        assert_eq!(capsule.files[0].path, "src/config.rs");
+        assert_eq!(capsule.files[0].status.as_deref(), Some("modified"));
+
         std::env::remove_var("AI_HANDOFF_HOME");
     }
 

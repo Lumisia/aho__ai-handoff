@@ -3383,23 +3383,16 @@ body {
   color: var(--selection-fg-color);
 }
 
+/* Narrow-window adjustments only. The window's minimum size is 940x640, and
+   collapsing the app grid to one column here broke three things at once: the
+   sidebar left its fixed `--sidebar-width` track (resizer became a no-op and
+   the width followed content), main was pushed into an implicit column, and
+   the titlebar (grid-column: 1/-1) shrank to the first track so the window
+   controls piled onto the menu. The two-column grid stays; only spacing
+   tweaks belong in this block. */
 @media (max-width: 980px) {
   body {
     min-width: 0;
-  }
-
-  .app.codex-light {
-    grid-template-columns: 1fr;
-  }
-
-  .codex-light .sidebar {
-    position: static;
-    height: auto;
-    max-height: none;
-  }
-
-  .sidebar-capsules {
-    max-height: none;
   }
 
   .codex-light .topbar {

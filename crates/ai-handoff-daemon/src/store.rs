@@ -3,8 +3,8 @@ use ai_handoff_core::{
     capsule_codec, config, paths,
 };
 use chrono::{DateTime, Utc};
-use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::path::{Component, Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime};
 
 pub fn save_capsule(c: &Capsule) -> std::io::Result<PathBuf> {
     let format = config::load().capsule.format;
@@ -34,6 +34,18 @@ pub fn save_project_label(project_id: &str, cwd: &Path) -> std::io::Result<()> {
     ai_handoff_core::secure_fs::ensure_private_dir(&paths::store_dir())?;
     ai_handoff_core::secure_fs::ensure_private_dir(&dir)?;
     ai_handoff_core::secure_fs::write_private_file(&dir.join("project.label"), label.as_bytes())
+}
+
+/// Distinguish "no capsules yet" (missing project dir — fine) from a store
+/// the daemon cannot read (sandbox/permissions). Without this check the
+/// silent-empty `list_pending` disguises an unreadable store as "nothing
+/// pending", and a consume answers `{}` as if it succeeded at finding nothing.
+pub fn store_readable(project_id: &str) -> std::io::Result<()> {
+    match std::fs::read_dir(paths::project_dir(project_id)) {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 /// Every pending capsule of the project, newest first (creation time, then
@@ -90,6 +102,10 @@ pub fn find_pending(project_id: &str, agent: &str) -> Option<Capsule> {
     pending_for(project_id, agent).into_iter().next()
 }
 
+/// Claim a pending capsule. Fails with `InvalidInput` when the capsule is no
+/// longer pending — the re-check runs inside the capsule lock, so of two
+/// racing consumers exactly one wins and the loser gets an error instead of
+/// silently overwriting `consumed_by`.
 pub fn mark_consumed(
     project_id: &str,
     capsule_id: &str,
@@ -97,14 +113,27 @@ pub fn mark_consumed(
     now: DateTime<Utc>,
     despite_target: bool,
 ) -> std::io::Result<()> {
+    let mut was_pending = true;
     update_capsule(project_id, capsule_id, |capsule| {
+        was_pending = capsule.consumption.state == ConsumptionState::Pending;
+        if !was_pending {
+            return;
+        }
         capsule.consumption = Consumption {
             state: ConsumptionState::Consumed,
             consumed_by: Some(by.to_string()),
             consumed_at: Some(now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
             consumed_despite_target: despite_target,
         };
-    })
+    })?;
+    if was_pending {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "capsule is not pending",
+        ))
+    }
 }
 
 /// Point a pending capsule at a different agent, or open it up (`None`).
@@ -138,6 +167,7 @@ fn update_capsule(
 ) -> std::io::Result<()> {
     let path = find_capsule_path(project_id, capsule_id)
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "capsule not found"))?;
+    let _lock = CapsuleLock::acquire(&path)?;
     let mut capsule = capsule_codec::read_capsule(&path).map_err(std::io::Error::other)?;
     mutate(&mut capsule);
     let format = if path.extension().and_then(|ext| ext.to_str()) == Some("md") {
@@ -148,6 +178,60 @@ fn update_capsule(
     capsule_codec::write_capsule(&path, &capsule, format).map_err(std::io::Error::other)
 }
 
+/// Advisory per-capsule lock file guarding the read-modify-write in
+/// [`update_capsule`] against a concurrent writer (second daemon instance or
+/// an external process). `create_new` is atomic on both Windows and Unix. A
+/// lock left behind by a crashed process is stolen once it is older than
+/// [`Self::STALE`].
+struct CapsuleLock(PathBuf);
+
+impl CapsuleLock {
+    const RETRY_FOR: Duration = Duration::from_millis(500);
+    const RETRY_EVERY: Duration = Duration::from_millis(25);
+    const STALE: Duration = Duration::from_secs(5);
+
+    fn acquire(capsule_path: &Path) -> std::io::Result<Self> {
+        // `.lock` never collides with capsule extensions (json/md), and both
+        // formats of the same id share one lock — which is exactly right.
+        let lock_path = capsule_path.with_extension("lock");
+        let deadline = Instant::now() + Self::RETRY_FOR;
+        loop {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&lock_path)
+            {
+                Ok(_) => return Ok(Self(lock_path)),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let stale = std::fs::metadata(&lock_path)
+                        .and_then(|meta| meta.modified())
+                        .ok()
+                        .and_then(|modified| modified.elapsed().ok())
+                        .is_some_and(|age| age > Self::STALE);
+                    if stale {
+                        let _ = std::fs::remove_file(&lock_path);
+                        continue;
+                    }
+                    if Instant::now() >= deadline {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::WouldBlock,
+                            "capsule is locked by another process",
+                        ));
+                    }
+                    std::thread::sleep(Self::RETRY_EVERY);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+}
+
+impl Drop for CapsuleLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 fn is_capsule_file(path: &Path) -> bool {
     matches!(
         path.extension().and_then(|ext| ext.to_str()),
@@ -155,7 +239,21 @@ fn is_capsule_file(path: &Path) -> bool {
     )
 }
 
+/// A capsule id must be a bare file stem. Anything with path separators,
+/// parent segments, or a drive/root prefix could escape the project directory
+/// when joined (e.g. a retarget request naming `../<other-project>/cap_x`).
+fn is_safe_capsule_id(capsule_id: &str) -> bool {
+    let mut components = Path::new(capsule_id).components();
+    matches!(
+        (components.next(), components.next()),
+        (Some(Component::Normal(only)), None) if only == std::ffi::OsStr::new(capsule_id)
+    )
+}
+
 fn find_capsule_path(project_id: &str, capsule_id: &str) -> Option<PathBuf> {
+    if !is_safe_capsule_id(capsule_id) {
+        return None;
+    }
     let dir = paths::project_dir(project_id);
     [config::CapsuleFormat::Json, config::CapsuleFormat::Md]
         .into_iter()
@@ -395,6 +493,90 @@ mod tests {
         assert_eq!(find_pending("projX", "codex").unwrap().capsule_id, "cap");
 
         assert!(retarget("projX", "missing", None).is_err());
+
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn store_readable_treats_missing_project_dir_as_ok() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+
+        // No capsules ever saved: not an error, just nothing pending.
+        store_readable("proj-without-capsules").unwrap();
+
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn capsule_id_with_path_segments_is_rejected() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+
+        // Victim capsule in ANOTHER project's bucket.
+        let mut victim = capsule("cap-victim", "2026-06-25T12:00:00Z", Some("codex"));
+        victim.project_id = "projY".into();
+        let victim_path = save_capsule(&victim).unwrap();
+
+        // A traversal id from projX must not reach projY's file.
+        let evil = "../projY/cap-victim";
+        assert_eq!(
+            retarget("projX", evil, Some("grok".to_string()))
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
+        assert_eq!(
+            mark_consumed(
+                "projX",
+                evil,
+                "grok",
+                chrono::Utc.with_ymd_and_hms(2026, 6, 25, 14, 0, 0).unwrap(),
+                false,
+            )
+            .unwrap_err()
+            .kind(),
+            std::io::ErrorKind::NotFound
+        );
+
+        let untouched = ai_handoff_core::capsule_codec::read_capsule(&victim_path).unwrap();
+        assert_eq!(untouched.target_agent.as_deref(), Some("codex"));
+        assert_eq!(untouched.consumption.state, ConsumptionState::Pending);
+
+        assert!(is_safe_capsule_id("cap_20260625_120000_abcd"));
+        assert!(!is_safe_capsule_id("../x"));
+        assert!(!is_safe_capsule_id("a/b"));
+        assert!(!is_safe_capsule_id("a\\b"));
+        assert!(!is_safe_capsule_id(".."));
+        assert!(!is_safe_capsule_id(""));
+
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn second_consume_of_same_capsule_fails() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+
+        let path = save_capsule(&capsule("cap", "2026-06-25T12:00:00Z", None)).unwrap();
+        let now = chrono::Utc.with_ymd_and_hms(2026, 6, 25, 14, 0, 0).unwrap();
+        mark_consumed("projX", "cap", "claude-code", now, false).unwrap();
+
+        // The losing racer gets InvalidInput and the first claim survives.
+        assert_eq!(
+            mark_consumed("projX", "cap", "codex", now, false)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        let updated = ai_handoff_core::capsule_codec::read_capsule(&path).unwrap();
+        assert_eq!(
+            updated.consumption.consumed_by.as_deref(),
+            Some("claude-code")
+        );
 
         std::env::remove_var("AI_HANDOFF_HOME");
     }

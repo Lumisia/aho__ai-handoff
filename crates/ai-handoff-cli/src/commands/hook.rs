@@ -148,6 +148,14 @@ pub(crate) fn start_daemon_logged() -> bool {
         Ok(()) => true,
         Err(error) => {
             eprintln!("[ai-handoff] daemon autostart failed: {error}");
+            // The most common cause: this process runs inside an agent
+            // sandbox, so the spawned daemon inherits the restrictions and
+            // exits during its store write preflight.
+            eprintln!(
+                "[ai-handoff] hint: if this shell is sandboxed (e.g. a Codex hook), \
+                 the daemon cannot write ~/.ai-handoff — run `ai-handoff daemon run` \
+                 outside the sandbox or set AI_HANDOFF_HOME to a writable path"
+            );
             false
         }
     }

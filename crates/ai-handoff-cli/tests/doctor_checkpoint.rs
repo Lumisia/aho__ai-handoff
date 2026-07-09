@@ -1,4 +1,4 @@
-use ai_handoff_cli::commands::{checkpoint, doctor};
+use ai_handoff_cli::commands::{checkpoint, doctor, handoff};
 use ai_handoff_core::install::{state, InstallState, PluginRecord};
 use ai_handoff_daemon::router::Router;
 use ai_handoff_ipc::server::serve_once;
@@ -30,6 +30,16 @@ fn doctor_json_reports_daemon_unreachable_and_exits_zero() {
         ),
         "{report}"
     );
+    // Store write probe from the doctor process itself.
+    assert!(
+        matches!(
+            report["store_permissions"]["status"].as_str(),
+            Some("ok" | "warning" | "missing")
+        ),
+        "{report}"
+    );
+    // No daemon answered the ping → its store health is unknown, not false.
+    assert!(report["daemon_store_writable"].is_null(), "{report}");
     std::env::remove_var("AI_HANDOFF_HOME");
 }
 
@@ -333,6 +343,21 @@ fn checkpoint_with_daemon_online_writes_capsule() {
         cwd.path().file_name().unwrap().to_string_lossy()
     );
     std::env::set_current_dir(previous_cwd).unwrap();
+    std::env::remove_var("AI_HANDOFF_HOME");
+}
+
+#[test]
+fn handoff_offline_prints_empty_json_and_exits_nonzero() {
+    let _guard = lock();
+    let home = tempfile::tempdir().unwrap();
+    std::env::set_var("AI_HANDOFF_HOME", home.path());
+
+    let mut out = Vec::new();
+    let code = handoff::run_io("claude-code", false, false, None, &mut out, false);
+    // No daemon: stdout keeps the `{}` shape skills parse, but the exit code
+    // must say the handoff did not happen.
+    assert_eq!(code, 1);
+    assert_eq!(String::from_utf8(out).unwrap().trim(), "{}");
     std::env::remove_var("AI_HANDOFF_HOME");
 }
 

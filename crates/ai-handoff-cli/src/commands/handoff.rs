@@ -6,7 +6,7 @@
 
 use ai_handoff_ipc::{
     client::{send, ClientConfig},
-    protocol::{ClientInfo, Request, VERSION},
+    protocol::{ClientInfo, Request, Status, VERSION},
 };
 use chrono::{SecondsFormat, Utc};
 use serde_json::json;
@@ -79,5 +79,12 @@ pub fn run_io(
     }
     let text = serde_json::to_string(&resp.hook_stdout).unwrap_or_else(|_| "{}".to_string());
     let _ = writeln!(out, "{text}");
-    0
+    // Degraded/error means the handoff did NOT happen (unknown --id, capsule
+    // already consumed, daemon unreachable) — scripts must not read the bare
+    // `{}` as success. "Nothing pending" is still an Ok response and exits 0.
+    if resp.status == Status::Ok {
+        0
+    } else {
+        1
+    }
 }

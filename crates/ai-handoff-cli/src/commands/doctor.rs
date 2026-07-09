@@ -58,9 +58,17 @@ pub fn run_io_fix(json_output: bool, fix: bool, out: &mut dyn Write) -> i32 {
     } else {
         "unreachable"
     };
+    // The RUNNING daemon's own store-write health, reported on the ping. This
+    // is distinct from this process's probe below: a sandboxed daemon can hold
+    // the singleton lock while every consume/checkpoint write fails, and only
+    // the daemon itself can see that. Older daemons don't report the flag.
+    let daemon_store_writable = resp.hook_stdout.get("store_writable").cloned();
     let ipc_permissions = permission_report(ai_handoff_core::secure_fs::private_dir_status(
         &ai_handoff_core::paths::ipc_dir(),
     ));
+    // Store write probe from THIS process (the doctor may itself be sandboxed;
+    // the probe fails the same way capsule writes would).
+    let store_permissions = store_report(&ai_handoff_core::paths::store_dir());
     // The root ACL alone missed the real failure mode: hardened
     // requests/responses subdirs lock sandboxed agents out while the root
     // still reads "private". Check inheritance AND actually try to write.
@@ -71,15 +79,24 @@ pub fn run_io_fix(json_output: bool, fix: bool, out: &mut dyn Write) -> i32 {
     let st = ai_handoff_core::install::state::load(&ai_handoff_core::paths::home());
     let claude_plugin = claude_plugin_state(&st.claude.plugin);
     let codex_plugin = codex_plugin_state(&st.codex.plugin);
-    let next_steps = next_steps(daemon == "reachable", fix, &claude_plugin, &codex_plugin);
+    let mut next_steps = next_steps(daemon == "reachable", fix, &claude_plugin, &codex_plugin);
+    if daemon_store_writable.as_ref().and_then(|v| v.as_bool()) == Some(false) {
+        next_steps.push(
+            "the running daemon cannot WRITE the capsule store (sandboxed daemon?) — \
+             stop it and run `ai-handoff daemon run` outside the sandbox"
+                .to_string(),
+        );
+    }
 
     let report = json!({
         "daemon": daemon,
+        "daemon_store_writable": daemon_store_writable,
         "home": ai_handoff_core::paths::home().to_string_lossy(),
         "ipc": ai_handoff_core::paths::ipc_dir().to_string_lossy(),
         "ipc_permissions": ipc_permissions,
         "ipc_requests": ipc_requests,
         "ipc_responses": ipc_responses,
+        "store_permissions": store_permissions,
         "plugin": {
             "claude": claude_plugin,
             "codex": codex_plugin,
@@ -119,6 +136,25 @@ pub fn run_io_fix(json_output: bool, fix: bool, out: &mut dyn Write) -> i32 {
                 .as_str()
                 .unwrap_or("unknown"),
             report["ipc_responses"]["message"].as_str().unwrap_or("")
+        );
+        let _ = writeln!(
+            out,
+            "store permissions: {} ({})",
+            report["store_permissions"]["status"]
+                .as_str()
+                .unwrap_or("unknown"),
+            report["store_permissions"]["message"]
+                .as_str()
+                .unwrap_or("")
+        );
+        let _ = writeln!(
+            out,
+            "daemon store write: {}",
+            match report["daemon_store_writable"].as_bool() {
+                Some(true) => "ok",
+                Some(false) => "DENIED",
+                None => "unknown (daemon unreachable or older version)",
+            }
         );
         let _ = writeln!(
             out,
@@ -274,6 +310,26 @@ fn probe_write(dir: &Path) -> Result<(), String> {
     std::fs::write(&probe, b"probe").map_err(|error| error.to_string())?;
     std::fs::remove_file(&probe).map_err(|error| error.to_string())?;
     Ok(())
+}
+
+/// Capsule-store health: ACL state plus a real write probe, mirroring the
+/// daemon's startup preflight. Catches "peek works but consume can never
+/// write" before a handoff silently degrades.
+fn store_report(dir: &Path) -> serde_json::Value {
+    let mut report = ai_handoff_core::secure_fs::private_dir_status(dir);
+    if !matches!(
+        report.status,
+        ai_handoff_core::secure_fs::PermissionStatus::Missing
+            | ai_handoff_core::secure_fs::PermissionStatus::Error
+    ) {
+        if let Err(error) = probe_write(dir) {
+            report = ai_handoff_core::secure_fs::PermissionReport {
+                status: ai_handoff_core::secure_fs::PermissionStatus::Error,
+                message: format!("write test failed: {error}"),
+            };
+        }
+    }
+    permission_report(report)
 }
 
 fn permission_report(report: ai_handoff_core::secure_fs::PermissionReport) -> serde_json::Value {
