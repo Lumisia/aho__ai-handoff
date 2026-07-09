@@ -3,7 +3,7 @@ use ai_handoff_core::{
     capsule_codec, config, paths,
 };
 use chrono::{DateTime, Utc};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 pub fn save_capsule(c: &Capsule) -> std::io::Result<PathBuf> {
@@ -239,15 +239,12 @@ fn is_capsule_file(path: &Path) -> bool {
     )
 }
 
-/// A capsule id must be a bare file stem. Anything with path separators,
-/// parent segments, or a drive/root prefix could escape the project directory
-/// when joined (e.g. a retarget request naming `../<other-project>/cap_x`).
+/// A capsule id must be a bare file stem. Rejects `/` and `\` explicitly
+/// (rather than via `Path::components()`, whose separator handling is
+/// platform-dependent — `\` splits on Windows but is a literal character on
+/// Unix) so the traversal guard is identical on every OS, plus `..` and empty.
 fn is_safe_capsule_id(capsule_id: &str) -> bool {
-    let mut components = Path::new(capsule_id).components();
-    matches!(
-        (components.next(), components.next()),
-        (Some(Component::Normal(only)), None) if only == std::ffi::OsStr::new(capsule_id)
-    )
+    !capsule_id.is_empty() && capsule_id != ".." && !capsule_id.contains(['/', '\\'])
 }
 
 fn find_capsule_path(project_id: &str, capsule_id: &str) -> Option<PathBuf> {
