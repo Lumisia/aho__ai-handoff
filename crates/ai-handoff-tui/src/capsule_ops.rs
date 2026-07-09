@@ -145,7 +145,7 @@ pub fn delete(path: &Path) -> Result<(), CapsuleOpError> {
 mod tests {
     use super::*;
     use ai_handoff_core::capsule::{
-        AgentKind, Capsule, Consumption, ConsumptionState, RedactionMeta, Session, Summary,
+        Capsule, Consumption, ConsumptionState, RedactionMeta, Session, Summary,
     };
 
     fn sample() -> Capsule {
@@ -154,8 +154,8 @@ mod tests {
             capsule_id: "cap_1".into(),
             project_id: "projX".into(),
             created_at: "2026-06-25T12:00:00Z".into(),
-            source_agent: AgentKind::Codex,
-            target_agent: AgentKind::ClaudeCode,
+            source_agent: "codex".into(),
+            target_agent: Some("claude-code".into()),
             session: Session::default(),
             summary: Summary {
                 goal: "ship it".into(),
@@ -174,6 +174,7 @@ mod tests {
                 state: ConsumptionState::Pending,
                 consumed_by: None,
                 consumed_at: None,
+                consumed_despite_target: false,
             },
         }
     }

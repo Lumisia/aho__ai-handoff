@@ -26,6 +26,7 @@ use ai_handoff_usage::{
     Dimension,
 };
 use serde::Serialize;
+use tauri::Manager;
 
 const TEXT_LIMIT: u64 = 512 * 1024;
 const DAY_BREAKDOWN_WINDOW_DAYS: i64 = 30;
@@ -2103,6 +2104,13 @@ fn ps_single_quote(value: &str) -> String {
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .setup(|_| {
             ensure_windows_search_shortcuts();
             Ok(())
@@ -2154,12 +2162,33 @@ fn main() {
 mod tests {
     use super::*;
     use ai_handoff_core::capsule::{
-        AgentKind, Capsule, Consumption, ConsumptionState, RedactionMeta, Session, Summary,
+        Capsule, Consumption, ConsumptionState, RedactionMeta, Session, Summary,
     };
     use ai_handoff_usage::model::{Source, Tokens, UsageEvent};
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn desktop_registers_single_instance_before_setup() {
+        let manifest = include_str!("../Cargo.toml");
+        assert!(
+            manifest.contains("tauri-plugin-single-instance"),
+            "desktop app should depend on the Tauri single-instance plugin"
+        );
+
+        let source = include_str!("main.rs");
+        let plugin = source
+            .find(".plugin(tauri_plugin_single_instance::init(")
+            .expect("desktop builder should register the single-instance plugin");
+        let setup = source
+            .find(".setup(")
+            .expect("desktop builder should still run setup");
+        assert!(
+            plugin < setup,
+            "single-instance plugin must be registered before setup"
+        );
+    }
 
     fn sample_capsule() -> Capsule {
         Capsule {
@@ -2167,8 +2196,8 @@ mod tests {
             capsule_id: "cap_1".into(),
             project_id: "proj".into(),
             created_at: "2026-06-30T00:00:00Z".into(),
-            source_agent: AgentKind::Codex,
-            target_agent: AgentKind::ClaudeCode,
+            source_agent: "codex".into(),
+            target_agent: Some("claude-code".into()),
             session: Session::default(),
             summary: Summary {
                 goal: "old goal".into(),
@@ -2187,6 +2216,7 @@ mod tests {
                 state: ConsumptionState::Pending,
                 consumed_by: None,
                 consumed_at: None,
+                consumed_despite_target: false,
             },
         }
     }

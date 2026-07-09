@@ -64,18 +64,54 @@ pub struct Consumption {
     pub consumed_by: Option<String>,
     #[serde(default)]
     pub consumed_at: Option<String>,
+    /// True when a `--force` consume took a capsule that targeted a different
+    /// agent — kept for auditability of overridden routing.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub consumed_despite_target: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 // ---------------------------------------------------------------------------
 // Enums
 // ---------------------------------------------------------------------------
 
-/// The agent kind — serialized as kebab-case strings.
+/// The agent kind — serialized as kebab-case strings. Used for the agents
+/// with local usage/trigger integrations (hooks, statusline, accounts).
+/// Capsule routing uses plain agent-id strings instead, so unknown agents
+/// (Cursor, Gemini, Grok, ...) can hand off without touching this enum.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 pub enum AgentKind {
     ClaudeCode,
     Codex,
+}
+
+impl AgentKind {
+    /// The canonical agent-id string used in capsule fields.
+    pub fn as_canonical_str(&self) -> &'static str {
+        match self {
+            AgentKind::ClaudeCode => "claude-code",
+            AgentKind::Codex => "codex",
+        }
+    }
+}
+
+/// Normalize a user- or agent-supplied agent id to its canonical form:
+/// lowercase, kebab-case, known aliases folded ("claude" → "claude-code").
+/// Unknown ids pass through normalized (forward compatibility); empty input
+/// returns `None`.
+pub fn canonical_agent_id(value: &str) -> Option<String> {
+    let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+    if normalized.is_empty() {
+        return None;
+    }
+    Some(match normalized.as_str() {
+        "claude" | "claude-code" | "claudecode" => "claude-code".to_string(),
+        _ => normalized,
+    })
 }
 
 /// Consumption state — serialized as snake_case strings.
@@ -124,8 +160,14 @@ pub struct Capsule {
     pub capsule_id: String,
     pub project_id: String,
     pub created_at: String,
-    pub source_agent: AgentKind,
-    pub target_agent: AgentKind,
+    /// Canonical agent-id string of the capsule's author (e.g. "claude-code").
+    pub source_agent: String,
+    /// Preferred consumer as a routing hint. `None` means open — any agent may
+    /// consume. Serialized as an explicit null so older readers still see the
+    /// key. A `Some` value never hard-locks the capsule: other agents can
+    /// still see it (peek/list) and take it via retarget or a forced consume.
+    #[serde(default)]
+    pub target_agent: Option<String>,
     pub session: Session,
     pub summary: Summary,
     pub files: Vec<FileChange>,
@@ -202,8 +244,13 @@ pub fn validate(c: &Capsule) -> Result<(), Vec<String>> {
     if c.project_id.is_empty() {
         reasons.push("project_id must not be empty".into());
     }
-    if c.source_agent == c.target_agent {
-        reasons.push("source_agent and target_agent must differ".into());
+    if c.source_agent.trim().is_empty() {
+        reasons.push("source_agent must not be empty".into());
+    }
+    if let Some(target) = &c.target_agent {
+        if target.trim().is_empty() {
+            reasons.push("target_agent must be a non-empty agent id or null".into());
+        }
     }
 
     if reasons.is_empty() {
@@ -228,8 +275,8 @@ mod tests {
             capsule_id: "cap_20260625_123456_abcd".into(),
             project_id: "projX".into(),
             created_at: "2026-06-25T12:34:56Z".into(),
-            source_agent: AgentKind::Codex,
-            target_agent: AgentKind::ClaudeCode,
+            source_agent: "codex".into(),
+            target_agent: Some("claude-code".into()),
             session: Session::default(),
             summary: Summary {
                 goal: "g".into(),
@@ -248,6 +295,7 @@ mod tests {
                 state: ConsumptionState::Pending,
                 consumed_by: None,
                 consumed_at: None,
+                consumed_despite_target: false,
             },
         }
     }
@@ -268,14 +316,104 @@ mod tests {
         let s = serde_json::to_string_pretty(&c).unwrap();
         let back: Capsule = serde_json::from_str(&s).unwrap();
         assert_eq!(back.capsule_id, c.capsule_id);
-        assert_eq!(back.source_agent, AgentKind::Codex);
+        assert_eq!(back.source_agent, "codex");
+        assert_eq!(back.target_agent.as_deref(), Some("claude-code"));
     }
 
     #[test]
-    fn validate_rejects_same_source_and_target() {
+    fn deserializes_legacy_capsule_with_agent_kind_strings() {
+        // Files written by <=2.1.5 carry kebab-case AgentKind strings and a
+        // consumption block without consumed_despite_target.
+        let json = r#"{
+            "schema_version": 2,
+            "capsule_id": "cap_old",
+            "project_id": "projX",
+            "created_at": "2026-06-25T12:00:00Z",
+            "source_agent": "claude-code",
+            "target_agent": "codex",
+            "session": { "session_id": null, "started_at": null, "ended_at": null, "turn_count": 0 },
+            "summary": { "goal": "g", "done": [], "remaining": [], "risks": [] },
+            "files": [],
+            "next_prompt": null,
+            "redaction": { "applied": true, "ruleset": "default-v2" },
+            "consumption": { "state": "pending", "consumed_by": null, "consumed_at": null }
+        }"#;
+        let c: Capsule = serde_json::from_str(json).unwrap();
+        assert_eq!(c.source_agent, "claude-code");
+        assert_eq!(c.target_agent.as_deref(), Some("codex"));
+        assert!(!c.consumption.consumed_despite_target);
+    }
+
+    #[test]
+    fn deserializes_missing_or_null_target_as_open() {
+        let mut v = serde_json::to_value(sample()).unwrap();
+        v["target_agent"] = serde_json::Value::Null;
+        let c: Capsule = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(c.target_agent, None);
+
+        v.as_object_mut().unwrap().remove("target_agent");
+        let c: Capsule = serde_json::from_value(v).unwrap();
+        assert_eq!(c.target_agent, None);
+    }
+
+    #[test]
+    fn serializes_open_target_as_null_keeping_the_key() {
         let mut c = sample();
-        c.target_agent = AgentKind::Codex;
+        c.target_agent = None;
+        let v = serde_json::to_value(&c).unwrap();
+        assert!(v.as_object().unwrap().contains_key("target_agent"));
+        assert!(v["target_agent"].is_null());
+    }
+
+    #[test]
+    fn validate_allows_same_source_and_target() {
+        let mut c = sample();
+        c.target_agent = Some("codex".into());
+        assert!(validate(&c).is_ok());
+    }
+
+    #[test]
+    fn validate_allows_open_target() {
+        let mut c = sample();
+        c.target_agent = None;
+        assert!(validate(&c).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_empty_agent_ids() {
+        let mut c = sample();
+        c.source_agent = String::new();
         assert!(validate(&c).is_err());
+
+        let mut c = sample();
+        c.target_agent = Some(String::new());
+        assert!(validate(&c).is_err());
+    }
+
+    #[test]
+    fn canonical_agent_id_normalizes_known_aliases_and_passes_unknown() {
+        assert_eq!(canonical_agent_id("claude").as_deref(), Some("claude-code"));
+        assert_eq!(
+            canonical_agent_id("Claude-Code").as_deref(),
+            Some("claude-code")
+        );
+        assert_eq!(
+            canonical_agent_id("claude_code").as_deref(),
+            Some("claude-code")
+        );
+        assert_eq!(canonical_agent_id("codex").as_deref(), Some("codex"));
+        // Unknown agents pass through normalized — forward compatibility for
+        // Cursor / Gemini / Grok without touching this crate.
+        assert_eq!(canonical_agent_id("Grok").as_deref(), Some("grok"));
+        assert_eq!(canonical_agent_id("  gemini "), Some("gemini".into()));
+        assert_eq!(canonical_agent_id(""), None);
+        assert_eq!(canonical_agent_id("   "), None);
+    }
+
+    #[test]
+    fn agent_kind_canonical_str_matches_serde_values() {
+        assert_eq!(AgentKind::ClaudeCode.as_canonical_str(), "claude-code");
+        assert_eq!(AgentKind::Codex.as_canonical_str(), "codex");
     }
 
     #[test]

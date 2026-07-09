@@ -17,7 +17,7 @@ const required = [
   'skills/handoff-checkpoint/SKILL.md',
   'skills/handoff-doctor/SKILL.md',
   'skills/handoff-config/SKILL.md',
-  'schemas/capsule.schema.json', 'schemas/memory-shard.schema.json',
+  'schemas/capsule.schema.json',
 ];
 for (const relative of required) {
   if (!existsSync(join(root, relative))) throw new Error(`missing package file: ${relative}`);

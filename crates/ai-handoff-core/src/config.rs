@@ -1,6 +1,7 @@
 //! Typed, file-backed AI Handoff config (`~/.ai-handoff/config.toml`).
 //!
-//! Embedded defaults match v1's `defaults.json`. `parse`/`resolve` are pure;
+//! Defaults are embedded in these types' `Default` impls — there is no
+//! separate defaults file. `parse`/`resolve` are pure;
 //! `load` is the only IO entry point. A missing or malformed config resolves to
 //! defaults so a hook is never broken by a bad config.
 

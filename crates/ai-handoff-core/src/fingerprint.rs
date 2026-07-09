@@ -590,6 +590,24 @@ pub fn fingerprint(cwd: &Path) -> String {
     fingerprint_info(cwd, &RealGit).fingerprint
 }
 
+/// When `cwd` is inside a LINKED `git worktree`, the root directory of the
+/// primary checkout it belongs to; `None` for a plain checkout or a non-repo.
+/// Filesystem-only (no git process): the worktree is detected by its
+/// `commondir` pointing away from its own git dir, and the main working
+/// directory is the parent of the shared `.git`. Lets callers deriving a
+/// display name skip an auto-generated worktree basename.
+pub fn linked_worktree_main_root(cwd: &Path) -> Option<PathBuf> {
+    let info = find_git_dir_fs(cwd)?;
+    if info.common_dir == info.git_dir {
+        return None; // plain checkout: no commondir redirection
+    }
+    if info.common_dir.file_name().and_then(|n| n.to_str()) == Some(".git") {
+        info.common_dir.parent().map(Path::to_path_buf)
+    } else {
+        None // bare-style shared dir: no primary working directory to name
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -824,6 +842,38 @@ mod tests {
             },
         );
         assert_eq!(nested.basis.value, r"remote:C:\x\y.git");
+    }
+
+    // A linked worktree must resolve to the MAIN checkout's root via its
+    // commondir, not to the worktree directory itself.
+    #[test]
+    fn main_root_resolves_linked_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main = tmp.path().join("myproject");
+        let wt_meta = main.join(".git").join("worktrees").join("wt");
+        std::fs::create_dir_all(&wt_meta).unwrap();
+        std::fs::write(wt_meta.join("commondir"), "../..\n").unwrap();
+
+        let worktree = tmp.path().join("loving-sanderson-9a5e09");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", wt_meta.to_string_lossy()),
+        )
+        .unwrap();
+
+        let root = linked_worktree_main_root(&worktree).expect("worktree resolves to main root");
+        assert_eq!(root.file_name().and_then(|n| n.to_str()), Some("myproject"));
+    }
+
+    // A plain checkout has no commondir redirection and must stay `None`, so
+    // label derivation keeps using the cwd itself.
+    #[test]
+    fn main_root_is_none_for_plain_checkout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main = tmp.path().join("plainproject");
+        std::fs::create_dir_all(main.join(".git")).unwrap();
+        assert!(linked_worktree_main_root(&main).is_none());
     }
 
     // HAZARD 2: a canonicalized path basis must have no Windows `\\?\` prefix.

@@ -74,7 +74,7 @@ Important runtime entries:
 | `crates/ai-handoff-usage/` | Local Claude/Codex usage log parser and cost estimator. |
 | `apps/desktop/` | Optional Tauri desktop dashboard. |
 | `skills/` | Agent-facing skills shipped by the plugin bundle. |
-| `schemas/` | Capsule and memory schema files. |
+| `schemas/` | Capsule schema file. |
 | `scripts/` | Package validation and release helper scripts. |
 
 ## Development Checks

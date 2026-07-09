@@ -2797,10 +2797,10 @@ impl App {
             Style::default().fg(Color::DarkGray),
         )));
         lines.push(Line::from(format!(
-            "  {}: {:?} → {:?}",
+            "  {}: {} → {}",
             t!("capsule.field_flow"),
             c.source_agent,
-            c.target_agent
+            c.target_agent.as_deref().unwrap_or("any")
         )));
         lines.push(Line::from(format!(
             "  {}: {state}",
@@ -5550,7 +5550,7 @@ mod tests {
     #[test]
     fn capsule_detail_actions_toggle_edit_and_delete() {
         use ai_handoff_core::capsule::{
-            AgentKind, Capsule, Consumption, ConsumptionState, RedactionMeta, Session, Summary,
+            Capsule, Consumption, ConsumptionState, RedactionMeta, Session, Summary,
         };
         use ai_handoff_core::dashboard::{CapsuleList, CapsuleSummary};
 
@@ -5561,8 +5561,8 @@ mod tests {
             capsule_id: "cap_1".into(),
             project_id: "projX".into(),
             created_at: "2026-06-25T12:00:00Z".into(),
-            source_agent: AgentKind::Codex,
-            target_agent: AgentKind::ClaudeCode,
+            source_agent: "codex".into(),
+            target_agent: Some("claude-code".into()),
             session: Session::default(),
             summary: Summary {
                 goal: "old goal".into(),
@@ -5581,6 +5581,7 @@ mod tests {
                 state: ConsumptionState::Pending,
                 consumed_by: None,
                 consumed_at: None,
+                consumed_despite_target: false,
             },
         };
         std::fs::write(&cap_path, serde_json::to_vec_pretty(&capsule).unwrap()).unwrap();
@@ -5694,7 +5695,7 @@ mod tests {
     #[test]
     fn capsule_r_refreshes_tree_from_disk() {
         use ai_handoff_core::capsule::{
-            AgentKind, Capsule, Consumption, ConsumptionState, RedactionMeta, Session, Summary,
+            Capsule, Consumption, ConsumptionState, RedactionMeta, Session, Summary,
         };
 
         let home = tempfile::tempdir().unwrap();
@@ -5718,8 +5719,8 @@ mod tests {
             capsule_id: "cap_20260625_120000_abcd".into(),
             project_id: "proj-refresh".into(),
             created_at: "2026-06-25T12:00:00Z".into(),
-            source_agent: AgentKind::Codex,
-            target_agent: AgentKind::ClaudeCode,
+            source_agent: "codex".into(),
+            target_agent: Some("claude-code".into()),
             session: Session::default(),
             summary: Summary {
                 goal: "fresh capsule".into(),
@@ -5738,6 +5739,7 @@ mod tests {
                 state: ConsumptionState::Pending,
                 consumed_by: None,
                 consumed_at: None,
+                consumed_despite_target: false,
             },
         };
         let project_dir = home.path().join("store/capsules/proj-refresh");

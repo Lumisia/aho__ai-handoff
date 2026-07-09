@@ -52,7 +52,9 @@ pub fn run_io(input: &mut dyn Read, out: &mut dyn Write, now_ms: i64, show: bool
         .map(|cwd| {
             let path = std::path::Path::new(cwd);
             let project_id = fingerprint(path);
-            find_pending(&project_id).is_some()
+            // The statusline runs inside Claude Code — show capsules Claude
+            // could claim (addressed to it or open).
+            find_pending(&project_id, "claude-code").is_some()
         })
         .unwrap_or(false);
 

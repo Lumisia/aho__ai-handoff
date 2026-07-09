@@ -1,13 +1,15 @@
 use crate::{
     dedupe::{dedupe_key, Deduper},
-    store::{find_pending, mark_consumed, save_capsule, save_project_label},
+    store::{
+        find_pending, list_pending, mark_consumed, pending_for, save_capsule, save_project_label,
+    },
     trigger_mark,
 };
 use ai_handoff_core::{
     account, account_api,
     capsule::{
-        new_capsule_id, AgentKind, Capsule, Consumption, ConsumptionState, FileChange,
-        RedactionMeta, Session, Summary,
+        canonical_agent_id, new_capsule_id, AgentKind, Capsule, Consumption, ConsumptionState,
+        FileChange, RedactionMeta, Session, Summary,
     },
     config,
     fingerprint::fingerprint,
@@ -110,6 +112,9 @@ impl Handler for Router {
         if req.kind == "handoff_peek" {
             return handle_handoff_peek(req);
         }
+        if req.kind == "handoff_retarget" {
+            return handle_handoff_retarget(req);
+        }
         if req.kind != "hook_event" {
             return degraded(&req.request_id, "unsupported_request");
         }
@@ -139,21 +144,21 @@ impl Handler for Router {
             HookEventKind::SessionStart | HookEventKind::UserPromptSubmit => {
                 // A pending capsule is only announced, never consumed here —
                 // consumption is explicit via `ai-handoff handoff` (/handoff).
-                if let Some(capsule) = find_pending(&project_id) {
-                    if capsule.target_agent == normalized.agent {
-                        let mark = session_mark_key("notice", &req.agent, &normalized, &project_id);
-                        if !self.mark_seen(&mark) {
-                            return Self::ok(
-                                req,
-                                json!({
-                                    "hookSpecificOutput": {
-                                        "hookEventName": hook_event_name(event),
-                                        "additionalContext": render_pending_notice(&capsule),
-                                    }
-                                }),
-                                json!({ "pending_notice": true }),
-                            );
-                        }
+                if let Some(capsule) =
+                    find_pending(&project_id, normalized.agent.as_canonical_str())
+                {
+                    let mark = session_mark_key("notice", &req.agent, &normalized, &project_id);
+                    if !self.mark_seen(&mark) {
+                        return Self::ok(
+                            req,
+                            json!({
+                                "hookSpecificOutput": {
+                                    "hookEventName": hook_event_name(event),
+                                    "additionalContext": render_pending_notice(&capsule),
+                                }
+                            }),
+                            json!({ "pending_notice": true }),
+                        );
                     }
                 }
                 Self::ok(req, json!({}), json!({}))
@@ -165,7 +170,13 @@ impl Handler for Router {
             }
             HookEventKind::Stop => {
                 if let Some(payload) = extract_capsule_payload(&normalized.raw) {
-                    let capsule = build_capsule(&payload, &project_id, &normalized);
+                    let capsule = build_capsule(
+                        &payload,
+                        &project_id,
+                        &normalized.cwd,
+                        normalized.session_id.clone(),
+                        normalized.agent.as_canonical_str(),
+                    );
                     let _ = save_project_label(&project_id, &normalized.cwd);
                     let _ = save_capsule(&capsule);
                     // The turn just checkpointed — asking again would be noise.
@@ -425,7 +436,9 @@ fn handle_checkpoint(req: &ai_handoff_ipc::protocol::Request) -> Response {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from(&req.cwd));
     let project_id = fingerprint(&cwd);
-    let agent = parse_agent(&req.agent).unwrap_or(AgentKind::Codex);
+    // Canonicalized so any agent id (grok, gemini, ...) can checkpoint —
+    // unknown ids pass through instead of being coerced to codex.
+    let agent = canonical_agent_id(&req.agent).unwrap_or_else(|| "codex".to_string());
     let now = Utc::now();
     let message = raw
         .get("message")
@@ -443,11 +456,9 @@ fn handle_checkpoint(req: &ai_handoff_ipc::protocol::Request) -> Response {
             obj.insert("goal".to_string(), json!(message));
         }
     }
-    let normalized = normalize(agent.clone(), HookEventKind::Stop, &payload);
-    let mut capsule = build_capsule(&payload, &project_id, &normalized);
+    let mut capsule = build_capsule(&payload, &project_id, &cwd, req.session_id.clone(), &agent);
     capsule.capsule_id = new_capsule_id(now);
     capsule.created_at = now.to_rfc3339_opts(SecondsFormat::Secs, true);
-    capsule.session.session_id = req.session_id.clone();
 
     let _ = save_project_label(&project_id, &cwd);
     match save_capsule(&capsule) {
@@ -461,8 +472,13 @@ fn handle_checkpoint(req: &ai_handoff_ipc::protocol::Request) -> Response {
 }
 
 /// Explicit capsule consumption (`ai-handoff handoff` / the /handoff skill).
-/// Finds the pending capsule targeted at the calling agent, marks it consumed,
-/// and returns its rendered context. Empty stdout when nothing is pending.
+/// Claims the newest pending capsule addressed to the calling agent or open
+/// (no target). `"force": true` in the payload widens the pool to capsules
+/// targeting other agents; such an override is recorded on the capsule as
+/// `consumed_despite_target`. A capsule created by the calling session is
+/// never claimed back (self-reconsume guard). Empty stdout when nothing
+/// matches — capsules for other agents are then listed in diagnostics so
+/// they are never silently hidden.
 fn handle_handoff_consume(req: &ai_handoff_ipc::protocol::Request) -> Response {
     let raw = raw_with_request_fallbacks(req);
     let cwd = raw
@@ -471,14 +487,50 @@ fn handle_handoff_consume(req: &ai_handoff_ipc::protocol::Request) -> Response {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from(&req.cwd));
     let project_id = fingerprint(&cwd);
-    let Some(agent) = parse_agent(&req.agent) else {
+    let Some(agent) = canonical_agent_id(&req.agent) else {
         return degraded(&req.request_id, "daemon_error");
     };
+    let force = raw.get("force").and_then(Value::as_bool).unwrap_or(false);
 
-    match find_pending(&project_id) {
-        Some(capsule) if capsule.target_agent == agent => {
+    // Explicit claim: `--id <capsule>` names exactly one capsule and consumes
+    // it regardless of target (naming it IS the consent) — the safe path when
+    // several capsules are pending and a blind newest-first pick could grab
+    // the wrong one.
+    let capsule = if let Some(capsule_id) = raw.get("capsule_id").and_then(Value::as_str) {
+        match list_pending(&project_id)
+            .into_iter()
+            .find(|capsule| capsule.capsule_id == capsule_id)
+        {
+            Some(capsule) => Some(capsule),
+            None => return degraded(&req.request_id, "capsule_not_found"),
+        }
+    } else {
+        let candidates = if force {
+            list_pending(&project_id)
+        } else {
+            pending_for(&project_id, &agent)
+        };
+        candidates
+            .into_iter()
+            .find(|capsule| !same_session(capsule, &req.session_id))
+    };
+
+    match capsule {
+        Some(capsule) => {
+            let despite_target = capsule
+                .target_agent
+                .as_deref()
+                .is_some_and(|target| target != agent);
             let context = render_capsule_context_for_cwd(&capsule, &cwd);
-            if mark_consumed(&project_id, &capsule.capsule_id, agent, Utc::now()).is_err() {
+            if mark_consumed(
+                &project_id,
+                &capsule.capsule_id,
+                &agent,
+                Utc::now(),
+                despite_target,
+            )
+            .is_err()
+            {
                 return degraded(&req.request_id, "daemon_error");
             }
             Router::ok(
@@ -490,18 +542,32 @@ fn handle_handoff_consume(req: &ai_handoff_ipc::protocol::Request) -> Response {
                     },
                     "consumed": true,
                     "capsule_id": capsule.capsule_id,
+                    "consumed_despite_target": despite_target,
                 }),
                 json!({}),
             )
         }
-        _ => Router::ok(req, json!({}), json!({ "pending": false })),
+        None => {
+            let others = other_pending_summaries(&project_id, &agent);
+            // Mismatched capsules must not vanish behind a bare {} — say in
+            // stdout that they exist. Only a truly empty store keeps the
+            // legacy {} shape skills already understand.
+            let stdout = if others.is_empty() {
+                json!({})
+            } else {
+                json!({ "pending": false, "others": others })
+            };
+            Router::ok(req, stdout, json!({ "pending": false }))
+        }
     }
 }
 
 /// Read-only preview of the pending capsule (`ai-handoff handoff --peek`).
 /// Returns the same rendered context a consume would inject, but never marks
 /// the capsule consumed — so the user can inspect what would enter the
-/// context before deciding to run the real handoff.
+/// context before deciding to run the real handoff. Pending capsules that
+/// target a different agent are reported under `others` (id, target, goal)
+/// so a wrong target can be noticed and fixed with retarget or --force.
 fn handle_handoff_peek(req: &ai_handoff_ipc::protocol::Request) -> Response {
     let raw = raw_with_request_fallbacks(req);
     let cwd = raw
@@ -510,23 +576,96 @@ fn handle_handoff_peek(req: &ai_handoff_ipc::protocol::Request) -> Response {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from(&req.cwd));
     let project_id = fingerprint(&cwd);
-    let Some(agent) = parse_agent(&req.agent) else {
+    let Some(agent) = canonical_agent_id(&req.agent) else {
         return degraded(&req.request_id, "daemon_error");
     };
 
-    match find_pending(&project_id) {
-        Some(capsule) if capsule.target_agent == agent => Router::ok(
+    let others = other_pending_summaries(&project_id, &agent);
+    match find_pending(&project_id, &agent) {
+        Some(capsule) => Router::ok(
             req,
             json!({
                 "pending": true,
                 "capsule_id": capsule.capsule_id,
                 "created_at": capsule.created_at,
                 "preview": render_capsule_context_for_cwd(&capsule, &cwd),
+                "others": others,
             }),
             json!({}),
         ),
-        _ => Router::ok(req, json!({ "pending": false }), json!({})),
+        None => Router::ok(
+            req,
+            json!({ "pending": false, "others": others }),
+            json!({}),
+        ),
     }
+}
+
+/// Re-point a pending capsule at another agent, or open it up
+/// (`ai-handoff retarget <capsule-id> [--to <agent>]`). The explicit fix-up
+/// path for a capsule saved with the wrong target.
+fn handle_handoff_retarget(req: &ai_handoff_ipc::protocol::Request) -> Response {
+    let raw = raw_with_request_fallbacks(req);
+    let cwd = raw
+        .get("cwd")
+        .and_then(Value::as_str)
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(&req.cwd));
+    let project_id = fingerprint(&cwd);
+    let Some(capsule_id) = raw.get("capsule_id").and_then(Value::as_str) else {
+        return degraded(&req.request_id, "daemon_error");
+    };
+    let target = capsule_target(&raw);
+
+    match crate::store::retarget(&project_id, capsule_id, target.clone()) {
+        Ok(()) => Router::ok(
+            req,
+            json!({
+                "retargeted": true,
+                "capsule_id": capsule_id,
+                "target_agent": target,
+            }),
+            json!({}),
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            degraded(&req.request_id, "capsule_not_found")
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => {
+            degraded(&req.request_id, "capsule_not_pending")
+        }
+        Err(_) => degraded(&req.request_id, "daemon_error"),
+    }
+}
+
+/// True when the capsule was created by the session now asking to consume it —
+/// same-agent resume is allowed, but a session never re-eats its own capsule.
+fn same_session(capsule: &Capsule, session_id: &Option<String>) -> bool {
+    matches!(
+        (capsule.session.session_id.as_deref(), session_id.as_deref()),
+        (Some(own), Some(caller)) if own == caller
+    )
+}
+
+/// Short summaries of pending capsules addressed to OTHER agents — surfaced in
+/// peek/consume responses so misrouted capsules stay visible.
+fn other_pending_summaries(project_id: &str, agent: &str) -> Vec<Value> {
+    list_pending(project_id)
+        .into_iter()
+        .filter(|capsule| {
+            capsule
+                .target_agent
+                .as_deref()
+                .is_some_and(|target| target != agent)
+        })
+        .map(|capsule| {
+            json!({
+                "capsule_id": capsule.capsule_id,
+                "target_agent": capsule.target_agent,
+                "created_at": capsule.created_at,
+                "goal": capsule.summary.goal,
+            })
+        })
+        .collect()
 }
 
 /// Once-per-session mark key. Falls back to the project fingerprint when the
@@ -713,6 +852,10 @@ fn hook_event_name(event: HookEventKind) -> &'static str {
     }
 }
 
+/// Cap on file paths rendered into handoff context — the capsule may carry
+/// more, but the injected context must not balloon with long change lists.
+const RENDER_FILES_MAX: usize = 10;
+
 fn render_capsule_context(capsule: &Capsule) -> String {
     let mut lines = vec![
         "[CURRENT HANDOFF]".to_string(),
@@ -726,6 +869,27 @@ fn render_capsule_context(capsule: &Capsule) -> String {
             "remaining: {}",
             capsule.summary.remaining.join("; ")
         ));
+    }
+    if !capsule.summary.risks.is_empty() {
+        lines.push(format!("risks: {}", capsule.summary.risks.join("; ")));
+    }
+    if !capsule.files.is_empty() {
+        let shown = capsule
+            .files
+            .iter()
+            .take(RENDER_FILES_MAX)
+            .map(|file| match &file.status {
+                Some(status) => format!("{} ({status})", file.path),
+                None => file.path.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        let overflow = capsule.files.len().saturating_sub(RENDER_FILES_MAX);
+        if overflow > 0 {
+            lines.push(format!("files: {shown} (+{overflow} more)"));
+        } else {
+            lines.push(format!("files: {shown}"));
+        }
     }
     if let Some(next) = &capsule.next_prompt {
         lines.push(format!("next_prompt: {next}"));
@@ -807,7 +971,9 @@ fn extract_capsule_payload(raw: &Value) -> Option<Value> {
 fn build_capsule(
     payload: &Value,
     project_id: &str,
-    event: &ai_handoff_core::hook_event::NormalizedHookEvent,
+    cwd: &std::path::Path,
+    session_id: Option<String>,
+    source_agent: &str,
 ) -> Capsule {
     let now = Utc::now();
     let summary_value = payload.get("summary").unwrap_or(payload);
@@ -848,10 +1014,13 @@ fn build_capsule(
         capsule_id: new_capsule_id(now),
         project_id: project_id.to_string(),
         created_at: now.to_rfc3339_opts(SecondsFormat::Secs, true),
-        source_agent: event.agent.clone(),
-        target_agent: opposite_agent(&event.agent),
+        source_agent: source_agent.to_string(),
+        // Routing hint only, and only when the payload asks for one — the
+        // default is an open capsule any agent may pick up. No more
+        // "opposite agent" guessing: with 3+ agents there is no opposite.
+        target_agent: capsule_target(payload),
         session: Session {
-            session_id: event.session_id.clone(),
+            session_id,
             ..Session::default()
         },
         summary: Summary {
@@ -864,7 +1033,7 @@ fn build_capsule(
         next_prompt,
         // Collected by the daemon itself, never taken from the agent payload,
         // so the consuming side can trust it for drift detection.
-        workspace: workspace_snapshot(&event.cwd),
+        workspace: workspace_snapshot(cwd),
         redaction: RedactionMeta {
             applied: redacted,
             ruleset: "default-v2".to_string(),
@@ -873,7 +1042,22 @@ fn build_capsule(
             state: ConsumptionState::Pending,
             consumed_by: None,
             consumed_at: None,
+            consumed_despite_target: false,
         },
+    }
+}
+
+/// The requested target from a checkpoint/retarget payload: `target` (or
+/// legacy `target_agent`) as a canonical agent id. Absent, null, or the
+/// explicit "none"/"any"/"open" spellings mean an open capsule.
+fn capsule_target(payload: &Value) -> Option<String> {
+    let value = payload
+        .get("target")
+        .or_else(|| payload.get("target_agent"))?
+        .as_str()?;
+    match value.trim().to_ascii_lowercase().as_str() {
+        "none" | "any" | "open" => None,
+        _ => canonical_agent_id(value),
     }
 }
 
@@ -894,13 +1078,6 @@ fn limit_next_prompt(value: String, limit: usize) -> String {
         value
     } else {
         items.join(" | ")
-    }
-}
-
-fn opposite_agent(agent: &AgentKind) -> AgentKind {
-    match agent {
-        AgentKind::ClaudeCode => AgentKind::Codex,
-        AgentKind::Codex => AgentKind::ClaudeCode,
     }
 }
 
@@ -1009,9 +1186,7 @@ mod tests {
     use super::*;
     use crate::test_support::env_lock;
     use ai_handoff_core::{
-        capsule::{
-            AgentKind, Capsule, Consumption, ConsumptionState, RedactionMeta, Session, Summary,
-        },
+        capsule::{Capsule, Consumption, ConsumptionState, RedactionMeta, Session, Summary},
         fingerprint::fingerprint,
     };
     use ai_handoff_ipc::{
@@ -1052,16 +1227,27 @@ mod tests {
             capsule_id: "cap_20260625_120000_abcd".into(),
             project_id: project_id.into(),
             created_at: "2026-06-25T12:00:00Z".into(),
-            source_agent: AgentKind::Codex,
-            target_agent: AgentKind::ClaudeCode,
+            source_agent: "codex".into(),
+            target_agent: Some("claude-code".into()),
             session: Session::default(),
             summary: Summary {
                 goal: "continue router".into(),
                 done: vec!["core".into()],
                 remaining: vec!["ipc".into()],
-                risks: vec![],
+                risks: vec!["ipc schema drift".into()],
             },
-            files: vec![],
+            files: vec![
+                FileChange {
+                    path: "src/router.rs".into(),
+                    status: Some("modified".into()),
+                    summary: None,
+                },
+                FileChange {
+                    path: "src/store.rs".into(),
+                    status: None,
+                    summary: None,
+                },
+            ],
             next_prompt: Some("pick up".into()),
             workspace: None,
             redaction: RedactionMeta {
@@ -1072,6 +1258,7 @@ mod tests {
                 state: ConsumptionState::Pending,
                 consumed_by: None,
                 consumed_at: None,
+                consumed_despite_target: false,
             },
         }
     }
@@ -1098,10 +1285,11 @@ mod tests {
         assert_eq!(resp.status, Status::Ok);
         assert_eq!(resp.hook_stdout, json!({}));
         let project_id = fingerprint(cwd.path());
-        let pending = crate::store::find_pending(&project_id).unwrap();
+        let pending = crate::store::find_pending(&project_id, "claude-code").unwrap();
         assert_eq!(pending.summary.goal, "ship MVP");
-        assert_eq!(pending.source_agent, AgentKind::Codex);
-        assert_eq!(pending.target_agent, AgentKind::ClaudeCode);
+        assert_eq!(pending.source_agent, "codex");
+        // No target in the payload → open capsule, not "the opposite agent".
+        assert_eq!(pending.target_agent, None);
         std::env::remove_var("AI_HANDOFF_HOME");
     }
 
@@ -1152,7 +1340,7 @@ mod tests {
         assert_eq!(router.handle(&req).status, Status::Ok);
 
         let project_id = fingerprint(cwd.path());
-        let pending = crate::store::find_pending(&project_id).unwrap();
+        let pending = crate::store::find_pending(&project_id, "claude-code").unwrap();
         let ws = pending.workspace.expect("workspace snapshot in a git repo");
         assert_eq!(ws.branch.as_deref(), Some("main"));
         assert_eq!(ws.head_sha.map(|sha| sha.len()), Some(40));
@@ -1252,7 +1440,7 @@ mod tests {
         let preview = resp.hook_stdout["preview"].as_str().unwrap();
         assert!(preview.contains("[workspace drift]"), "got: {preview}");
         assert!(preview.contains("fedcba9876"));
-        assert!(crate::store::find_pending(&project_id).is_some());
+        assert!(crate::store::find_pending(&project_id, "claude-code").is_some());
         std::env::remove_var("AI_HANDOFF_HOME");
     }
 
@@ -1282,7 +1470,7 @@ mod tests {
         let resp = router.handle(&req);
         assert_eq!(resp.status, Status::Ok);
         let project_id = fingerprint(cwd.path());
-        let pending = crate::store::find_pending(&project_id).unwrap();
+        let pending = crate::store::find_pending(&project_id, "claude-code").unwrap();
         assert_eq!(pending.summary.done, vec!["a"]);
         assert_eq!(pending.summary.remaining, vec!["c", "d"]);
         assert_eq!(pending.summary.risks, vec!["f"]);
@@ -1315,7 +1503,7 @@ mod tests {
         assert!(context.contains("continue router"));
         assert!(context.contains("/handoff"));
         // The capsule stays pending — only /handoff consumes it.
-        assert!(crate::store::find_pending(&project_id).is_some());
+        assert!(crate::store::find_pending(&project_id, "claude-code").is_some());
 
         // The notice fires once per session, not on every prompt.
         let again = request(
@@ -1350,13 +1538,35 @@ mod tests {
         req.kind = "handoff_consume".into();
         let resp = router.handle(&req);
         assert_eq!(resp.status, Status::Ok);
-        assert!(resp.hook_stdout["hookSpecificOutput"]["additionalContext"]
+        let context = resp.hook_stdout["hookSpecificOutput"]["additionalContext"]
             .as_str()
-            .unwrap()
-            .contains("continue router"));
+            .unwrap();
+        assert!(context.contains("continue router"));
+        assert!(context.contains("risks: ipc schema drift"));
+        assert!(context.contains("files: src/router.rs (modified); src/store.rs"));
         assert_eq!(resp.hook_stdout["consumed"], true);
-        assert!(crate::store::find_pending(&project_id).is_none());
+        assert!(crate::store::find_pending(&project_id, "claude-code").is_none());
         std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn render_capsule_context_caps_file_list() {
+        let project_id = "projX";
+        let mut capsule = pending_capsule(project_id);
+        capsule.files = (0..15)
+            .map(|idx| FileChange {
+                path: format!("src/file_{idx}.rs"),
+                status: None,
+                summary: None,
+            })
+            .collect();
+
+        let context = render_capsule_context(&capsule);
+        // Only the first RENDER_FILES_MAX paths appear, with an overflow note.
+        assert!(context.contains("src/file_0.rs"));
+        assert!(context.contains("src/file_9.rs"));
+        assert!(!context.contains("src/file_10.rs"));
+        assert!(context.contains("(+5 more)"));
     }
 
     #[test]
@@ -1386,7 +1596,7 @@ mod tests {
             .unwrap()
             .contains("continue router"));
         // Peek never consumes: the capsule must still be pending.
-        assert!(crate::store::find_pending(&project_id).is_some());
+        assert!(crate::store::find_pending(&project_id, "claude-code").is_some());
 
         // Wrong agent sees nothing.
         let mut wrong = request(
@@ -1422,8 +1632,318 @@ mod tests {
         );
         req.kind = "handoff_consume".into();
         let resp = router.handle(&req);
+        // Not silently hidden: when a mismatched capsule exists, stdout says
+        // so — a bare {} would read as "nothing pending at all".
+        assert_eq!(resp.hook_stdout["pending"], false);
+        assert_eq!(
+            resp.hook_stdout["others"][0]["capsule_id"],
+            "cap_20260625_120000_abcd"
+        );
+        assert_eq!(resp.hook_stdout["others"][0]["target_agent"], "claude-code");
+        assert!(crate::store::find_pending(&project_id, "claude-code").is_some());
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn handoff_consume_with_nothing_pending_keeps_empty_stdout() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+
+        let router = Router::new();
+        let mut req = request(
+            "turn-consume-empty",
+            "handoff",
+            "codex",
+            cwd.path(),
+            json!({ "cwd": cwd.path().to_string_lossy() }),
+        );
+        req.kind = "handoff_consume".into();
+        let resp = router.handle(&req);
+        // No capsules at all → {} stays, preserving the skill contract.
         assert_eq!(resp.hook_stdout, json!({}));
-        assert!(crate::store::find_pending(&project_id).is_some());
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn handoff_consume_by_capsule_id_claims_that_capsule() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        let project_id = fingerprint(cwd.path());
+        // Older capsule locked to claude-code + newer open capsule. A blind
+        // force would eat the newest; --id must claim exactly the named one.
+        crate::store::save_capsule(&pending_capsule(&project_id)).unwrap();
+        let mut open = pending_capsule(&project_id);
+        open.capsule_id = "cap_20260625_130000_ffff".into();
+        open.created_at = "2026-06-25T13:00:00Z".into();
+        open.target_agent = None;
+        crate::store::save_capsule(&open).unwrap();
+
+        let router = Router::new();
+        let mut req = request(
+            "turn-claim",
+            "handoff",
+            "grok",
+            cwd.path(),
+            json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "capsule_id": "cap_20260625_120000_abcd",
+            }),
+        );
+        req.kind = "handoff_consume".into();
+        let resp = router.handle(&req);
+        assert_eq!(resp.hook_stdout["consumed"], true);
+        assert_eq!(resp.hook_stdout["capsule_id"], "cap_20260625_120000_abcd");
+        // Explicit claim of a claude-code capsule by grok is an override.
+        assert_eq!(resp.hook_stdout["consumed_despite_target"], true);
+        // The open capsule is untouched.
+        assert_eq!(
+            crate::store::find_pending(&project_id, "codex")
+                .unwrap()
+                .capsule_id,
+            "cap_20260625_130000_ffff"
+        );
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn handoff_consume_by_unknown_capsule_id_degrades() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+
+        let router = Router::new();
+        let mut req = request(
+            "turn-claim-missing",
+            "handoff",
+            "grok",
+            cwd.path(),
+            json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "capsule_id": "cap_nope",
+            }),
+        );
+        req.kind = "handoff_consume".into();
+        let resp = router.handle(&req);
+        assert_eq!(resp.status, Status::Degraded);
+        assert_eq!(resp.warnings, vec!["capsule_not_found"]);
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn handoff_consume_open_capsule_by_unknown_agent() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        let project_id = fingerprint(cwd.path());
+        let mut capsule = pending_capsule(&project_id);
+        capsule.target_agent = None;
+        crate::store::save_capsule(&capsule).unwrap();
+
+        // Grok is not in any enum — an open capsule must still reach it.
+        let router = Router::new();
+        let mut req = request(
+            "turn-grok",
+            "handoff",
+            "grok",
+            cwd.path(),
+            json!({ "cwd": cwd.path().to_string_lossy() }),
+        );
+        req.kind = "handoff_consume".into();
+        let resp = router.handle(&req);
+        assert_eq!(resp.hook_stdout["consumed"], true);
+        assert_eq!(resp.hook_stdout["consumed_despite_target"], false);
+        assert!(crate::store::find_pending(&project_id, "grok").is_none());
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn handoff_consume_force_takes_other_target_and_records_it() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        let project_id = fingerprint(cwd.path());
+        // Capsule locked to claude-code; grok takes it only with force.
+        crate::store::save_capsule(&pending_capsule(&project_id)).unwrap();
+
+        let router = Router::new();
+        let mut req = request(
+            "turn-force",
+            "handoff",
+            "grok",
+            cwd.path(),
+            json!({ "cwd": cwd.path().to_string_lossy(), "force": true }),
+        );
+        req.kind = "handoff_consume".into();
+        let resp = router.handle(&req);
+        assert_eq!(resp.hook_stdout["consumed"], true);
+        assert_eq!(resp.hook_stdout["consumed_despite_target"], true);
+        assert!(crate::store::find_pending(&project_id, "claude-code").is_none());
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn handoff_consume_skips_capsule_created_by_same_session() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        let project_id = fingerprint(cwd.path());
+        let mut capsule = pending_capsule(&project_id);
+        capsule.session.session_id = Some("s1".into());
+        crate::store::save_capsule(&capsule).unwrap();
+
+        let router = Router::new();
+        // request() uses session_id "s1" — the session that wrote the capsule.
+        let mut own = request(
+            "turn-own",
+            "handoff",
+            "claude-code",
+            cwd.path(),
+            json!({ "cwd": cwd.path().to_string_lossy() }),
+        );
+        own.kind = "handoff_consume".into();
+        let resp = router.handle(&own);
+        assert_eq!(resp.hook_stdout, json!({}));
+        assert!(crate::store::find_pending(&project_id, "claude-code").is_some());
+
+        // A different session of the SAME agent may resume it.
+        let mut other = request(
+            "turn-other",
+            "handoff",
+            "claude-code",
+            cwd.path(),
+            json!({ "cwd": cwd.path().to_string_lossy() }),
+        );
+        other.kind = "handoff_consume".into();
+        other.session_id = Some("s2".into());
+        let resp2 = router.handle(&other);
+        assert_eq!(resp2.hook_stdout["consumed"], true);
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn handoff_peek_lists_other_target_capsules() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        let project_id = fingerprint(cwd.path());
+        crate::store::save_capsule(&pending_capsule(&project_id)).unwrap();
+
+        let router = Router::new();
+        let mut req = request(
+            "turn-peek-others",
+            "handoff",
+            "grok",
+            cwd.path(),
+            json!({ "cwd": cwd.path().to_string_lossy() }),
+        );
+        req.kind = "handoff_peek".into();
+        let resp = router.handle(&req);
+        assert_eq!(resp.hook_stdout["pending"], false);
+        assert_eq!(
+            resp.hook_stdout["others"][0]["capsule_id"],
+            "cap_20260625_120000_abcd"
+        );
+        assert_eq!(resp.hook_stdout["others"][0]["target_agent"], "claude-code");
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn handoff_retarget_moves_capsule_to_new_agent() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        let project_id = fingerprint(cwd.path());
+        crate::store::save_capsule(&pending_capsule(&project_id)).unwrap();
+
+        let router = Router::new();
+        let mut req = request(
+            "turn-retarget",
+            "retarget",
+            "grok",
+            cwd.path(),
+            json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "capsule_id": "cap_20260625_120000_abcd",
+                "target": "grok",
+            }),
+        );
+        req.kind = "handoff_retarget".into();
+        let resp = router.handle(&req);
+        assert_eq!(resp.hook_stdout["retargeted"], true);
+        assert!(crate::store::find_pending(&project_id, "grok").is_some());
+        assert!(crate::store::find_pending(&project_id, "claude-code").is_none());
+
+        // "none" opens the capsule for everyone.
+        let mut open = request(
+            "turn-retarget-open",
+            "retarget",
+            "grok",
+            cwd.path(),
+            json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "capsule_id": "cap_20260625_120000_abcd",
+                "target": "none",
+            }),
+        );
+        open.kind = "handoff_retarget".into();
+        assert_eq!(router.handle(&open).hook_stdout["retargeted"], true);
+        assert!(crate::store::find_pending(&project_id, "claude-code").is_some());
+
+        // Unknown capsule id degrades with a specific warning.
+        let mut missing = request(
+            "turn-retarget-missing",
+            "retarget",
+            "grok",
+            cwd.path(),
+            json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "capsule_id": "cap_nope",
+            }),
+        );
+        missing.kind = "handoff_retarget".into();
+        let resp = router.handle(&missing);
+        assert_eq!(resp.status, Status::Degraded);
+        assert_eq!(resp.warnings, vec!["capsule_not_found"]);
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn checkpoint_uses_calling_agent_and_optional_target() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        let project_id = fingerprint(cwd.path());
+
+        let router = Router::new();
+        let mut req = request(
+            "turn-ckpt",
+            "checkpoint",
+            "grok",
+            cwd.path(),
+            json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "goal": "handoff from grok",
+                "target": "gemini",
+            }),
+        );
+        req.kind = "checkpoint".into();
+        let resp = router.handle(&req);
+        assert_eq!(resp.hook_stdout["saved"], true);
+
+        let pending = crate::store::find_pending(&project_id, "gemini").unwrap();
+        assert_eq!(pending.source_agent, "grok");
+        assert_eq!(pending.target_agent.as_deref(), Some("gemini"));
         std::env::remove_var("AI_HANDOFF_HOME");
     }
 

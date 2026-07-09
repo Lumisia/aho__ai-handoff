@@ -74,7 +74,7 @@ AI Handoff runtime home:
 | `crates/ai-handoff-usage/` | 로컬 Claude/Codex usage log parser와 cost estimator입니다. |
 | `apps/desktop/` | 선택 기능인 Tauri desktop dashboard입니다. |
 | `skills/` | plugin bundle이 제공하는 agent-facing skill입니다. |
-| `schemas/` | capsule과 memory schema 파일입니다. |
+| `schemas/` | capsule schema 파일입니다. |
 | `scripts/` | package validation과 release helper script입니다. |
 
 ## 개발 검증

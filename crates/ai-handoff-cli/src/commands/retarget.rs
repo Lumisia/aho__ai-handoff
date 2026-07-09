@@ -1,29 +1,25 @@
-//! `ai-handoff handoff` — explicitly consume the pending capsule for this
-//! project (the /handoff skill's backend). Prints the daemon's hook-style JSON
-//! so skills can read `hookSpecificOutput.additionalContext`; `{}` means no
-//! pending capsule targets this agent (capsules addressed to other agents are
-//! listed in diagnostics and can be claimed with --force or `retarget`).
+//! `ai-handoff retarget <capsule-id> [--to <agent>]` — point a pending capsule
+//! at a different agent, or open it up for anyone when --to is omitted. The
+//! explicit fix-up path when a capsule was saved with the wrong target.
 
 use ai_handoff_ipc::{
     client::{send, ClientConfig},
-    protocol::{ClientInfo, Request, VERSION},
+    protocol::{ClientInfo, Request, Status, VERSION},
 };
 use chrono::{SecondsFormat, Utc};
 use serde_json::json;
 use std::io::Write;
 use std::time::Duration;
 
-pub fn run(agent: &str, peek: bool, force: bool, id: Option<&str>) -> anyhow::Result<i32> {
+pub fn run(capsule_id: &str, to: Option<String>) -> anyhow::Result<i32> {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
-    Ok(run_io(agent, peek, force, id, &mut out, true))
+    Ok(run_io(capsule_id, to, &mut out, true))
 }
 
 pub fn run_io(
-    agent: &str,
-    peek: bool,
-    force: bool,
-    id: Option<&str>,
+    capsule_id: &str,
+    to: Option<String>,
     out: &mut dyn Write,
     autostart_daemon: bool,
 ) -> i32 {
@@ -31,23 +27,18 @@ pub fn run_io(
         .map(|path| path.to_string_lossy().into_owned())
         .unwrap_or_default();
 
-    let mut raw = json!({ "cwd": cwd, "force": force });
-    // Explicit claim: name exactly one capsule (wins over --force).
-    if let Some(capsule_id) = id {
-        raw["capsule_id"] = json!(capsule_id);
+    let mut raw = json!({ "cwd": cwd, "capsule_id": capsule_id });
+    // Omitting `target` opens the capsule; the daemon never guesses one.
+    if let Some(target) = &to {
+        raw["target"] = json!(target);
     }
 
     let req = Request {
         version: VERSION,
         request_id: uuid::Uuid::new_v4().to_string(),
-        // --peek previews the pending capsule without marking it consumed.
-        kind: if peek {
-            "handoff_peek".to_string()
-        } else {
-            "handoff_consume".to_string()
-        },
-        agent: agent.to_string(),
-        event: "handoff".to_string(),
+        kind: "handoff_retarget".to_string(),
+        agent: "cli".to_string(),
+        event: "retarget".to_string(),
         received_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
         cwd: cwd.clone(),
         session_id: None,
@@ -77,7 +68,17 @@ pub fn run_io(
     for warning in &resp.warnings {
         eprintln!("[ai-handoff] {warning}");
     }
-    let text = serde_json::to_string(&resp.hook_stdout).unwrap_or_else(|_| "{}".to_string());
-    let _ = writeln!(out, "{text}");
-    0
+    if resp.status == Status::Ok {
+        let text = serde_json::to_string(&resp.hook_stdout).unwrap_or_else(|_| "{}".to_string());
+        let _ = writeln!(out, "{text}");
+        0
+    } else {
+        let text = serde_json::to_string(&json!({
+            "status": resp.status,
+            "warnings": resp.warnings,
+        }))
+        .unwrap_or_else(|_| r#"{"status":"error"}"#.to_string());
+        let _ = writeln!(out, "{text}");
+        1
+    }
 }

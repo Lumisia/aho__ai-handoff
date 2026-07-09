@@ -83,8 +83,9 @@ fn render_markdown_capsule(capsule: &Capsule) -> Result<String, serde_json::Erro
         capsule.consumption.state.as_str()
     ));
     out.push_str(&format!(
-        "- flow: `{:?}` -> `{:?}`\n\n",
-        capsule.source_agent, capsule.target_agent
+        "- flow: `{}` -> `{}`\n\n",
+        capsule.source_agent,
+        capsule.target_agent.as_deref().unwrap_or("any")
     ));
     out.push_str("## Goal\n\n");
     out.push_str(&capsule.summary.goal);
@@ -130,9 +131,7 @@ fn extract_canonical_json_block(text: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::capsule::{
-        AgentKind, Consumption, ConsumptionState, RedactionMeta, Session, Summary,
-    };
+    use crate::capsule::{Consumption, ConsumptionState, RedactionMeta, Session, Summary};
 
     fn sample() -> Capsule {
         Capsule {
@@ -140,8 +139,8 @@ mod tests {
             capsule_id: "cap_test".into(),
             project_id: "projX".into(),
             created_at: "2026-06-25T12:00:00Z".into(),
-            source_agent: AgentKind::Codex,
-            target_agent: AgentKind::ClaudeCode,
+            source_agent: "codex".into(),
+            target_agent: Some("claude-code".into()),
             session: Session::default(),
             summary: Summary {
                 goal: "ship md".into(),
@@ -160,6 +159,7 @@ mod tests {
                 state: ConsumptionState::Pending,
                 consumed_by: None,
                 consumed_at: None,
+                consumed_despite_target: false,
             },
         }
     }

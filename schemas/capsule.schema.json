@@ -1,30 +1,93 @@
 {
+  "$comment": "Capsule schema v2 — matches crates/ai-handoff-core/src/capsule.rs. target_agent is a routing hint: null (or absent) means an open capsule any agent may consume.",
   "type": "object",
-  "required": ["schema_version", "capsule_id", "task_id", "created_at", "source", "target", "checkpoint", "task", "integrity"],
+  "required": [
+    "schema_version",
+    "capsule_id",
+    "project_id",
+    "created_at",
+    "source_agent",
+    "session",
+    "summary",
+    "files",
+    "redaction",
+    "consumption"
+  ],
   "properties": {
-    "schema_version": { "type": "string", "enum": ["1.0.0"] },
-    "capsule_id": { "type": "string" },
-    "task_id": { "type": "string" },
+    "schema_version": { "type": "integer", "enum": [2] },
+    "capsule_id": { "type": "string", "minLength": 1 },
+    "project_id": { "type": "string", "minLength": 1 },
     "created_at": { "type": "string" },
-    "expires_at": { "type": "string" },
-    "source": { "type": "object", "required": ["agent"], "properties": { "agent": { "type": "string" } } },
-    "target": { "type": "object", "required": ["agent"], "properties": { "agent": { "type": "string" } } },
-    "checkpoint": {
-      "type": "object",
-      "required": ["status"],
-      "properties": { "status": { "type": "string", "enum": ["in_progress", "blocked", "completed"] } }
+    "source_agent": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Canonical agent id of the author, e.g. claude-code, codex, grok"
     },
-    "task": {
+    "target_agent": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "description": "Preferred consumer (hint). null/absent = open capsule"
+    },
+    "session": {
       "type": "object",
-      "required": ["goal"],
       "properties": {
-        "goal": { "type": "string", "maxLength": 4096 },
-        "next_actions": { "type": "array", "maxItems": 100, "items": { "type": "string", "maxLength": 2048 } },
-        "completed": { "type": "array", "maxItems": 100, "items": { "type": "string", "maxLength": 2048 } },
-        "open_issues": { "type": "array", "maxItems": 100, "items": { "type": "string", "maxLength": 2048 } },
-        "changed_files": { "type": "array", "maxItems": 100, "items": { "type": "string", "maxLength": 2048 } }
+        "session_id": { "type": ["string", "null"] },
+        "started_at": { "type": ["string", "null"] },
+        "ended_at": { "type": ["string", "null"] },
+        "turn_count": { "type": "integer", "minimum": 0 }
       }
     },
-    "integrity": { "type": "object", "required": ["payload_sha256"], "properties": { "payload_sha256": { "type": "string" } } }
+    "summary": {
+      "type": "object",
+      "required": ["goal", "done", "remaining", "risks"],
+      "properties": {
+        "goal": { "type": "string" },
+        "done": { "type": "array", "items": { "type": "string" } },
+        "remaining": { "type": "array", "items": { "type": "string" } },
+        "risks": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path"],
+        "properties": {
+          "path": { "type": "string" },
+          "status": { "type": ["string", "null"] },
+          "summary": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "next_prompt": { "type": ["string", "null"] },
+    "workspace": {
+      "type": ["object", "null"],
+      "properties": {
+        "branch": { "type": ["string", "null"] },
+        "head_sha": { "type": ["string", "null"] },
+        "dirty_files": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    },
+    "redaction": {
+      "type": "object",
+      "required": ["applied", "ruleset"],
+      "properties": {
+        "applied": { "type": "boolean" },
+        "ruleset": { "type": "string" }
+      }
+    },
+    "consumption": {
+      "type": "object",
+      "required": ["state"],
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": ["pending", "in_progress", "blocked", "needs_review", "consumed", "archived"]
+        },
+        "consumed_by": { "type": ["string", "null"] },
+        "consumed_at": { "type": ["string", "null"] },
+        "consumed_despite_target": { "type": "boolean" }
+      }
+    }
   }
 }

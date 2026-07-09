@@ -1,4 +1,5 @@
 ﻿import {
+  Bot,
   Cable,
   ChartColumnIncreasing,
   ChevronDown,
@@ -66,7 +67,8 @@ import SettingsView from "./views/Settings";
 import Usage from "./views/Usage";
 
 type Tab = "overview" | "capsules" | "usage" | "account" | "integration" | "settings";
-type AgentName = "Codex" | "Claude";
+// Known agents get branded icons; any other agent id renders generically.
+type AgentName = string;
 
 interface CapsuleProjectNode {
   project_id: string;
@@ -94,11 +96,19 @@ const navTabs: Array<{ id: Exclude<Tab, "capsules" | "settings">; labelKey: stri
 ];
 
 function displayAgent(source: string): AgentName {
-  return source.toLowerCase().includes("claude") ? "Claude" : "Codex";
+  const lower = source.toLowerCase();
+  if (lower.includes("claude")) return "Claude";
+  if (lower.includes("codex")) return "Codex";
+  // Unknown agents (grok, gemini, cursor, ...) keep their own bucket.
+  return source.charAt(0).toUpperCase() + source.slice(1);
 }
 
 function targetAgent(target: string) {
-  return target.toLowerCase().includes("claude") ? "Claude" : "Codex";
+  const lower = target.toLowerCase();
+  if (lower.includes("claude")) return "Claude";
+  if (lower.includes("codex")) return "Codex";
+  // Open capsules ("any") and future agents (grok, gemini, ...) show as-is.
+  return target;
 }
 
 function hexLuminance(value?: string | null) {
@@ -188,7 +198,12 @@ function buildCapsuleTree(items: CapsuleSummary[]): CapsuleAgentNode[] {
     { agent: "Claude", projects: [], count: 0 },
   ];
   for (const item of items) {
-    const agent = tree.find((node) => node.agent === displayAgent(item.source_agent)) ?? tree[0];
+    const name = displayAgent(item.source_agent);
+    let agent = tree.find((node) => node.agent === name);
+    if (!agent) {
+      agent = { agent: name, projects: [], count: 0 };
+      tree.push(agent);
+    }
     agent.count += 1;
     let project = agent.projects.find((node) => node.project_id === item.project_id);
     if (!project) {
@@ -205,10 +220,23 @@ function buildCapsuleTree(items: CapsuleSummary[]): CapsuleAgentNode[] {
 }
 
 function AgentLogo({ agent }: { agent: AgentName }) {
-  const cls = agent === "Codex" ? "agent-logo codex" : "agent-logo claude";
+  if (agent === "Codex") {
+    return (
+      <span className="agent-logo codex" aria-hidden="true">
+        <OpenAIIcon size={16} />
+      </span>
+    );
+  }
+  if (agent === "Claude") {
+    return (
+      <span className="agent-logo claude" aria-hidden="true">
+        <ClaudeIcon size={16} />
+      </span>
+    );
+  }
   return (
-    <span className={cls} aria-hidden="true">
-      {agent === "Codex" ? <OpenAIIcon size={16} /> : <ClaudeIcon size={16} />}
+    <span className="agent-logo other" aria-hidden="true">
+      <Bot size={16} />
     </span>
   );
 }

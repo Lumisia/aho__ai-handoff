@@ -9,6 +9,7 @@ pub mod handoff;
 pub mod hook;
 pub mod install;
 pub mod launcher;
+pub mod retarget;
 pub mod statusline;
 pub mod tui;
 pub mod uninstall;

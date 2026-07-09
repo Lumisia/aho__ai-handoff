@@ -11,6 +11,7 @@ use std::time::Duration;
 pub fn run(
     message: Option<String>,
     agent: Option<String>,
+    target: Option<String>,
     file: Option<std::path::PathBuf>,
 ) -> anyhow::Result<i32> {
     // --file bypasses stdin, which several shells (notably PowerShell) do not
@@ -26,22 +27,24 @@ pub fn run(
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     Ok(run_io_with_autostart(
-        message, agent, &raw_text, &mut out, true,
+        message, agent, target, &raw_text, &mut out, true,
     ))
 }
 
 pub fn run_io(
     message: Option<String>,
     agent: Option<String>,
+    target: Option<String>,
     raw_text: &str,
     out: &mut dyn Write,
 ) -> i32 {
-    run_io_with_autostart(message, agent, raw_text, out, false)
+    run_io_with_autostart(message, agent, target, raw_text, out, false)
 }
 
 pub fn run_io_with_autostart(
     message: Option<String>,
     agent: Option<String>,
+    target: Option<String>,
     raw_text: &str,
     out: &mut dyn Write,
     autostart_daemon: bool,
@@ -80,6 +83,11 @@ pub fn run_io_with_autostart(
         obj.insert("cwd".to_string(), json!(cwd.clone()));
         obj.entry("message".to_string())
             .or_insert_with(|| json!(message.clone()));
+        // --target beats a stdin `target` field; without either the capsule
+        // stays open (no target) — the daemon never guesses a recipient.
+        if let Some(target) = &target {
+            obj.insert("target".to_string(), json!(normalize_agent(target)));
+        }
     }
 
     let req = Request {

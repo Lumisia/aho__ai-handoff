@@ -136,6 +136,23 @@ nav {
   cursor: pointer;
 }
 
+/* Keep nav rows a constant size regardless of window/sidebar width: the icon
+   never shrinks and the label stays on one line (a wrapped label was making
+   tabs randomly taller when a sidebar scrollbar narrowed the available width). */
+.nav svg {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+}
+
+.nav span {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .nav.active,
 .nav.active {
   background: var(--selection-bg-color);
@@ -2114,10 +2131,17 @@ body {
 .app-titlebar {
   grid-column: 1 / -1;
   display: grid;
-  grid-template-columns: minmax(360px, auto) minmax(140px, 1fr) auto;
+  /* Left (menu) and right (window controls) size to content; the center status
+     region takes the rest and can shrink to 0 (its text ellipsizes). No hard
+     column minimums, so the bar never overflows or "breaks" when the window is
+     resized small. */
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   height: 38px;
   min-width: 0;
+  /* Clip any residual overflow to the 38px bar so it can never spill down over
+     the sidebar (and its resize handle) at small window sizes. */
+  overflow: hidden;
   background: var(--app-bg-color);
   border-bottom: 1px solid var(--border-strong-color);
   color: var(--text-color);
@@ -2287,12 +2311,16 @@ body {
 
 .menu-trigger {
   height: 28px;
+  flex: 0 0 auto;
   border: 0;
   border-radius: 7px;
   background: transparent;
   color: var(--text-color);
   padding: 0 9px;
   font-size: 12px;
+  /* Never wrap the label char-by-char (파일 → 파/일) when the window narrows —
+     that overflowed the 38px title bar and covered the sidebar/resizer. */
+  white-space: nowrap;
   cursor: pointer;
 }
 
@@ -2413,6 +2441,10 @@ body {
 .sidebar-top {
   display: grid;
   gap: 8px;
+  /* Never let the flex column squeeze the search + nav when the window is short
+     or the capsule list is long — keeps the nav tabs a constant size. The
+     capsule list below scrolls instead (it has its own overflow). */
+  flex: 0 0 auto;
 }
 
 .sidebar-tools {

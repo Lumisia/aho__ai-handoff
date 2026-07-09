@@ -632,8 +632,8 @@ fn summary_from_capsule(capsule: Capsule, path: PathBuf, project_label: String) 
         project_id: capsule.project_id,
         project_label,
         created_at: capsule.created_at,
-        source_agent: format!("{:?}", capsule.source_agent),
-        target_agent: format!("{:?}", capsule.target_agent),
+        source_agent: capsule.source_agent,
+        target_agent: capsule.target_agent.unwrap_or_else(|| "any".into()),
         state: capsule.consumption.state.as_str().into(),
         summary_preview: capsule.summary.goal,
         path: path.to_string_lossy().into_owned(),
@@ -709,9 +709,7 @@ fn error_row(id: &str, label: &str, path: &Path, message: String) -> CheckRow {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::capsule::{
-        AgentKind, Capsule, Consumption, ConsumptionState, RedactionMeta, Session, Summary,
-    };
+    use crate::capsule::{Capsule, Consumption, ConsumptionState, RedactionMeta, Session, Summary};
 
     fn write(path: &std::path::Path, text: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -724,8 +722,8 @@ mod tests {
             capsule_id: id.into(),
             project_id: project_id.into(),
             created_at: created_at.into(),
-            source_agent: AgentKind::ClaudeCode,
-            target_agent: AgentKind::Codex,
+            source_agent: "claude-code".into(),
+            target_agent: Some("codex".into()),
             session: Session::default(),
             summary: Summary {
                 goal: "ship dashboard".into(),
@@ -744,6 +742,7 @@ mod tests {
                 state: ConsumptionState::Pending,
                 consumed_by: None,
                 consumed_at: None,
+                consumed_despite_target: false,
             },
         }
     }

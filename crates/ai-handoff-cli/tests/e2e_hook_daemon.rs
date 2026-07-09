@@ -47,19 +47,19 @@ fn stop_then_peer_session_start_roundtrips_capsule() {
 
     let project_id = ai_handoff_core::fingerprint::fingerprint(cwd.path());
     let deadline = Instant::now() + Duration::from_secs(2);
-    while ai_handoff_daemon::store::find_pending(&project_id).is_none() && Instant::now() < deadline
+    while ai_handoff_daemon::store::find_pending(&project_id, "claude-code").is_none()
+        && Instant::now() < deadline
     {
         std::thread::sleep(Duration::from_millis(10));
     }
-    let pending = ai_handoff_daemon::store::find_pending(&project_id).unwrap();
+    let pending = ai_handoff_daemon::store::find_pending(&project_id, "claude-code").unwrap();
     assert_eq!(
         pending.consumption.state,
         ai_handoff_core::capsule::ConsumptionState::Pending
     );
-    assert_eq!(
-        pending.source_agent,
-        ai_handoff_core::capsule::AgentKind::Codex
-    );
+    assert_eq!(pending.source_agent, "codex");
+    // No target in the fenced payload → open capsule.
+    assert_eq!(pending.target_agent, None);
 
     // Session start only announces the pending capsule; it must NOT consume it.
     let start_payload = format!(
@@ -92,7 +92,7 @@ fn stop_then_peer_session_start_roundtrips_capsule() {
 
     // --peek first: previews the capsule and leaves it pending.
     let mut peek_out = Vec::new();
-    let peek_code = handoff::run_io("claude-code", true, &mut peek_out, false);
+    let peek_code = handoff::run_io("claude-code", true, false, None, &mut peek_out, false);
     assert_eq!(peek_code, 0);
     let peek_text = String::from_utf8(peek_out).unwrap();
     assert!(peek_text.contains("\"pending\":true"));
@@ -105,7 +105,7 @@ fn stop_then_peer_session_start_roundtrips_capsule() {
     );
 
     let mut consume_out = Vec::new();
-    let consume_code = handoff::run_io("claude-code", false, &mut consume_out, false);
+    let consume_code = handoff::run_io("claude-code", false, false, None, &mut consume_out, false);
     std::env::set_current_dir(prev_dir).unwrap();
     assert_eq!(consume_code, 0);
     let consume_text = String::from_utf8(consume_out).unwrap();

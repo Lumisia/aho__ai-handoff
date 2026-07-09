@@ -319,11 +319,11 @@ fn checkpoint_with_daemon_online_writes_capsule() {
     });
 
     let mut out = Vec::new();
-    let code = checkpoint::run_io(Some("manual checkpoint".into()), None, "", &mut out);
+    let code = checkpoint::run_io(Some("manual checkpoint".into()), None, None, "", &mut out);
     worker.join().unwrap();
     assert_eq!(code, 0);
     let project_id = ai_handoff_core::fingerprint::fingerprint(cwd.path());
-    let pending = ai_handoff_daemon::store::find_pending(&project_id).unwrap();
+    let pending = ai_handoff_daemon::store::find_pending(&project_id, "claude-code").unwrap();
     assert_eq!(pending.summary.goal, "manual checkpoint");
     assert_eq!(
         std::fs::read_to_string(
@@ -343,7 +343,7 @@ fn checkpoint_offline_reports_daemon_unavailable_in_output() {
     std::env::set_var("AI_HANDOFF_HOME", home.path());
 
     let mut out = Vec::new();
-    let code = checkpoint::run_io(Some("offline checkpoint".into()), None, "", &mut out);
+    let code = checkpoint::run_io(Some("offline checkpoint".into()), None, None, "", &mut out);
     assert_eq!(code, 1);
     let report: serde_json::Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(report["status"], "degraded");
@@ -381,11 +381,11 @@ fn checkpoint_structured_stdin_respects_capsule_limits() {
 
     let payload = r#"{"goal":"structured checkpoint","done":["a","b"],"remaining":["c","d","e"],"risks":["f","g"],"next_prompt":"one | two | three"}"#;
     let mut out = Vec::new();
-    let code = checkpoint::run_io(None, None, payload, &mut out);
+    let code = checkpoint::run_io(None, None, None, payload, &mut out);
     worker.join().unwrap();
     assert_eq!(code, 0);
     let project_id = ai_handoff_core::fingerprint::fingerprint(cwd.path());
-    let pending = ai_handoff_daemon::store::find_pending(&project_id).unwrap();
+    let pending = ai_handoff_daemon::store::find_pending(&project_id, "claude-code").unwrap();
     assert_eq!(pending.summary.goal, "structured checkpoint");
     assert_eq!(pending.summary.done, vec!["a"]);
     assert_eq!(pending.summary.remaining, vec!["c", "d"]);
@@ -396,7 +396,7 @@ fn checkpoint_structured_stdin_respects_capsule_limits() {
 }
 
 #[test]
-fn checkpoint_agent_flag_sets_handoff_direction() {
+fn checkpoint_agent_flag_sets_source_and_target_stays_open() {
     let _guard = lock();
     let home = tempfile::tempdir().unwrap();
     let cwd = tempfile::tempdir().unwrap();
@@ -418,25 +418,63 @@ fn checkpoint_agent_flag_sets_handoff_direction() {
     });
 
     let mut out = Vec::new();
-    // claude-code writing a checkpoint hands off to codex, not the reverse.
+    // --agent records the author; without --target the capsule stays open
+    // (any agent may consume) instead of guessing "the opposite agent".
     let code = checkpoint::run_io(
         Some("from claude".into()),
         Some("claude-code".into()),
+        None,
         "",
         &mut out,
     );
     worker.join().unwrap();
     assert_eq!(code, 0);
     let project_id = ai_handoff_core::fingerprint::fingerprint(cwd.path());
-    let pending = ai_handoff_daemon::store::find_pending(&project_id).unwrap();
-    assert_eq!(
-        pending.source_agent,
-        ai_handoff_core::capsule::AgentKind::ClaudeCode
+    let pending = ai_handoff_daemon::store::find_pending(&project_id, "codex").unwrap();
+    assert_eq!(pending.source_agent, "claude-code");
+    assert_eq!(pending.target_agent, None);
+    std::env::set_current_dir(previous_cwd).unwrap();
+    std::env::remove_var("AI_HANDOFF_HOME");
+}
+
+#[test]
+fn checkpoint_target_flag_routes_capsule_to_named_agent() {
+    let _guard = lock();
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let previous_cwd = std::env::current_dir().unwrap();
+    std::env::set_var("AI_HANDOFF_HOME", home.path());
+    std::env::set_current_dir(cwd.path()).unwrap();
+    ai_handoff_daemon::ensure_runtime_dirs().unwrap();
+
+    let worker = std::thread::spawn(|| {
+        let router = Router::new();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if serve_once(&router) > 0 {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("daemon did not process checkpoint request");
+    });
+
+    let mut out = Vec::new();
+    let code = checkpoint::run_io(
+        Some("for grok".into()),
+        Some("claude-code".into()),
+        Some("grok".into()),
+        "",
+        &mut out,
     );
-    assert_eq!(
-        pending.target_agent,
-        ai_handoff_core::capsule::AgentKind::Codex
-    );
+    worker.join().unwrap();
+    assert_eq!(code, 0);
+    let project_id = ai_handoff_core::fingerprint::fingerprint(cwd.path());
+    // Targeted at grok: grok claims it, codex does not see it.
+    assert!(ai_handoff_daemon::store::find_pending(&project_id, "codex").is_none());
+    let pending = ai_handoff_daemon::store::find_pending(&project_id, "grok").unwrap();
+    assert_eq!(pending.source_agent, "claude-code");
+    assert_eq!(pending.target_agent.as_deref(), Some("grok"));
     std::env::set_current_dir(previous_cwd).unwrap();
     std::env::remove_var("AI_HANDOFF_HOME");
 }

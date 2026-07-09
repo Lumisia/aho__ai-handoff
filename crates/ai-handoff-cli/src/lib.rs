@@ -33,10 +33,14 @@ pub enum Commands {
     Checkpoint {
         #[arg(long)]
         message: Option<String>,
-        /// Source agent writing the capsule (codex or claude-code). Sets the
-        /// handoff direction; defaults to codex when omitted.
+        /// Agent id writing the capsule (e.g. codex, claude-code, grok).
+        /// Defaults to codex when omitted.
         #[arg(long)]
         agent: Option<String>,
+        /// Preferred consumer of the capsule (routing hint). Omitted means an
+        /// open capsule that any agent may pick up.
+        #[arg(long)]
+        target: Option<String>,
         /// Read the JSON capsule body from this file instead of stdin. Avoids
         /// shell stdin quirks (PowerShell does not pipe to native stdin).
         #[arg(long)]
@@ -45,12 +49,32 @@ pub enum Commands {
     /// Consume the pending handoff capsule for this project (the /handoff
     /// skill's backend). Prints hook-style JSON; `{}` means nothing pending.
     Handoff {
-        /// The agent consuming the capsule (sets which capsules match).
-        #[arg(long, value_enum, default_value_t = AgentArg::Codex)]
-        agent: AgentArg,
+        /// Agent id consuming the capsule. Open capsules and capsules
+        /// targeting this agent match; any string id is accepted.
+        #[arg(long, default_value = "codex")]
+        agent: String,
         /// Preview the pending capsule without consuming it.
         #[arg(long)]
         peek: bool,
+        /// Also claim a capsule that targets a different agent (recorded on
+        /// the capsule as consumed_despite_target).
+        #[arg(long)]
+        force: bool,
+        /// Consume exactly this capsule id (from `--peek` / the TUI), even if
+        /// it targets another agent. Safer than --force when several capsules
+        /// are pending.
+        #[arg(long)]
+        id: Option<String>,
+    },
+    /// Point a pending capsule at a different agent, or open it up for anyone
+    /// when --to is omitted. The fix-up for a capsule saved with the wrong
+    /// target.
+    Retarget {
+        /// The capsule id shown by `handoff --peek` / the TUI.
+        capsule_id: String,
+        /// New preferred consumer (e.g. grok). Omit to make the capsule open.
+        #[arg(long)]
+        to: Option<String>,
     },
     Tui,
     Dashboard,
@@ -210,9 +234,16 @@ pub fn run_cli(cli: Cli) -> anyhow::Result<i32> {
         Some(Commands::Checkpoint {
             message,
             agent,
+            target,
             file,
-        }) => commands::checkpoint::run(message, agent, file),
-        Some(Commands::Handoff { agent, peek }) => commands::handoff::run(agent, peek),
+        }) => commands::checkpoint::run(message, agent, target, file),
+        Some(Commands::Handoff {
+            agent,
+            peek,
+            force,
+            id,
+        }) => commands::handoff::run(&agent, peek, force, id.as_deref()),
+        Some(Commands::Retarget { capsule_id, to }) => commands::retarget::run(&capsule_id, to),
         Some(Commands::Dashboard) => commands::dashboard::run(),
         Some(Commands::Install {
             dry_run,
@@ -292,22 +323,28 @@ mod tests {
     fn parses_handoff_command_with_agent() {
         let cli = Cli::try_parse_from(["ai-handoff", "handoff", "--agent", "claude-code"]).unwrap();
         match cli.command {
-            Some(Commands::Handoff { agent, peek }) => {
-                assert_eq!(agent, AgentArg::ClaudeCode);
+            Some(Commands::Handoff {
+                agent, peek, force, ..
+            }) => {
+                assert_eq!(agent, "claude-code");
                 assert!(!peek);
+                assert!(!force);
             }
             other => panic!("unexpected command: {other:?}"),
         }
 
         // Bare `handoff` defaults to codex (mirrors the hook command).
         let bare = Cli::try_parse_from(["ai-handoff", "handoff"]).unwrap();
-        assert!(matches!(
-            bare.command,
+        match bare.command {
             Some(Commands::Handoff {
-                agent: AgentArg::Codex,
-                peek: false
-            })
-        ));
+                agent, peek, force, ..
+            }) => {
+                assert_eq!(agent, "codex");
+                assert!(!peek);
+                assert!(!force);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
 
         // --peek previews without consuming.
         let peek = Cli::try_parse_from(["ai-handoff", "handoff", "--peek"]).unwrap();
@@ -315,6 +352,93 @@ mod tests {
             peek.command,
             Some(Commands::Handoff { peek: true, .. })
         ));
+    }
+
+    #[test]
+    fn parses_handoff_with_unknown_agent_and_force() {
+        // Agent ids are open strings — future agents parse without a CLI change.
+        let cli =
+            Cli::try_parse_from(["ai-handoff", "handoff", "--agent", "grok", "--force"]).unwrap();
+        match cli.command {
+            Some(Commands::Handoff {
+                agent, peek, force, ..
+            }) => {
+                assert_eq!(agent, "grok");
+                assert!(!peek);
+                assert!(force);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_handoff_with_explicit_capsule_id() {
+        let cli = Cli::try_parse_from([
+            "ai-handoff",
+            "handoff",
+            "--agent",
+            "grok",
+            "--id",
+            "cap_20260709_010101_abcd",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Commands::Handoff { agent, id, .. }) => {
+                assert_eq!(agent, "grok");
+                assert_eq!(id.as_deref(), Some("cap_20260709_010101_abcd"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_checkpoint_with_target() {
+        let cli = Cli::try_parse_from([
+            "ai-handoff",
+            "checkpoint",
+            "--agent",
+            "claude-code",
+            "--target",
+            "grok",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Commands::Checkpoint { agent, target, .. }) => {
+                assert_eq!(agent.as_deref(), Some("claude-code"));
+                assert_eq!(target.as_deref(), Some("grok"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        // No --target → open capsule (daemon stores target null).
+        let open = Cli::try_parse_from(["ai-handoff", "checkpoint"]).unwrap();
+        match open.command {
+            Some(Commands::Checkpoint { target, .. }) => assert_eq!(target, None),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_retarget_command() {
+        let cli =
+            Cli::try_parse_from(["ai-handoff", "retarget", "cap_123", "--to", "gemini"]).unwrap();
+        match cli.command {
+            Some(Commands::Retarget { capsule_id, to }) => {
+                assert_eq!(capsule_id, "cap_123");
+                assert_eq!(to.as_deref(), Some("gemini"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        // Without --to the capsule opens up for any agent.
+        let open = Cli::try_parse_from(["ai-handoff", "retarget", "cap_123"]).unwrap();
+        match open.command {
+            Some(Commands::Retarget { capsule_id, to }) => {
+                assert_eq!(capsule_id, "cap_123");
+                assert_eq!(to, None);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 
     #[test]

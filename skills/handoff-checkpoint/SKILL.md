@@ -33,10 +33,14 @@ inside the current task, not as the task's end state.
     ai-handoff checkpoint --agent <self> --file <path-to.json>
     aho checkpoint --agent <self> --file <path-to.json>
 
-Always pass `--agent` set to the agent you are: `claude-code` if you are Claude
-Code, `codex` if you are Codex. It sets the handoff direction (source -> target).
-Omitting it defaults the source to codex, which records the wrong direction when
-Claude Code runs the checkpoint.
+Always pass `--agent` set to the agent you are (e.g. `claude-code`, `codex`,
+`grok`). It records the capsule's author. Omitting it defaults the source to
+codex, which records the wrong author when another agent runs the checkpoint.
+
+By default the capsule is OPEN: any agent may pick it up later. Only pass
+`--target <agent>` when the user explicitly wants a specific agent to continue
+the work; a targeted capsule is skipped by other agents' `/handoff` until it is
+retargeted (`ai-handoff retarget <capsule-id> [--to <agent>]`) or force-consumed.
 
 Always supply a JSON capsule body unless the user explicitly asks for a terse
 message-only checkpoint. Write the JSON to a file and pass `--file`, which is
@@ -45,7 +49,8 @@ so `<json> | ai-handoff checkpoint` silently drops the body and only `--message`
 survives. On POSIX shells stdin still works.
 
 JSON fields (top level): `goal`, `done` (array), `remaining` (array),
-`risks` (array), `next_prompt` (string), optional `agent`. The daemon trims each
+`risks` (array), `next_prompt` (string), optional `agent`, optional `target`
+(preferred consumer; omit for an open capsule). The daemon trims each
 field using the shared config limits:
 
 - `capsule.language`

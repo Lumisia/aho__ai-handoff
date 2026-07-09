@@ -179,24 +179,39 @@ export default function Contribution3DChart({ cells, cols, rows, maxTokens, t }:
     invalidateRef.current?.();
   }
 
-  // Auto-fit on mount, whenever the dataset (period/mode) changes, and on resize.
-  // Manual orbit/pan/zoom persists until the next data change.
+  // Auto-fit on mount, whenever the dataset changes (period/breakdown switch —
+  // keyed on dimensions + magnitude so switching e.g. model↔source refits even
+  // at the same grid size), and on resize. Manual orbit/pan/zoom persists until
+  // the next data change.
+  //
+  // On first mount the OrbitControls ref and the canvas size are often not ready
+  // on the first frame, so a single rAF would silently skip the fit and leave
+  // the chart zoomed out until the user pressed "Fit". Retry across frames until
+  // both are ready.
   useEffect(() => {
     const wrap = wrapRef.current;
     if (!wrap) return;
-    const fit = () => {
-      if (!wrap.clientWidth || !wrap.clientHeight || !controlsRef.current) return;
-      fitView();
+    let raf = 0;
+    let tries = 0;
+    const ready = () => !!(wrap.clientWidth && wrap.clientHeight && controlsRef.current);
+    const tryFit = () => {
+      if (ready()) {
+        fitView();
+        return;
+      }
+      if (tries++ < 90) raf = requestAnimationFrame(tryFit);
     };
-    const raf = requestAnimationFrame(fit);
-    const ro = new ResizeObserver(fit);
+    raf = requestAnimationFrame(tryFit);
+    const ro = new ResizeObserver(() => {
+      if (ready()) fitView();
+    });
     ro.observe(wrap);
     return () => {
       cancelAnimationFrame(raf);
       ro.disconnect();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cols, rows, cells.length]);
+  }, [cols, rows, cells.length, maxTokens]);
 
   return (
     <div className="token-iso" ref={wrapRef}>
