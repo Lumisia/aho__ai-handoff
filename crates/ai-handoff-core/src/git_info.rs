@@ -6,7 +6,6 @@
 //! error simply yields `None` — a capsule must never fail because of git.
 
 use std::path::Path;
-use std::process::Command;
 
 /// The git state of a workspace at capsule-creation time.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,13 +50,7 @@ pub fn head_sha(cwd: &Path) -> Option<String> {
 
 /// Run `git -C <cwd> <args>`; `Some(stdout)` only on exit code 0.
 fn run_git(cwd: &Path, args: &[&str]) -> Option<String> {
-    let mut command = Command::new("git");
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
+    let mut command = crate::process::no_window_command("git");
     let output = command.arg("-C").arg(cwd).args(args).output().ok()?;
     if !output.status.success() {
         return None;
@@ -68,6 +61,7 @@ fn run_git(cwd: &Path, args: &[&str]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     fn git(dir: &Path, args: &[&str]) -> bool {
         Command::new("git")

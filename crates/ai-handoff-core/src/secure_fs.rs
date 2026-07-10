@@ -308,16 +308,7 @@ fn platform_private_status(path: &Path, is_dir: bool) -> PermissionReport {
 }
 
 #[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-#[cfg(windows)]
-fn no_window_command(program: &str) -> std::process::Command {
-    use std::os::windows::process::CommandExt;
-
-    let mut command = std::process::Command::new(program);
-    command.creation_flags(CREATE_NO_WINDOW);
-    command
-}
+use crate::process::no_window_command;
 
 #[cfg(windows)]
 fn platform_private_status(path: &Path, _is_dir: bool) -> PermissionReport {

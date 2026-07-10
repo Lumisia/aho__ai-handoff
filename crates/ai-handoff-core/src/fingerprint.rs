@@ -562,8 +562,10 @@ pub struct RealGit;
 
 impl GitRunner for RealGit {
     fn run(&self, cwd: &Path, args: &[&str]) -> GitResult {
-        use std::process::Command;
-        let mut cmd = Command::new("git");
+        // no_window_command: the daemon computes fingerprints inside the
+        // windowless background host, where a plain `git` spawn opens a
+        // visible terminal window on Windows.
+        let mut cmd = crate::process::no_window_command("git");
         cmd.arg("-C").arg(cwd).args(args);
         cmd.stdin(std::process::Stdio::null());
         match cmd.output() {

@@ -12,6 +12,7 @@ pub mod hook_event;
 pub mod install;
 pub mod keychain;
 pub mod paths;
+pub mod process;
 pub mod redaction;
 pub mod secure_fs;
 pub mod sensor;
