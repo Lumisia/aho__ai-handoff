@@ -1,4 +1,5 @@
 use crate::{
+    checkpoint_episode::{EpisodeKey, EpisodeState, EpisodeStore, UserDecision},
     dedupe::{dedupe_key, Deduper},
     store::{
         find_pending, list_pending, mark_consumed, pending_for, save_capsule,
@@ -34,6 +35,7 @@ use std::sync::Mutex;
 
 pub struct Router {
     deduper: Mutex<Deduper>,
+    checkpoint_episodes: EpisodeStore,
     /// Once-per-session marks: threshold-trigger firings and pending-capsule
     /// notices, keyed by `<kind>:<agent>:<session_id-or-project_id>`.
     session_marks: Mutex<Deduper>,
@@ -57,11 +59,13 @@ struct ProviderUsageEntry {
 /// the next hook event refetches. Five-hour limits move slowly, so a few
 /// minutes keeps the trigger responsive without per-tool network calls.
 const PROVIDER_USAGE_TTL_MS: i64 = 3 * 60 * 1000;
+const QUESTION_LEASE_MS: i64 = 30_000;
 
 impl Router {
     pub fn new() -> Self {
         Self {
             deduper: Mutex::new(Deduper::new(1024)),
+            checkpoint_episodes: EpisodeStore::new(ai_handoff_core::paths::home()),
             session_marks: Mutex::new(Deduper::new(1024)),
             codex_rollouts: Mutex::new(HashMap::new()),
             provider_usage: Mutex::new(HashMap::new()),
@@ -114,7 +118,7 @@ impl Handler for Router {
             );
         }
         if req.kind == "checkpoint" {
-            return handle_checkpoint(req);
+            return handle_checkpoint(req, &self.checkpoint_episodes);
         }
         if req.kind == "handoff_consume" {
             return handle_handoff_consume(req);
@@ -149,6 +153,12 @@ impl Handler for Router {
         let raw = raw_with_request_fallbacks(req);
         let normalized = normalize(agent, event, &raw);
         let project_id = fingerprint(&normalized.cwd);
+
+        if let Some(response) =
+            self.handle_checkpoint_episode_event(req, &normalized, &project_id, event)
+        {
+            return response;
+        }
 
         match event {
             HookEventKind::SessionStart | HookEventKind::UserPromptSubmit => {
@@ -198,8 +208,48 @@ impl Handler for Router {
                         ));
                         return degraded(&req.request_id, store_error_reason(&error));
                     }
+                    let now_ms = Utc::now().timestamp_millis();
+                    let session_id = normalized.session_id.as_deref().unwrap_or(&project_id);
+                    let checkpoint_episode_id = match self.checkpoint_episodes.find_active(
+                        normalized.agent.as_canonical_str(),
+                        &project_id,
+                        session_id,
+                        now_ms,
+                    ) {
+                        Ok(Some(episode)) if episode.state == EpisodeState::CapsulePending => {
+                            if let Err(error) = self.checkpoint_episodes.commit_capsule(
+                                &episode.episode_id,
+                                &capsule.capsule_id,
+                                now_ms,
+                            ) {
+                                crate::log_daemon(&format!(
+                                    "stop-hook checkpoint episode commit failed ({}): {error}",
+                                    episode.episode_id
+                                ));
+                                return degraded(
+                                    &req.request_id,
+                                    "checkpoint_episode_commit_failed",
+                                );
+                            }
+                            Some(episode.episode_id)
+                        }
+                        Ok(_) => None,
+                        Err(error) => {
+                            crate::log_daemon(&format!(
+                                "stop-hook checkpoint episode lookup failed: {error}"
+                            ));
+                            return degraded(&req.request_id, "checkpoint_episode_lookup_failed");
+                        }
+                    };
                     // The turn just checkpointed — asking again would be noise.
-                    return Self::ok(req, json!({}), json!({ "capsule_saved": true }));
+                    return Self::ok(
+                        req,
+                        json!({}),
+                        json!({
+                            "capsule_saved": true,
+                            "checkpoint_episode_id": checkpoint_episode_id,
+                        }),
+                    );
                 }
                 // Claude's PostToolUse hook only matches Write|Edit|Bash, so a
                 // read-heavy turn would otherwise never reach the threshold
@@ -213,6 +263,153 @@ impl Handler for Router {
 }
 
 impl Router {
+    fn handle_checkpoint_episode_event(
+        &self,
+        req: &ai_handoff_ipc::protocol::Request,
+        normalized: &ai_handoff_core::hook_event::NormalizedHookEvent,
+        project_id: &str,
+        event: HookEventKind,
+    ) -> Option<Response> {
+        let now_ms = Utc::now().timestamp_millis();
+        let session_id = normalized.session_id.as_deref().unwrap_or(project_id);
+        let agent = normalized.agent.as_canonical_str();
+        let episode = match self
+            .checkpoint_episodes
+            .find_active(agent, project_id, session_id, now_ms)
+        {
+            Ok(episode) => episode?,
+            Err(error) => {
+                crate::log_daemon(&format!("checkpoint episode lookup failed: {error}"));
+                return None;
+            }
+        };
+
+        if matches!(
+            episode.state,
+            EpisodeState::CapsuleCommitted | EpisodeState::Skipped
+        ) {
+            match self
+                .checkpoint_episodes
+                .take_resume(&episode.episode_id, now_ms)
+            {
+                Ok(Some(resume)) => {
+                    let context = render_resume_context(resume.skipped);
+                    return Some(Self::ok(
+                        req,
+                        hook_context(event, &context),
+                        json!({
+                            "checkpoint_episode_id": episode.episode_id,
+                            "checkpoint_episode_state": "resume_issued",
+                        }),
+                    ));
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    crate::log_daemon(&format!("checkpoint episode resume failed: {error}"));
+                }
+            }
+        }
+
+        if episode.state == EpisodeState::ResumeIssued {
+            if let Err(error) = self
+                .checkpoint_episodes
+                .complete_resume(&episode.episode_id, now_ms)
+            {
+                crate::log_daemon(&format!("checkpoint episode completion failed: {error}"));
+            }
+            return None;
+        }
+
+        if episode.state == EpisodeState::AwaitingCustomInput
+            && event == HookEventKind::UserPromptSubmit
+        {
+            let instruction = user_prompt_text(&normalized.raw)?;
+            match self.checkpoint_episodes.record_custom_instruction(
+                &episode.episode_id,
+                &instruction,
+                now_ms,
+            ) {
+                Ok(updated) => {
+                    let context = render_episode_checkpoint_context(agent, &updated);
+                    return Some(Self::ok(
+                        req,
+                        hook_context(event, &context),
+                        json!({
+                            "checkpoint_episode_id": updated.episode_id,
+                            "checkpoint_episode_state": "capsule_pending",
+                        }),
+                    ));
+                }
+                Err(error) => {
+                    crate::log_daemon(&format!(
+                        "checkpoint custom instruction persistence failed: {error}"
+                    ));
+                    return Some(degraded(&req.request_id, "daemon_error"));
+                }
+            }
+        }
+
+        if episode.state == EpisodeState::CapsulePending && event == HookEventKind::UserPromptSubmit
+        {
+            let context = render_episode_checkpoint_context(agent, &episode);
+            return Some(Self::ok(
+                req,
+                hook_context(event, &context),
+                json!({
+                    "checkpoint_episode_id": episode.episode_id,
+                    "checkpoint_episode_state": "capsule_pending",
+                }),
+            ));
+        }
+
+        let decision = decision_from_event(normalized, event)?;
+        let updated =
+            match self
+                .checkpoint_episodes
+                .record_decision(&episode.episode_id, decision, now_ms)
+            {
+                Ok(updated) => updated,
+                Err(error) => {
+                    crate::log_daemon(&format!("checkpoint decision persistence failed: {error}"));
+                    return Some(degraded(&req.request_id, "daemon_error"));
+                }
+            };
+
+        let (context, state_name) = match decision {
+            UserDecision::Save => (
+                render_episode_checkpoint_context(agent, &updated),
+                "capsule_pending",
+            ),
+            UserDecision::Other => (
+                "Ask the user for one additional free-text instruction. The next user message will be attached to the capsule, which will then be saved before the interrupted work resumes."
+                    .to_string(),
+                "awaiting_custom_input",
+            ),
+            UserDecision::Skip => {
+                let resume = match self
+                    .checkpoint_episodes
+                    .take_resume(&updated.episode_id, now_ms)
+                {
+                    Ok(Some(resume)) => resume,
+                    Ok(None) => return None,
+                    Err(error) => {
+                        crate::log_daemon(&format!("checkpoint skip resume failed: {error}"));
+                        return Some(degraded(&req.request_id, "daemon_error"));
+                    }
+                };
+                (render_resume_context(resume.skipped), "resume_issued")
+            }
+        };
+        Some(Self::ok(
+            req,
+            hook_context(event, &context),
+            json!({
+                "checkpoint_episode_id": updated.episode_id,
+                "checkpoint_episode_state": state_name,
+            }),
+        ))
+    }
+
     /// Five-hour threshold evaluation shared by PostToolUse and Stop.
     /// Returns `(hook_stdout, diagnostics)`.
     fn evaluate_five_hour_trigger(
@@ -313,9 +510,70 @@ impl Router {
         let mut fired = false;
         let mut suppressed = false;
         let mut trigger_expires_at_ms = None;
+        let mut checkpoint_episode_id = None;
+        let mut checkpoint_episode_error = None;
         let stdout = match outcome.action {
             TriggerAction::None => json!({}),
-            action => {
+            TriggerAction::Ask => {
+                let reset_at_ms = usage
+                    .and_then(|sample| sample.resets_at_ms)
+                    .filter(|reset| *reset > now_ms)
+                    .unwrap_or_else(|| now_ms.saturating_add(trigger_mark::FIVE_HOUR_WINDOW_MS));
+                trigger_expires_at_ms = Some(reset_at_ms);
+                let episode_result = self
+                    .checkpoint_episodes
+                    .begin_or_load_active(
+                        EpisodeKey {
+                            agent: normalized.agent.as_canonical_str().to_string(),
+                            project_id: project_id.to_string(),
+                            session_id: normalized
+                                .session_id
+                                .clone()
+                                .unwrap_or_else(|| project_id.to_string()),
+                            reset_at_ms,
+                        },
+                        now_ms,
+                    )
+                    .and_then(|episode| {
+                        let leased = self.checkpoint_episodes.lease_question(
+                            &episode.episode_id,
+                            now_ms,
+                            QUESTION_LEASE_MS,
+                        )?;
+                        Ok((episode, leased))
+                    });
+                match episode_result {
+                    Ok((episode, false)) => {
+                        checkpoint_episode_id = Some(episode.episode_id);
+                        suppressed = true;
+                        json!({})
+                    }
+                    Ok((episode, true)) => {
+                        checkpoint_episode_id = Some(episode.episode_id.clone());
+                        fired = true;
+                        let context = render_trigger_context_with_episode(
+                            TriggerAction::Ask,
+                            used.unwrap_or_default(),
+                            resolved.threshold,
+                            &req.agent,
+                            cfg.capsule.language,
+                            Some(&episode.episode_id),
+                        );
+                        trigger_hook_output(event, TriggerAction::Ask, &context)
+                    }
+                    Err(error) => {
+                        checkpoint_episode_error = Some(error.to_string());
+                        crate::log_daemon(&format!(
+                            "checkpoint episode trigger persistence failed: {error}"
+                        ));
+                        json!({
+                            "decision": "block",
+                            "reason": "AI Handoff could not persist the checkpoint question state. Run `ai-handoff doctor` before continuing.",
+                        })
+                    }
+                }
+            }
+            action @ TriggerAction::Create => {
                 let mark = trigger_mark::check_and_record(
                     &normalized.agent,
                     now_ms,
@@ -334,23 +592,7 @@ impl Router {
                         &req.agent,
                         cfg.capsule.language,
                     );
-                    if event == HookEventKind::Stop {
-                        // Stop hooks carry no additionalContext channel; the
-                        // block reason is what the agent reads to continue.
-                        json!({
-                            "decision": "block",
-                            "reason": context,
-                        })
-                    } else {
-                        json!({
-                            "decision": "block",
-                            "reason": trigger_block_reason(action),
-                            "hookSpecificOutput": {
-                                "hookEventName": "PostToolUse",
-                                "additionalContext": context,
-                            }
-                        })
-                    }
+                    trigger_hook_output(event, action, &context)
                 }
             }
         };
@@ -364,6 +606,8 @@ impl Router {
                 "trigger_fired": fired,
                 "trigger_suppressed": suppressed,
                 "trigger_expires_at_ms": trigger_expires_at_ms,
+                "checkpoint_episode_id": checkpoint_episode_id,
+                "checkpoint_episode_error": checkpoint_episode_error,
             }),
         )
     }
@@ -447,7 +691,7 @@ fn fetch_provider_trigger_usage(agent: account::Agent) -> Option<TriggerUsage> {
     })
 }
 
-fn handle_checkpoint(req: &ai_handoff_ipc::protocol::Request) -> Response {
+fn handle_checkpoint(req: &ai_handoff_ipc::protocol::Request, episodes: &EpisodeStore) -> Response {
     let raw = raw_with_request_fallbacks(req);
     let cwd = raw
         .get("cwd")
@@ -459,6 +703,33 @@ fn handle_checkpoint(req: &ai_handoff_ipc::protocol::Request) -> Response {
     // unknown ids pass through instead of being coerced to codex.
     let agent = canonical_agent_id(&req.agent).unwrap_or_else(|| "codex".to_string());
     let now = Utc::now();
+    let episode_id = raw
+        .get("_ai_handoff_episode_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+    if let Some(episode_id) = episode_id {
+        match episodes.get(episode_id) {
+            Ok(Some(episode)) if episode.capsule_id.is_some() => {
+                return Router::ok(
+                    req,
+                    json!({
+                        "saved": true,
+                        "capsule_id": episode.capsule_id,
+                        "episode_reused": true,
+                    }),
+                    json!({ "checkpoint_episode_id": episode_id }),
+                );
+            }
+            Ok(Some(episode)) if episode.state == EpisodeState::CapsulePending => {}
+            Ok(Some(_)) => return degraded(&req.request_id, "checkpoint_episode_not_pending"),
+            Ok(None) => return degraded(&req.request_id, "checkpoint_episode_not_found"),
+            Err(error) => {
+                crate::log_daemon(&format!("checkpoint episode lookup failed: {error}"));
+                return degraded(&req.request_id, "daemon_error");
+            }
+        }
+    }
     let message = raw
         .get("message")
         .and_then(Value::as_str)
@@ -484,11 +755,28 @@ fn handle_checkpoint(req: &ai_handoff_ipc::protocol::Request) -> Response {
         .map(|format| save_capsule_with_format(&capsule, format))
         .unwrap_or_else(|| save_capsule(&capsule));
     match save_result {
-        Ok(path) => Router::ok(
-            req,
-            json!({ "saved": true, "path": path.to_string_lossy() }),
-            json!({}),
-        ),
+        Ok(path) => {
+            if let Some(episode_id) = episode_id {
+                if let Err(error) =
+                    episodes.commit_capsule(episode_id, &capsule.capsule_id, now.timestamp_millis())
+                {
+                    crate::log_daemon(&format!(
+                        "checkpoint episode commit failed ({episode_id}): {error}"
+                    ));
+                    return degraded(&req.request_id, "checkpoint_episode_commit_failed");
+                }
+            }
+            Router::ok(
+                req,
+                json!({
+                    "saved": true,
+                    "path": path.to_string_lossy(),
+                    "capsule_id": capsule.capsule_id,
+                    "checkpoint_episode_id": episode_id,
+                }),
+                json!({ "checkpoint_episode_id": episode_id }),
+            )
+        }
         Err(error) => {
             crate::log_daemon(&format!(
                 "checkpoint save failed ({}): {error}",
@@ -775,6 +1063,24 @@ fn trigger_block_reason(action: TriggerAction) -> &'static str {
     }
 }
 
+fn trigger_hook_output(event: HookEventKind, action: TriggerAction, context: &str) -> Value {
+    if event == HookEventKind::Stop {
+        json!({
+            "decision": "block",
+            "reason": context,
+        })
+    } else {
+        json!({
+            "decision": "block",
+            "reason": trigger_block_reason(action),
+            "hookSpecificOutput": {
+                "hookEventName": "PostToolUse",
+                "additionalContext": context,
+            }
+        })
+    }
+}
+
 /// Context injected when the five-hour trigger fires. Instructs the agent to
 /// checkpoint (auto) or ask the user first (ask), then resume the interrupted
 /// work — the capsule must never end the turn.
@@ -785,13 +1091,30 @@ fn render_trigger_context(
     agent: &str,
     language: config::Language,
 ) -> String {
+    render_trigger_context_with_episode(action, used_percent, threshold, agent, language, None)
+}
+
+fn render_trigger_context_with_episode(
+    action: TriggerAction,
+    used_percent: f64,
+    threshold: f64,
+    agent: &str,
+    language: config::Language,
+    episode_id: Option<&str>,
+) -> String {
     let agent = agent_cli_name(agent);
-    let copy = trigger_prompt_copy(language);
+    let mut copy = trigger_prompt_copy(language);
+    copy.other_desc = "ask for one additional instruction, save the capsule with it, then continue the original work.";
     let header = format!(
         "[ai-handoff] Five-hour usage {used_percent:.0}% reached the configured threshold {threshold:.0}%."
     );
+    let episode_step = episode_id
+        .map(|episode_id| {
+            format!(" Append `--episode {episode_id}` to the returned checkpoint command.")
+        })
+        .unwrap_or_default();
     let checkpoint_steps = format!(
-        "First run:\n  ai-handoff checkpoint guidance --agent {agent} --json\nUse the returned input_format, language, limits, input_template, and command to write and save a checkpoint of the CURRENT work. After the checkpoint succeeds, resume the interrupted work exactly where it stopped."
+        "First run:\n  ai-handoff checkpoint guidance --agent {agent} --json\nUse the returned input_format, language, limits, input_template, and command to write and save a checkpoint of the CURRENT work.{episode_step} After the checkpoint succeeds, resume the interrupted work exactly where it stopped."
     );
     match action {
         TriggerAction::Create => format!(
@@ -810,7 +1133,7 @@ fn render_trigger_question_context(
 ) -> String {
     if agent == "claude-code" {
         format!(
-            "{header}\nUse AskUserQuestion now. Question: \"{}\"\nOptions:\n- {}: {}\n- {}: {}\n- {}: {}\nIf the user selects {}, ask one follow-up chat question for their free-text instruction before deciding whether to create the capsule. Then follow that instruction.\nFor {}: {checkpoint_steps}\nFor {}: resume the interrupted work without creating a capsule.\nAfter the selected path finishes, resume the interrupted work exactly where it stopped.",
+            "{header}\nUse AskUserQuestion now. Question: \"{}\"\nOptions:\n- {}: {}\n- {}: {}\n- {}: {}\nIf the user selects {}, ask one follow-up chat question for their free-text instruction, then save the capsule with that instruction.\nFor {} or {}: {checkpoint_steps}\nFor {}: resume the interrupted work without creating a capsule.\nAfter the selected path finishes, resume the interrupted work exactly where it stopped.",
             copy.question,
             copy.yes,
             copy.yes_desc,
@@ -820,11 +1143,12 @@ fn render_trigger_question_context(
             copy.other_desc,
             copy.other,
             copy.yes,
+            copy.other,
             copy.no,
         )
     } else {
         format!(
-            "{header}\nAsk the user in plain chat and wait for the answer: \"{}\"\nOptions:\n- {}: {}\n- {}: {}\n- {}: {}\nIf the user chooses {}, ask one follow-up chat question for their free-text instruction before deciding whether to create the capsule. Then follow that instruction.\nFor {}: {checkpoint_steps}\nFor {}: resume the interrupted work without creating a capsule.\nAfter the selected path finishes, resume the interrupted work exactly where it stopped.",
+            "{header}\nAsk the user in plain chat and wait for the answer: \"{}\"\nOptions:\n- {}: {}\n- {}: {}\n- {}: {}\nIf the user chooses {}, ask one follow-up chat question for their free-text instruction, then save the capsule with that instruction.\nFor {} or {}: {checkpoint_steps}\nFor {}: resume the interrupted work without creating a capsule.\nAfter the selected path finishes, resume the interrupted work exactly where it stopped.",
             copy.question,
             copy.yes,
             copy.yes_desc,
@@ -834,6 +1158,7 @@ fn render_trigger_question_context(
             copy.other_desc,
             copy.other,
             copy.yes,
+            copy.other,
             copy.no,
         )
     }
@@ -926,6 +1251,95 @@ fn hook_event_name(event: HookEventKind) -> &'static str {
         HookEventKind::UserPromptSubmit => "UserPromptSubmit",
         HookEventKind::PostToolUse => "PostToolUse",
         HookEventKind::Stop => "Stop",
+    }
+}
+
+fn hook_context(event: HookEventKind, context: &str) -> Value {
+    if event == HookEventKind::Stop {
+        json!({
+            "decision": "block",
+            "reason": context,
+        })
+    } else {
+        json!({
+            "hookSpecificOutput": {
+                "hookEventName": hook_event_name(event),
+                "additionalContext": context,
+            }
+        })
+    }
+}
+
+fn user_prompt_text(raw: &Value) -> Option<String> {
+    ["prompt", "user_prompt", "message", "content"]
+        .iter()
+        .find_map(|key| raw.get(*key).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+}
+
+fn decision_from_event(
+    normalized: &ai_handoff_core::hook_event::NormalizedHookEvent,
+    event: HookEventKind,
+) -> Option<UserDecision> {
+    match event {
+        HookEventKind::UserPromptSubmit => {
+            user_prompt_text(&normalized.raw).and_then(|text| parse_user_decision(&text))
+        }
+        HookEventKind::PostToolUse
+            if normalized
+                .tool_name
+                .as_deref()
+                .is_some_and(|name| name.eq_ignore_ascii_case("AskUserQuestion")) =>
+        {
+            decision_from_value(&normalized.tool_response)
+        }
+        _ => None,
+    }
+}
+
+fn decision_from_value(value: &Value) -> Option<UserDecision> {
+    match value {
+        Value::String(text) => parse_user_decision(text),
+        Value::Array(values) => values.iter().find_map(decision_from_value),
+        Value::Object(values) => values.values().find_map(decision_from_value),
+        _ => None,
+    }
+}
+
+fn parse_user_decision(text: &str) -> Option<UserDecision> {
+    match text.trim().to_ascii_lowercase().as_str() {
+        "네" | "예" | "yes" | "y" | "はい" => Some(UserDecision::Save),
+        "아니오" | "아니요" | "no" | "n" | "いいえ" => Some(UserDecision::Skip),
+        "기타" | "other" | "その他" => Some(UserDecision::Other),
+        _ => None,
+    }
+}
+
+fn render_episode_checkpoint_context(
+    agent: &str,
+    episode: &crate::checkpoint_episode::Episode,
+) -> String {
+    let custom = episode
+        .custom_instruction
+        .as_deref()
+        .map(|instruction| format!("\nInclude this user instruction in the capsule: {instruction}"))
+        .unwrap_or_default();
+    format!(
+        "Save the CURRENT work as a handoff capsule now. First run `ai-handoff checkpoint guidance --agent {} --json`, follow the returned format and limits, and append `--episode {}` to the returned checkpoint command. After checkpoint succeeds, resume the interrupted work exactly where it stopped.{custom}",
+        agent_cli_name(agent),
+        episode.episode_id,
+    )
+}
+
+fn render_resume_context(skipped: bool) -> String {
+    if skipped {
+        "The user chose not to save a capsule. resume the interrupted work exactly where it stopped now."
+            .to_string()
+    } else {
+        "The handoff capsule was saved successfully. resume the interrupted work exactly where it stopped now."
+            .to_string()
     }
 }
 
@@ -2219,7 +2633,7 @@ mod tests {
     }
 
     #[test]
-    fn post_tool_use_trigger_mark_survives_new_router_instance_for_codex() {
+    fn post_tool_use_episode_survives_restart_and_is_scoped_to_codex_session() {
         let _guard = env_lock();
         let home = tempfile::tempdir().unwrap();
         let cwd = tempfile::tempdir().unwrap();
@@ -2255,8 +2669,24 @@ mod tests {
         assert!(!context.contains("AskUserQuestion"));
         assert_eq!(first.diagnostics["trigger_fired"], true);
 
-        let second = request(
+        let same_session = request(
             "turn-codex-trigger-2",
+            "post-tool-use",
+            "codex",
+            cwd.path(),
+            json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "session_id": "s-codex-a",
+                "transcript_path": transcript.to_string_lossy()
+            }),
+        );
+        let suppressed = Router::new().handle(&same_session);
+        assert_eq!(suppressed.hook_stdout, json!({}));
+        assert_eq!(suppressed.diagnostics["trigger_fired"], false);
+        assert_eq!(suppressed.diagnostics["trigger_suppressed"], true);
+
+        let other_session = request(
+            "turn-codex-trigger-3",
             "post-tool-use",
             "codex",
             cwd.path(),
@@ -2266,10 +2696,12 @@ mod tests {
                 "transcript_path": transcript.to_string_lossy()
             }),
         );
-        let suppressed = Router::new().handle(&second);
-        assert_eq!(suppressed.hook_stdout, json!({}));
-        assert_eq!(suppressed.diagnostics["trigger_fired"], false);
-        assert_eq!(suppressed.diagnostics["trigger_suppressed"], true);
+        let fired_for_other_session = Router::new().handle(&other_session);
+        assert_eq!(fired_for_other_session.diagnostics["trigger_fired"], true);
+        assert_ne!(
+            first.diagnostics["checkpoint_episode_id"],
+            fired_for_other_session.diagnostics["checkpoint_episode_id"]
+        );
         std::env::remove_var("AI_HANDOFF_HOME");
     }
 
@@ -2676,5 +3108,367 @@ mod tests {
             assert!(context.contains("limits"));
             assert!(!context.contains("Write a small JSON file"));
         }
+    }
+
+    #[test]
+    fn ask_trigger_is_scoped_to_each_session() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let codex_home = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        std::env::set_var("CODEX_HOME", codex_home.path());
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[triggers.five_hour]\nenabled = true\nthreshold_percent = 10\nmode = \"ask\"\n",
+        )
+        .unwrap();
+        let router = Router::new();
+
+        let mut first = request(
+            "episode-session-1",
+            "post-tool-use",
+            "codex",
+            cwd.path(),
+            json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "session_id": "session-1",
+                "payload": { "rate_limits": { "primary": { "used_percent": 29.0 } } }
+            }),
+        );
+        first.session_id = Some("session-1".into());
+        let mut second = request(
+            "episode-session-2",
+            "post-tool-use",
+            "codex",
+            cwd.path(),
+            json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "session_id": "session-2",
+                "payload": { "rate_limits": { "primary": { "used_percent": 29.0 } } }
+            }),
+        );
+        second.session_id = Some("session-2".into());
+
+        let first_response = router.handle(&first);
+        let second_response = router.handle(&second);
+        assert_eq!(first_response.diagnostics["trigger_fired"], true);
+        assert_eq!(second_response.diagnostics["trigger_fired"], true);
+        assert_ne!(
+            first_response.diagnostics["checkpoint_episode_id"],
+            second_response.diagnostics["checkpoint_episode_id"]
+        );
+
+        std::env::remove_var("CODEX_HOME");
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn codex_yes_answer_moves_episode_to_capsule_pending() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        let project_id = fingerprint(cwd.path());
+        let store = crate::checkpoint_episode::EpisodeStore::new(home.path());
+        let episode = store
+            .begin_or_load(
+                crate::checkpoint_episode::EpisodeKey {
+                    agent: "codex".into(),
+                    project_id,
+                    session_id: "s1".into(),
+                    reset_at_ms: Utc::now().timestamp_millis() + 60_000,
+                },
+                Utc::now().timestamp_millis(),
+            )
+            .unwrap();
+        store
+            .lease_question(&episode.episode_id, Utc::now().timestamp_millis(), 30_000)
+            .unwrap();
+
+        let response = Router::new().handle(&request(
+            "answer-yes",
+            "user-prompt",
+            "codex",
+            cwd.path(),
+            json!({ "cwd": cwd.path().to_string_lossy(), "session_id": "s1", "prompt": "네" }),
+        ));
+        let context = response.hook_stdout["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(context.contains("--episode"));
+        assert!(context.contains(&episode.episode_id));
+        assert_eq!(
+            store.get(&episode.episode_id).unwrap().unwrap().state,
+            crate::checkpoint_episode::EpisodeState::CapsulePending
+        );
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn claude_ask_user_question_answer_moves_episode_to_capsule_pending() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        let project_id = fingerprint(cwd.path());
+        let now = Utc::now().timestamp_millis();
+        let store = crate::checkpoint_episode::EpisodeStore::new(home.path());
+        let episode = store
+            .begin_or_load(
+                crate::checkpoint_episode::EpisodeKey {
+                    agent: "claude-code".into(),
+                    project_id,
+                    session_id: "claude-session".into(),
+                    reset_at_ms: now + 60_000,
+                },
+                now,
+            )
+            .unwrap();
+        store
+            .lease_question(&episode.episode_id, now, 30_000)
+            .unwrap();
+
+        let response = Router::new().handle(&request(
+            "claude-answer-yes",
+            "post-tool-use",
+            "claude-code",
+            cwd.path(),
+            json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "session_id": "claude-session",
+                "tool_name": "AskUserQuestion",
+                "tool_response": { "answers": { "checkpoint": "Yes" } }
+            }),
+        ));
+
+        let context = response.hook_stdout["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(context.contains("--episode"));
+        assert!(context.contains(&episode.episode_id));
+        assert_eq!(
+            store.get(&episode.episode_id).unwrap().unwrap().state,
+            crate::checkpoint_episode::EpisodeState::CapsulePending
+        );
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn codex_no_and_other_answers_follow_the_selected_paths() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        let project_id = fingerprint(cwd.path());
+        let now = Utc::now().timestamp_millis();
+        let store = crate::checkpoint_episode::EpisodeStore::new(home.path());
+        let skipped = store
+            .begin_or_load(
+                crate::checkpoint_episode::EpisodeKey {
+                    agent: "codex".into(),
+                    project_id: project_id.clone(),
+                    session_id: "skip-session".into(),
+                    reset_at_ms: now + 60_000,
+                },
+                now,
+            )
+            .unwrap();
+        store
+            .lease_question(&skipped.episode_id, now, 30_000)
+            .unwrap();
+        let mut no = request(
+            "answer-no",
+            "user-prompt",
+            "codex",
+            cwd.path(),
+            json!({ "cwd": cwd.path().to_string_lossy(), "session_id": "skip-session", "prompt": "아니오" }),
+        );
+        no.session_id = Some("skip-session".into());
+        let no_response = Router::new().handle(&no);
+        assert!(
+            no_response.hook_stdout["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .unwrap()
+                .contains("resume")
+        );
+        assert_eq!(
+            store.get(&skipped.episode_id).unwrap().unwrap().state,
+            crate::checkpoint_episode::EpisodeState::ResumeIssued
+        );
+
+        let other = store
+            .begin_or_load(
+                crate::checkpoint_episode::EpisodeKey {
+                    agent: "codex".into(),
+                    project_id,
+                    session_id: "other-session".into(),
+                    reset_at_ms: now + 60_000,
+                },
+                now,
+            )
+            .unwrap();
+        store
+            .lease_question(&other.episode_id, now, 30_000)
+            .unwrap();
+        let mut other_answer = request(
+            "answer-other",
+            "user-prompt",
+            "codex",
+            cwd.path(),
+            json!({ "cwd": cwd.path().to_string_lossy(), "session_id": "other-session", "prompt": "기타" }),
+        );
+        other_answer.session_id = Some("other-session".into());
+        Router::new().handle(&other_answer);
+        assert_eq!(
+            store.get(&other.episode_id).unwrap().unwrap().state,
+            crate::checkpoint_episode::EpisodeState::AwaitingCustomInput
+        );
+        let mut custom = request(
+            "answer-custom",
+            "user-prompt",
+            "codex",
+            cwd.path(),
+            json!({ "cwd": cwd.path().to_string_lossy(), "session_id": "other-session", "prompt": "테스트 로그를 포함해줘" }),
+        );
+        custom.session_id = Some("other-session".into());
+        let custom_response = Router::new().handle(&custom);
+        assert!(
+            custom_response.hook_stdout["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .unwrap()
+                .contains("--episode")
+        );
+        let updated = store.get(&other.episode_id).unwrap().unwrap();
+        assert_eq!(
+            updated.state,
+            crate::checkpoint_episode::EpisodeState::CapsulePending
+        );
+        assert_eq!(
+            updated.custom_instruction.as_deref(),
+            Some("테스트 로그를 포함해줘")
+        );
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn checkpoint_commit_emits_resume_only_on_the_next_hook() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        crate::ensure_runtime_dirs().unwrap();
+        let project_id = fingerprint(cwd.path());
+        let now = Utc::now().timestamp_millis();
+        let store = crate::checkpoint_episode::EpisodeStore::new(home.path());
+        let episode = store
+            .begin_or_load(
+                crate::checkpoint_episode::EpisodeKey {
+                    agent: "codex".into(),
+                    project_id,
+                    session_id: "s1".into(),
+                    reset_at_ms: now + 60_000,
+                },
+                now,
+            )
+            .unwrap();
+        store
+            .record_decision(
+                &episode.episode_id,
+                crate::checkpoint_episode::UserDecision::Save,
+                now + 1,
+            )
+            .unwrap();
+
+        let mut checkpoint = request(
+            "episode-checkpoint",
+            "checkpoint",
+            "codex",
+            cwd.path(),
+            json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "goal": "save current work",
+                "_ai_handoff_episode_id": episode.episode_id,
+            }),
+        );
+        checkpoint.kind = "checkpoint".into();
+        let saved = Router::new().handle(&checkpoint);
+        assert_eq!(saved.status, Status::Ok);
+        assert_eq!(
+            store.get(&episode.episode_id).unwrap().unwrap().state,
+            crate::checkpoint_episode::EpisodeState::CapsuleCommitted
+        );
+
+        let resume = Router::new().handle(&request(
+            "episode-resume",
+            "session-start",
+            "codex",
+            cwd.path(),
+            json!({ "cwd": cwd.path().to_string_lossy(), "session_id": "s1" }),
+        ));
+        assert!(
+            resume.hook_stdout["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .unwrap()
+                .contains("resume")
+        );
+        let second = Router::new().handle(&request(
+            "episode-resume-second",
+            "session-start",
+            "codex",
+            cwd.path(),
+            json!({ "cwd": cwd.path().to_string_lossy(), "session_id": "s1" }),
+        ));
+        assert_eq!(second.hook_stdout, json!({}));
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn stop_capsule_save_commits_the_active_episode() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        crate::ensure_runtime_dirs().unwrap();
+        let project_id = fingerprint(cwd.path());
+        let now = Utc::now().timestamp_millis();
+        let store = crate::checkpoint_episode::EpisodeStore::new(home.path());
+        let episode = store
+            .begin_or_load(
+                crate::checkpoint_episode::EpisodeKey {
+                    agent: "codex".into(),
+                    project_id,
+                    session_id: "s1".into(),
+                    reset_at_ms: now + 60_000,
+                },
+                now,
+            )
+            .unwrap();
+        store
+            .record_decision(
+                &episode.episode_id,
+                crate::checkpoint_episode::UserDecision::Save,
+                now + 1,
+            )
+            .unwrap();
+
+        let response = Router::new().handle(&request(
+            "episode-stop-save",
+            "stop",
+            "codex",
+            cwd.path(),
+            json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "session_id": "s1",
+                "last_assistant_message": "```ai-handoff-capsule\n{\"goal\":\"saved from stop\"}\n```"
+            }),
+        ));
+
+        assert_eq!(response.status, Status::Ok);
+        assert_eq!(
+            store.get(&episode.episode_id).unwrap().unwrap().state,
+            crate::checkpoint_episode::EpisodeState::CapsuleCommitted
+        );
+        std::env::remove_var("AI_HANDOFF_HOME");
     }
 }

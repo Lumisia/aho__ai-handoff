@@ -1,0 +1,8 @@
+{
+  "bundle": {
+    "externalBin": [
+      "binaries/ai-handoff",
+      "binaries/ai-handoff-host"
+    ]
+  }
+}

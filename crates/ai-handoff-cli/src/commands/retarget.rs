@@ -2,14 +2,10 @@
 //! at a different agent, or open it up for anyone when --to is omitted. The
 //! explicit fix-up path when a capsule was saved with the wrong target.
 
-use ai_handoff_ipc::{
-    client::{send, ClientConfig},
-    protocol::{ClientInfo, Request, Status, VERSION},
-};
+use ai_handoff_ipc::protocol::{ClientInfo, Request, Status, VERSION};
 use chrono::{SecondsFormat, Utc};
 use serde_json::json;
 use std::io::Write;
-use std::time::Duration;
 
 pub fn run(capsule_id: &str, to: Option<String>) -> anyhow::Result<i32> {
     let stdout = std::io::stdout();
@@ -51,19 +47,7 @@ pub fn run_io(
         },
     };
 
-    let mut resp = send(&req, &ClientConfig::default());
-    if autostart_daemon
-        && super::hook::daemon_unavailable(&resp)
-        && super::hook::start_daemon_logged()
-    {
-        resp = send(
-            &req,
-            &ClientConfig {
-                request_timeout: Duration::from_millis(2500),
-                ..ClientConfig::default()
-            },
-        );
-    }
+    let resp = crate::daemon_supply::send_with_supply(&req, autostart_daemon);
 
     for warning in &resp.warnings {
         eprintln!("[ai-handoff] {warning}");

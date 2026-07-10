@@ -161,7 +161,9 @@ $binDir = Join-Path $ahHome 'bin'
 $tmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("ai-handoff-install-" + [System.Guid]::NewGuid().ToString('N'))
 $archive = Join-Path $tmpDir $artifact
 $exeName = 'ai-handoff.exe'
+$hostExeName = 'ai-handoff-host.exe'
 $dest = Join-Path $binDir $exeName
+$hostDest = Join-Path $binDir $hostExeName
 
 New-Item -ItemType Directory -Force -Path $tmpDir, $binDir | Out-Null
 
@@ -186,22 +188,31 @@ Error: $($_.Exception.Message)
     if (-not $found) {
         throw "artifact did not contain $exeName"
     }
+    $hostFound = Get-ChildItem -Path $tmpDir -Recurse -File -Filter $hostExeName | Select-Object -First 1
+    if (-not $hostFound) {
+        throw "artifact did not contain $hostExeName"
+    }
 
     # Clean up any leftover from a previous in-place update (best effort: the
     # old exe may still be running).
-    Remove-Item -Path "$dest.old" -Force -ErrorAction SilentlyContinue
+    Remove-Item -Path "$dest.old", "$hostDest.old" -Force -ErrorAction SilentlyContinue
 
-    try {
-        Copy-Item -Path $found.FullName -Destination $dest -Force
-    }
-    catch {
-        # `ai-handoff update` runs this script while the destination exe is the
-        # running process, which locks the file against writes. A locked exe can
-        # still be renamed, so move it aside and copy fresh.
-        Move-Item -Path $dest -Destination "$dest.old" -Force
-        Copy-Item -Path $found.FullName -Destination $dest -Force
+    foreach ($binary in @(
+        @{ Source = $found.FullName; Destination = $dest },
+        @{ Source = $hostFound.FullName; Destination = $hostDest }
+    )) {
+        try {
+            Copy-Item -Path $binary.Source -Destination $binary.Destination -Force
+        }
+        catch {
+            # A running executable can be renamed even when it cannot be
+            # overwritten. Move it aside, then install the fresh binary.
+            Move-Item -Path $binary.Destination -Destination "$($binary.Destination).old" -Force
+            Copy-Item -Path $binary.Source -Destination $binary.Destination -Force
+        }
     }
     Write-Host "Installed $dest"
+    Write-Host "Installed $hostDest"
 
     # --- Add bin dir to the user PATH (and this session) ----------------------
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')

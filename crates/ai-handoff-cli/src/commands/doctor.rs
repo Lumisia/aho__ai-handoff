@@ -2,6 +2,7 @@ use ai_handoff_ipc::{
     client::{send, ClientConfig},
     protocol::{ClientInfo, Request, Status, VERSION},
 };
+use anyhow::Context;
 use chrono::{SecondsFormat, Utc};
 use serde_json::json;
 use std::time::Duration;
@@ -79,6 +80,16 @@ pub fn run_io_fix(json_output: bool, fix: bool, out: &mut dyn Write) -> i32 {
     let st = ai_handoff_core::install::state::load(&ai_handoff_core::paths::home());
     let claude_plugin = claude_plugin_state(&st.claude.plugin);
     let codex_plugin = codex_plugin_state(&st.codex.plugin);
+    let host_inspection = crate::host_launcher::inspect(st.host_launcher.as_ref());
+    let host_launcher = json!({
+        "recorded": host_inspection.recorded,
+        "registered": host_inspection.registered,
+        "fixed_action": host_inspection.action_matches,
+        "executable_present": host_inspection.executable_present,
+        "id": st.host_launcher.as_ref().map(|host| host.id.as_str()),
+        "kind": st.host_launcher.as_ref().map(|host| format!("{:?}", host.kind)),
+        "error": host_inspection.error,
+    });
     let mut next_steps = next_steps(daemon == "reachable", fix, &claude_plugin, &codex_plugin);
     if daemon_store_writable.as_ref().and_then(|v| v.as_bool()) == Some(false) {
         next_steps.push(
@@ -97,6 +108,7 @@ pub fn run_io_fix(json_output: bool, fix: bool, out: &mut dyn Write) -> i32 {
         "ipc_requests": ipc_requests,
         "ipc_responses": ipc_responses,
         "store_permissions": store_permissions,
+        "host_launcher": host_launcher,
         "plugin": {
             "claude": claude_plugin,
             "codex": codex_plugin,
@@ -154,6 +166,24 @@ pub fn run_io_fix(json_output: bool, fix: bool, out: &mut dyn Write) -> i32 {
                 Some(true) => "ok",
                 Some(false) => "DENIED",
                 None => "unknown (daemon unreachable or older version)",
+            }
+        );
+        let _ = writeln!(
+            out,
+            "host launcher: executable={}, recorded={}, registered={}, fixed_action={}",
+            report["host_launcher"]["executable_present"]
+                .as_bool()
+                .unwrap_or(false),
+            report["host_launcher"]["recorded"]
+                .as_bool()
+                .unwrap_or(false),
+            report["host_launcher"]["registered"]
+                .as_bool()
+                .unwrap_or(false),
+            match report["host_launcher"]["fixed_action"].as_bool() {
+                Some(true) => "yes",
+                Some(false) => "NO",
+                None => "unknown",
             }
         );
         let _ = writeln!(
@@ -216,18 +246,69 @@ fn apply_fixes() -> Vec<String> {
         Err(error) => fixes.push(format!("runtime directory repair FAILED: {error}")),
     }
 
+    if let Some(host_fix) = repair_host_launcher() {
+        fixes.push(host_fix);
+    }
+
     // 2. Daemon: spawn one when unreachable and wait until it answers.
-    if super::hook::ping_daemon(Duration::from_millis(150)) {
+    if crate::daemon_supply::ping_daemon(Duration::from_millis(150)) {
         return fixes;
     }
-    if super::hook::start_daemon_logged() && super::hook::ping_daemon(Duration::from_millis(2500)) {
-        fixes.push("started the daemon (it was unreachable)".to_string());
-    } else {
-        fixes.push(
-            "daemon start FAILED — run `ai-handoff daemon run` manually and check logs".to_string(),
-        );
+    match crate::daemon_supply::ensure_daemon() {
+        Ok(outcome) if outcome.ready => fixes.push(format!(
+            "started the daemon via {:?} (it was unreachable)",
+            outcome.strategy
+        )),
+        Ok(outcome) => fixes.push(format!(
+            "daemon start FAILED — {}",
+            outcome.errors.join("; ")
+        )),
+        Err(error) => fixes.push(format!("daemon start FAILED — {error}")),
     }
     fixes
+}
+
+fn host_launcher_needs_repair(
+    inspection: &crate::host_launcher::LauncherInspection,
+    managed_codex_install: bool,
+) -> bool {
+    managed_codex_install
+        && (!inspection.executable_present
+            || !inspection.recorded
+            || !inspection.registered
+            || inspection.action_matches != Some(true))
+}
+
+#[cfg(windows)]
+fn repair_host_launcher() -> Option<String> {
+    let home = ai_handoff_core::paths::home();
+    let mut state = ai_handoff_core::install::state::load(&home);
+    let managed_codex_install = state.host_launcher.is_some()
+        || state.codex.plugin.is_some()
+        || state.codex.hooks_file.is_some()
+        || state.codex.writable_root_added.is_some();
+    let inspection = crate::host_launcher::inspect(state.host_launcher.as_ref());
+    if !host_launcher_needs_repair(&inspection, managed_codex_install) {
+        return None;
+    }
+
+    let result = (|| -> anyhow::Result<()> {
+        let cli = std::env::current_exe().context("resolve current executable")?;
+        let host_exe = crate::host_launcher::resolve_host_executable(&cli)?;
+        let host_state = crate::host_launcher::install(&host_exe, &home)?;
+        state.host_launcher = Some(host_state);
+        ai_handoff_core::install::state::save(&home, &state)?;
+        Ok(())
+    })();
+    Some(match result {
+        Ok(()) => "re-registered the on-demand host launcher".to_string(),
+        Err(error) => format!("host launcher repair FAILED: {error}"),
+    })
+}
+
+#[cfg(not(windows))]
+fn repair_host_launcher() -> Option<String> {
+    None
 }
 
 /// Mirror of the daemon's `ensure_runtime_dirs`, callable without a daemon.
@@ -398,4 +479,40 @@ fn codex_config_path(rec: &ai_handoff_core::install::PluginRecord) -> Option<Pat
     let marketplace = rec.marketplace_file.as_ref()?;
     let user_home = Path::new(marketplace).parent()?.parent()?.parent()?;
     Some(user_home.join(".codex").join("config.toml"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::host_launcher::LauncherInspection;
+
+    #[test]
+    fn host_launcher_repair_requires_a_managed_codex_install_and_broken_registration() {
+        let healthy = LauncherInspection {
+            recorded: true,
+            registered: true,
+            action_matches: Some(true),
+            executable_present: true,
+            error: None,
+        };
+        let missing = LauncherInspection {
+            recorded: true,
+            registered: false,
+            action_matches: None,
+            executable_present: false,
+            error: None,
+        };
+        let missing_executable = LauncherInspection {
+            recorded: true,
+            registered: true,
+            action_matches: Some(true),
+            executable_present: false,
+            error: None,
+        };
+
+        assert!(!host_launcher_needs_repair(&healthy, true));
+        assert!(host_launcher_needs_repair(&missing, true));
+        assert!(host_launcher_needs_repair(&missing_executable, true));
+        assert!(!host_launcher_needs_repair(&missing, false));
+    }
 }

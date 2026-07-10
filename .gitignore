@@ -12,6 +12,7 @@ node_modules/
 # Rust build artifacts (v2 cargo workspace)
 /target/
 **/target/
+/apps/desktop/src-tauri/binaries/
 
 # legacy/root-level Node test suite is not shipped in v2
 /tests/

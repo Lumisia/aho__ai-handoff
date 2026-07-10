@@ -8,6 +8,10 @@ license.workspace = true
 name = "ai-handoff"
 path = "src/main.rs"
 
+[[bin]]
+name = "ai-handoff-host"
+path = "src/host_main.rs"
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
@@ -21,6 +25,17 @@ ai-handoff-ipc = { path = "../ai-handoff-ipc" }
 ai-handoff-daemon = { path = "../ai-handoff-daemon" }
 ai-handoff-usage = { path = "../ai-handoff-usage" }
 ai-handoff-tui = { path = "../ai-handoff-tui" }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_System_TaskScheduler",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+] }
 
 [dev-dependencies]
 tempfile.workspace = true

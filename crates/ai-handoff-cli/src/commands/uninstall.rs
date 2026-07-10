@@ -13,6 +13,9 @@ use super::autostart::delete_autostart;
 
 pub use super::autostart::{delete_hkcu_run_argv, delete_task_argv};
 
+type HostLauncherRemover<'a> =
+    &'a mut dyn FnMut(Option<&state::HostLauncherState>) -> anyhow::Result<()>;
+
 /// What `ai-handoff uninstall` removes.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct UninstallOptions {
@@ -92,6 +95,33 @@ pub fn run_with_targets(
     out: &mut dyn Write,
     delete_task: bool,
 ) -> anyhow::Result<i32> {
+    let mut remove_host =
+        |host: Option<&state::HostLauncherState>| crate::host_launcher::remove(host);
+    let remove_host_launcher = if delete_task {
+        Some(&mut remove_host as HostLauncherRemover<'_>)
+    } else {
+        None
+    };
+    run_with_targets_impl(
+        targets,
+        opts,
+        cleanup_roots,
+        input,
+        out,
+        delete_task,
+        remove_host_launcher,
+    )
+}
+
+fn run_with_targets_impl(
+    targets: &InstallTargets,
+    opts: UninstallOptions,
+    cleanup_roots: &StaleCleanupRoots,
+    input: &mut dyn Read,
+    out: &mut dyn Write,
+    delete_task: bool,
+    mut remove_host_launcher: Option<HostLauncherRemover<'_>>,
+) -> anyhow::Result<i32> {
     if opts.keep_store && opts.purge_store {
         bail!("--keep-store and --purge-store cannot be used together");
     }
@@ -102,11 +132,17 @@ pub fn run_with_targets(
     let include_gui = opts.gui || opts.all;
 
     let st = state::load(&targets.home);
-    apply_uninstall(targets, &st)?;
-
+    if let Some(remove_host) = remove_host_launcher.as_mut() {
+        (**remove_host)(st.host_launcher.as_ref())?;
+    }
     if delete_task {
+        // Remove every OS launch source before stopping the live host so a
+        // logon task or Run entry cannot immediately start it again.
         delete_autostart(&st)?;
     }
+    remove_managed_host_binary(targets)?;
+    apply_uninstall(targets, &st)?;
+
     super::launcher::remove_aho_launcher(&st)?;
     let removed_leftovers =
         cleanup_stale_managed_paths_for_targets(targets, cleanup_roots, include_gui);
@@ -163,6 +199,44 @@ fn purge_file(path: &Path) -> std::io::Result<()> {
         std::fs::remove_file(path)?;
     }
     Ok(())
+}
+
+fn remove_managed_host_binary(targets: &InstallTargets) -> std::io::Result<()> {
+    let host = targets
+        .home
+        .join("bin")
+        .join(crate::host_launcher::host_executable_name());
+    remove_managed_host_binary_with(
+        &host,
+        || {
+            crate::host_runtime::signal_shutdown(&targets.home)
+                .map_err(|error| std::io::Error::other(error.to_string()))
+        },
+        |path| std::fs::remove_file(path),
+        std::thread::sleep,
+    )
+}
+
+fn remove_managed_host_binary_with(
+    host: &Path,
+    mut signal: impl FnMut() -> std::io::Result<bool>,
+    mut remove: impl FnMut(&Path) -> std::io::Result<()>,
+    mut wait: impl FnMut(std::time::Duration),
+) -> std::io::Result<()> {
+    let signalled = signal()?;
+    let attempts = if signalled { 80 } else { 1 };
+    for attempt in 0..attempts {
+        match remove(host) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) if attempt + 1 < attempts => {
+                wait(std::time::Duration::from_millis(25));
+                let _ = error;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("host removal loop always returns")
 }
 
 fn purge_local_data(targets: &InstallTargets) -> std::io::Result<()> {
@@ -398,6 +472,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn locked_host_is_signalled_then_retried_before_uninstall_continues() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = dir
+            .path()
+            .join(crate::host_launcher::host_executable_name());
+        std::fs::write(&host, b"host").unwrap();
+        let events = std::cell::RefCell::new(Vec::new());
+        let attempts = std::cell::Cell::new(0_u8);
+
+        remove_managed_host_binary_with(
+            &host,
+            || {
+                events.borrow_mut().push("signal");
+                Ok(true)
+            },
+            |path| {
+                assert_eq!(path, host);
+                events.borrow_mut().push("remove");
+                attempts.set(attempts.get() + 1);
+                if attempts.get() == 1 {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "simulated running executable lock",
+                    ))
+                } else {
+                    std::fs::remove_file(path)
+                }
+            },
+            |_| {},
+        )
+        .unwrap();
+
+        assert_eq!(&*events.borrow(), &["signal", "remove", "remove"]);
+        assert!(!host.exists());
+    }
+
+    #[test]
     fn delete_task_argv_targets_ai_handoff_task() {
         assert_eq!(
             delete_task_argv(),
@@ -494,6 +605,118 @@ mod tests {
         assert!(!ai_home.join("store").exists());
         let text = String::from_utf8(output).unwrap();
         assert!(text.contains("Local AI Handoff data purged."));
+    }
+
+    #[test]
+    fn keep_store_still_removes_recorded_host_launcher() {
+        let dir = tempfile::tempdir().unwrap();
+        let user_home = dir.path();
+        let ai_home = user_home.join("ai-home");
+        std::fs::create_dir_all(ai_home.join("store")).unwrap();
+        std::fs::write(ai_home.join("store/capsule.json"), "{}").unwrap();
+        let host_path = ai_home
+            .join("bin")
+            .join(crate::host_launcher::host_executable_name());
+        std::fs::create_dir_all(host_path.parent().unwrap()).unwrap();
+        std::fs::write(&host_path, b"host").unwrap();
+        let host = state::HostLauncherState {
+            kind: state::HostLauncherKind::WindowsTaskScheduler,
+            id: r"\AIHandoff\Daemon".into(),
+            artifact_paths: vec![host_path.to_string_lossy().into_owned()],
+        };
+        state::save(
+            &ai_home,
+            &state::InstallState {
+                host_launcher: Some(host.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let targets = targets_for(
+            user_home,
+            &ai_home,
+            &ai_home.join("ipc"),
+            std::path::Path::new("C:/p/ai-handoff.exe"),
+        );
+        let removed = std::cell::RefCell::new(None);
+        let mut remove_host = |state: Option<&state::HostLauncherState>| {
+            *removed.borrow_mut() = state.cloned();
+            Ok(())
+        };
+        let mut input: &[u8] = b"";
+        let mut output = Vec::new();
+
+        let code = run_with_targets_impl(
+            &targets,
+            UninstallOptions {
+                keep_store: true,
+                ..Default::default()
+            },
+            &StaleCleanupRoots::none(),
+            &mut input,
+            &mut output,
+            false,
+            Some(&mut remove_host),
+        )
+        .unwrap();
+
+        assert_eq!(code, 0);
+        assert_eq!(*removed.borrow(), Some(host));
+        assert!(!host_path.exists());
+        assert!(ai_home.join("store/capsule.json").exists());
+        assert!(!state::state_path(&ai_home).exists());
+    }
+
+    #[test]
+    fn host_launcher_removal_failure_preserves_install_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let user_home = dir.path();
+        let ai_home = user_home.join("ai-home");
+        let host_path = ai_home
+            .join("bin")
+            .join(crate::host_launcher::host_executable_name());
+        std::fs::create_dir_all(host_path.parent().unwrap()).unwrap();
+        std::fs::write(&host_path, b"host").unwrap();
+        let host = state::HostLauncherState {
+            kind: state::HostLauncherKind::WindowsTaskScheduler,
+            id: r"\AIHandoff\Daemon".into(),
+            artifact_paths: vec![host_path.to_string_lossy().into_owned()],
+        };
+        state::save(
+            &ai_home,
+            &state::InstallState {
+                host_launcher: Some(host),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let targets = targets_for(
+            user_home,
+            &ai_home,
+            &ai_home.join("ipc"),
+            std::path::Path::new("C:/p/ai-handoff.exe"),
+        );
+        let mut remove_host = |_state: Option<&state::HostLauncherState>| {
+            anyhow::bail!("simulated host removal failure")
+        };
+        let mut input: &[u8] = b"";
+        let mut output = Vec::new();
+
+        let error = run_with_targets_impl(
+            &targets,
+            UninstallOptions::default(),
+            &StaleCleanupRoots::none(),
+            &mut input,
+            &mut output,
+            false,
+            Some(&mut remove_host),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("simulated host removal failure"));
+        assert!(state::state_path(&ai_home).exists());
+        assert!(state::load(&ai_home).host_launcher.is_some());
+        assert!(host_path.exists());
     }
 
     #[test]

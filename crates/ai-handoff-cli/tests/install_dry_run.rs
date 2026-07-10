@@ -55,8 +55,13 @@ fn install_dry_run_prints_plan_and_writes_nothing() {
 
 #[test]
 fn scheduled_task_argv_contains_windows_task_contract() {
-    let argv = scheduled_task_argv("C:\\p\\ai-handoff.exe");
+    let argv = scheduled_task_argv(
+        std::path::Path::new("C:\\p\\ai-handoff-host.exe"),
+        std::path::Path::new("C:\\Users\\me\\.ai-handoff"),
+    );
     assert!(argv.contains(&"ONLOGON".to_string()));
     assert!(argv.contains(&"AI Handoff".to_string()));
-    assert!(argv.contains(&"\"C:\\p\\ai-handoff.exe\" daemon run".to_string()));
+    assert!(argv.contains(
+        &"\"C:\\p\\ai-handoff-host.exe\" --home \"C:\\Users\\me\\.ai-handoff\"".to_string()
+    ));
 }
