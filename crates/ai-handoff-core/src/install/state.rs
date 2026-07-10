@@ -73,6 +73,22 @@ pub struct LauncherState {
     pub path_dir_added: Option<String>,
 }
 
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HostLauncherKind {
+    WindowsTaskScheduler,
+    MacLaunchAgent,
+    LinuxSystemdUser,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct HostLauncherState {
+    pub kind: HostLauncherKind,
+    pub id: String,
+    #[serde(default)]
+    pub artifact_paths: Vec<String>,
+}
+
 impl AutostartState {
     pub fn new(kind: AutostartKind, name: impl Into<String>) -> Self {
         Self {
@@ -94,6 +110,8 @@ pub struct InstallState {
     pub scheduled_task: Option<String>,
     #[serde(default)]
     pub launcher: Option<LauncherState>,
+    #[serde(default)]
+    pub host_launcher: Option<HostLauncherState>,
 }
 
 impl Default for InstallState {
@@ -106,6 +124,7 @@ impl Default for InstallState {
             autostart: None,
             scheduled_task: None,
             launcher: None,
+            host_launcher: None,
         }
     }
 }
@@ -257,5 +276,35 @@ mod tests {
         };
         save(dir.path(), &st).unwrap();
         assert_eq!(load(dir.path()), st);
+    }
+
+    #[test]
+    fn roundtrips_windows_host_launcher_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let st = InstallState {
+            installed_at: "with-host-launcher".into(),
+            host_launcher: Some(HostLauncherState {
+                kind: HostLauncherKind::WindowsTaskScheduler,
+                id: r"\AIHandoff\Daemon".into(),
+                artifact_paths: Vec::new(),
+            }),
+            ..Default::default()
+        };
+
+        save(dir.path(), &st).unwrap();
+
+        assert_eq!(load(dir.path()), st);
+    }
+
+    #[test]
+    fn old_state_without_host_launcher_loads_as_none() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            state_path(dir.path()),
+            br#"{"version":1,"installed_at":"","codex":{},"claude":{}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(load(dir.path()).host_launcher, None);
     }
 }

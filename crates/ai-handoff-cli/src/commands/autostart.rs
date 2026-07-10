@@ -1,4 +1,4 @@
-use std::process::Stdio;
+use std::{path::Path, process::Stdio};
 
 use ai_handoff_core::install::state::{AutostartKind, AutostartState, InstallState};
 use anyhow::{bail, Context};
@@ -6,11 +6,11 @@ use anyhow::{bail, Context};
 pub const TASK_NAME: &str = "AI Handoff";
 pub const HKCU_RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
 
-pub fn daemon_command(exe: &str) -> String {
-    format!("\"{exe}\" daemon run")
+pub fn daemon_command(host: &Path, home: &Path) -> String {
+    format!("\"{}\" --home \"{}\"", host.display(), home.display())
 }
 
-pub fn scheduled_task_argv(exe: &str) -> Vec<String> {
+pub fn scheduled_task_argv(host: &Path, home: &Path) -> Vec<String> {
     vec![
         "/Create".into(),
         "/SC".into(),
@@ -18,14 +18,14 @@ pub fn scheduled_task_argv(exe: &str) -> Vec<String> {
         "/TN".into(),
         TASK_NAME.into(),
         "/TR".into(),
-        daemon_command(exe),
+        daemon_command(host, home),
         "/RL".into(),
         "LIMITED".into(),
         "/F".into(),
     ]
 }
 
-pub fn hkcu_run_argv(exe: &str) -> Vec<String> {
+pub fn hkcu_run_argv(host: &Path, home: &Path) -> Vec<String> {
     vec![
         "add".into(),
         HKCU_RUN_KEY.into(),
@@ -34,7 +34,7 @@ pub fn hkcu_run_argv(exe: &str) -> Vec<String> {
         "/t".into(),
         "REG_SZ".into(),
         "/d".into(),
-        daemon_command(exe),
+        daemon_command(host, home),
         "/f".into(),
     ]
 }
@@ -58,23 +58,24 @@ pub fn delete_hkcu_run_argv() -> Vec<String> {
     ]
 }
 
-pub fn register_autostart(exe: &str) -> anyhow::Result<AutostartState> {
-    let mut scheduled = |exe: &str| register_scheduled_task(exe);
-    let mut hkcu = |exe: &str| register_hkcu_run(exe);
-    register_autostart_with(exe, &mut scheduled, &mut hkcu)
+pub fn register_autostart(host: &Path, home: &Path) -> anyhow::Result<AutostartState> {
+    let mut scheduled = |host: &Path, home: &Path| register_scheduled_task(host, home);
+    let mut hkcu = |host: &Path, home: &Path| register_hkcu_run(host, home);
+    register_autostart_with(host, home, &mut scheduled, &mut hkcu)
 }
 
 pub fn register_autostart_with(
-    exe: &str,
-    scheduled: &mut dyn FnMut(&str) -> anyhow::Result<()>,
-    hkcu: &mut dyn FnMut(&str) -> anyhow::Result<()>,
+    host: &Path,
+    home: &Path,
+    scheduled: &mut dyn FnMut(&Path, &Path) -> anyhow::Result<()>,
+    hkcu: &mut dyn FnMut(&Path, &Path) -> anyhow::Result<()>,
 ) -> anyhow::Result<AutostartState> {
-    match scheduled(exe) {
+    match scheduled(host, home) {
         Ok(()) => Ok(AutostartState::new(
             AutostartKind::ScheduledTask,
             TASK_NAME,
         )),
-        Err(scheduled_error) => match hkcu(exe) {
+        Err(scheduled_error) => match hkcu(host, home) {
             Ok(()) => Ok(AutostartState::new(AutostartKind::HkcuRun, TASK_NAME)),
             Err(hkcu_error) => bail!(
                 "autostart registration failed; scheduled task: {scheduled_error}; HKCU Run: {hkcu_error}"
@@ -101,9 +102,9 @@ pub fn delete_autostart_state(autostart: &AutostartState) -> anyhow::Result<()> 
     }
 }
 
-fn register_scheduled_task(exe: &str) -> anyhow::Result<()> {
+fn register_scheduled_task(host: &Path, home: &Path) -> anyhow::Result<()> {
     let status = std::process::Command::new("schtasks")
-        .args(scheduled_task_argv(exe))
+        .args(scheduled_task_argv(host, home))
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
@@ -114,9 +115,9 @@ fn register_scheduled_task(exe: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn register_hkcu_run(exe: &str) -> anyhow::Result<()> {
+fn register_hkcu_run(host: &Path, home: &Path) -> anyhow::Result<()> {
     let status = std::process::Command::new("reg")
-        .args(hkcu_run_argv(exe))
+        .args(hkcu_run_argv(host, home))
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
@@ -191,11 +192,10 @@ fn set_autostart(enable: bool) -> anyhow::Result<i32> {
     let mut st = ai_handoff_core::install::state::load(&home);
 
     if enable {
-        let exe = std::env::current_exe()
-            .context("could not resolve the current executable for autostart")?
-            .to_string_lossy()
-            .into_owned();
-        let astate = register_autostart(&exe)?;
+        let cli = std::env::current_exe()
+            .context("could not resolve the current executable for autostart")?;
+        let host = crate::host_launcher::resolve_host_executable(&cli)?;
+        let astate = register_autostart(&host, &home)?;
         st.scheduled_task = if astate.kind == AutostartKind::ScheduledTask {
             Some(TASK_NAME.to_string())
         } else {
@@ -243,20 +243,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn scheduled_task_argv_quotes_exe_and_runs_daemon_on_logon() {
-        let argv = scheduled_task_argv("C:\\p\\ai-handoff.exe");
+    fn scheduled_task_argv_quotes_host_and_home_on_logon() {
+        let argv = scheduled_task_argv(
+            std::path::Path::new("C:\\p\\ai-handoff-host.exe"),
+            std::path::Path::new("C:\\Users\\me\\.ai-handoff"),
+        );
         assert!(argv.contains(&"ONLOGON".to_string()));
         assert!(argv.contains(&"AI Handoff".to_string()));
-        assert!(argv.contains(&"\"C:\\p\\ai-handoff.exe\" daemon run".to_string()));
+        assert!(argv.contains(
+            &"\"C:\\p\\ai-handoff-host.exe\" --home \"C:\\Users\\me\\.ai-handoff\"".to_string()
+        ));
     }
 
     #[test]
     fn hkcu_run_argv_writes_current_user_run_value() {
-        let argv = hkcu_run_argv("C:\\p\\ai-handoff.exe");
+        let argv = hkcu_run_argv(
+            std::path::Path::new("C:\\p\\ai-handoff-host.exe"),
+            std::path::Path::new("C:\\Users\\me\\.ai-handoff"),
+        );
         assert!(argv.contains(&"add".to_string()));
         assert!(argv.contains(&HKCU_RUN_KEY.to_string()));
         assert!(argv.contains(&"AI Handoff".to_string()));
-        assert!(argv.contains(&"\"C:\\p\\ai-handoff.exe\" daemon run".to_string()));
+        assert!(argv.contains(
+            &"\"C:\\p\\ai-handoff-host.exe\" --home \"C:\\Users\\me\\.ai-handoff\"".to_string()
+        ));
     }
 
     #[test]
@@ -279,16 +289,22 @@ mod tests {
     fn autostart_prefers_scheduled_task() {
         let mut scheduled_calls = 0;
         let mut hkcu_calls = 0;
-        let mut scheduled = |_exe: &str| {
+        let mut scheduled = |_host: &Path, _home: &Path| {
             scheduled_calls += 1;
             Ok(())
         };
-        let mut hkcu = |_exe: &str| {
+        let mut hkcu = |_host: &Path, _home: &Path| {
             hkcu_calls += 1;
             Ok(())
         };
 
-        let st = register_autostart_with("C:/p/ai-handoff.exe", &mut scheduled, &mut hkcu).unwrap();
+        let st = register_autostart_with(
+            Path::new("C:/p/ai-handoff-host.exe"),
+            Path::new("C:/home"),
+            &mut scheduled,
+            &mut hkcu,
+        )
+        .unwrap();
 
         assert_eq!(st.kind, AutostartKind::ScheduledTask);
         assert_eq!(scheduled_calls, 1);
@@ -297,14 +313,20 @@ mod tests {
 
     #[test]
     fn autostart_falls_back_to_hkcu_run() {
-        let mut scheduled = |_exe: &str| anyhow::bail!("access denied");
+        let mut scheduled = |_host: &Path, _home: &Path| anyhow::bail!("access denied");
         let mut hkcu_calls = 0;
-        let mut hkcu = |_exe: &str| {
+        let mut hkcu = |_host: &Path, _home: &Path| {
             hkcu_calls += 1;
             Ok(())
         };
 
-        let st = register_autostart_with("C:/p/ai-handoff.exe", &mut scheduled, &mut hkcu).unwrap();
+        let st = register_autostart_with(
+            Path::new("C:/p/ai-handoff-host.exe"),
+            Path::new("C:/home"),
+            &mut scheduled,
+            &mut hkcu,
+        )
+        .unwrap();
 
         assert_eq!(st.kind, AutostartKind::HkcuRun);
         assert_eq!(hkcu_calls, 1);
@@ -312,11 +334,16 @@ mod tests {
 
     #[test]
     fn autostart_returns_err_when_both_methods_fail() {
-        let mut scheduled = |_exe: &str| anyhow::bail!("access denied");
-        let mut hkcu = |_exe: &str| anyhow::bail!("registry denied");
+        let mut scheduled = |_host: &Path, _home: &Path| anyhow::bail!("access denied");
+        let mut hkcu = |_host: &Path, _home: &Path| anyhow::bail!("registry denied");
 
-        let err =
-            register_autostart_with("C:/p/ai-handoff.exe", &mut scheduled, &mut hkcu).unwrap_err();
+        let err = register_autostart_with(
+            Path::new("C:/p/ai-handoff-host.exe"),
+            Path::new("C:/home"),
+            &mut scheduled,
+            &mut hkcu,
+        )
+        .unwrap_err();
 
         assert!(err.to_string().contains("scheduled task"));
         assert!(err.to_string().contains("HKCU Run"));

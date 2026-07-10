@@ -4,18 +4,27 @@ use ai_handoff_core::{
     config::{self, CapsuleConfig, CapsuleFormat, Language},
 };
 
-use ai_handoff_ipc::{
-    client::{send, ClientConfig},
-    protocol::{ClientInfo, Request, Status, VERSION},
-};
+use ai_handoff_ipc::protocol::{ClientInfo, Request, Status, VERSION};
 use anyhow::{bail, Context};
 use chrono::{SecondsFormat, Utc};
 use serde_json::{json, Value};
 use std::io::{Read, Write};
-use std::time::Duration;
 
 const CAPSULE_FORMAT_FIELD: &str = "_ai_handoff_capsule_format";
+const EPISODE_ID_FIELD: &str = "_ai_handoff_episode_id";
 
+struct CheckpointRequestOptions {
+    message: Option<String>,
+    agent: Option<String>,
+    target: Option<String>,
+    episode: Option<String>,
+    requested_format: Option<CapsuleFormat>,
+    autostart_daemon: bool,
+}
+
+// This public bridge mirrors the independent clap fields. Internal processing
+// immediately groups them into `CheckpointRequestOptions`.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     action: Option<CheckpointAction>,
     format: Option<CheckpointFormatArg>,
@@ -23,6 +32,7 @@ pub fn run(
     message: Option<String>,
     agent: Option<String>,
     target: Option<String>,
+    episode: Option<String>,
     file: Option<std::path::PathBuf>,
 ) -> anyhow::Result<i32> {
     if action == Some(CheckpointAction::Guidance) {
@@ -56,13 +66,16 @@ pub fn run(
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     Ok(run_io_with_format(
-        message,
-        agent,
-        target,
+        CheckpointRequestOptions {
+            message,
+            agent,
+            target,
+            episode,
+            requested_format,
+            autostart_daemon: true,
+        },
         &raw_text,
         &mut out,
-        requested_format,
-        true,
     ))
 }
 
@@ -73,7 +86,18 @@ pub fn run_io(
     raw_text: &str,
     out: &mut dyn Write,
 ) -> i32 {
-    run_io_with_format(message, agent, target, raw_text, out, None, false)
+    run_io_with_format(
+        CheckpointRequestOptions {
+            message,
+            agent,
+            target,
+            episode: None,
+            requested_format: None,
+            autostart_daemon: false,
+        },
+        raw_text,
+        out,
+    )
 }
 
 pub fn run_io_with_autostart(
@@ -85,26 +109,25 @@ pub fn run_io_with_autostart(
     autostart_daemon: bool,
 ) -> i32 {
     run_io_with_format(
-        message,
-        agent,
-        target,
+        CheckpointRequestOptions {
+            message,
+            agent,
+            target,
+            episode: None,
+            requested_format: None,
+            autostart_daemon,
+        },
         raw_text,
         out,
-        None,
-        autostart_daemon,
     )
 }
 
 fn run_io_with_format(
-    message: Option<String>,
-    agent: Option<String>,
-    target: Option<String>,
+    options: CheckpointRequestOptions,
     raw_text: &str,
     out: &mut dyn Write,
-    requested_format: Option<CapsuleFormat>,
-    autostart_daemon: bool,
 ) -> i32 {
-    let input_json = match prepare_input(raw_text, requested_format) {
+    let input_json = match prepare_input(raw_text, options.requested_format) {
         Ok(value) => value,
         Err(error) => {
             let _ = writeln!(
@@ -122,7 +145,8 @@ fn run_io_with_format(
     let cwd = std::env::current_dir()
         .map(|path| path.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let message = message
+    let message = options
+        .message
         .or_else(|| {
             input_json
                 .get("message")
@@ -133,7 +157,8 @@ fn run_io_with_format(
     // Source agent sets the handoff direction. Precedence: --agent flag, then a
     // stdin `agent` field, then default codex. Normalize aliases to the values
     // the daemon's parse_agent accepts.
-    let agent = agent
+    let agent = options
+        .agent
         .or_else(|| {
             input_json
                 .get("agent")
@@ -144,13 +169,14 @@ fn run_io_with_format(
         .unwrap_or_else(|| "codex".to_string());
 
     let mut raw_hook_input = input_json;
+    attach_episode_id(&mut raw_hook_input, options.episode.as_deref());
     if let Some(obj) = raw_hook_input.as_object_mut() {
         obj.insert("cwd".to_string(), json!(cwd.clone()));
         obj.entry("message".to_string())
             .or_insert_with(|| json!(message.clone()));
         // --target beats a stdin `target` field; without either the capsule
         // stays open (no target) — the daemon never guesses a recipient.
-        if let Some(target) = &target {
+        if let Some(target) = &options.target {
             obj.insert("target".to_string(), json!(normalize_agent(target)));
         }
     }
@@ -173,21 +199,7 @@ fn run_io_with_format(
         },
     };
 
-    let mut resp = send(&req, &ClientConfig::default());
-    // Mirror the hook path: a checkpoint must not fail just because the daemon
-    // is not running yet — spawn it and retry once.
-    if autostart_daemon
-        && super::hook::daemon_unavailable(&resp)
-        && super::hook::start_daemon_logged()
-    {
-        resp = send(
-            &req,
-            &ClientConfig {
-                request_timeout: Duration::from_millis(2500),
-                ..ClientConfig::default()
-            },
-        );
-    }
+    let resp = crate::daemon_supply::send_with_supply(&req, options.autostart_daemon);
     if resp.status == Status::Ok {
         let text = serde_json::to_string(&resp.hook_stdout).unwrap_or_else(|_| "{}".to_string());
         let _ = writeln!(out, "{text}");
@@ -320,6 +332,15 @@ fn normalize_agent(value: &str) -> String {
     }
 }
 
+fn attach_episode_id(input: &mut Value, episode_id: Option<&str>) {
+    let Some(episode_id) = episode_id.map(str::trim).filter(|id| !id.is_empty()) else {
+        return;
+    };
+    if let Some(object) = input.as_object_mut() {
+        object.insert(EPISODE_ID_FIELD.to_string(), json!(episode_id));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,5 +415,14 @@ mod tests {
         let automatic = prepare_input(r#"{"goal":"legacy"}"#, None).unwrap();
         assert!(automatic.get("_ai_handoff_capsule_format").is_none());
         assert_eq!(automatic["goal"], "legacy");
+    }
+
+    #[test]
+    fn explicit_episode_id_is_attached_to_checkpoint_payload() {
+        let mut input = serde_json::json!({ "goal": "keep working" });
+
+        attach_episode_id(&mut input, Some("episode-123"));
+
+        assert_eq!(input["_ai_handoff_episode_id"], "episode-123");
     }
 }

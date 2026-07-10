@@ -1,12 +1,39 @@
 ; AI Handoff NSIS installer hooks.
 ;
-; Tauri's NSIS bundle creates a Start Menu shortcut named after the product
-; ("AI Handoff.lnk"), so the app is searchable by "AI Handoff". We add a second
-; top-level shortcut named "aho.lnk" pointing at the same executable so it is
-; also searchable by typing "aho". Removed again on uninstall.
+; The GUI package is self-contained: Tauri installs the CLI and native
+; background host sidecars in $INSTDIR, and this hook provisions their managed
+; copies under ~/.ai-handoff/bin. `ai-handoff install` then owns PATH, agent
+; hooks, and the demand-only host registration. Renaming before CopyFiles keeps
+; upgrades reliable even when the old host is finishing its idle period.
 
 !macro NSIS_HOOK_POSTINSTALL
   CreateShortcut "$SMPROGRAMS\aho.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
+
+  CreateDirectory "$PROFILE\.ai-handoff\bin"
+  Delete "$PROFILE\.ai-handoff\bin\ai-handoff.exe.old"
+  Delete "$PROFILE\.ai-handoff\bin\ai-handoff-host.exe.old"
+  Rename "$PROFILE\.ai-handoff\bin\ai-handoff.exe" "$PROFILE\.ai-handoff\bin\ai-handoff.exe.old"
+  Rename "$PROFILE\.ai-handoff\bin\ai-handoff-host.exe" "$PROFILE\.ai-handoff\bin\ai-handoff-host.exe.old"
+  CopyFiles /SILENT "$INSTDIR\ai-handoff.exe" "$PROFILE\.ai-handoff\bin\ai-handoff.exe"
+  CopyFiles /SILENT "$INSTDIR\ai-handoff-host.exe" "$PROFILE\.ai-handoff\bin\ai-handoff-host.exe"
+
+  nsExec::ExecToLog '"$PROFILE\.ai-handoff\bin\ai-handoff.exe" install --yes'
+  Pop $0
+  StrCmp $0 "0" ai_handoff_install_ok
+    MessageBox MB_ICONSTOP|MB_OK "AI Handoff CLI integration failed to install (exit code $0)."
+    Abort
+  ai_handoff_install_ok:
+!macroend
+
+!macro NSIS_HOOK_PREUNINSTALL
+  ; Remove the on-demand task and agent hooks before Tauri deletes the bundled
+  ; sidecars. Local capsule/store data is intentionally retained.
+  nsExec::ExecToLog '"$INSTDIR\ai-handoff.exe" uninstall --keep-store --yes'
+  Pop $0
+  StrCmp $0 "0" ai_handoff_uninstall_ok
+    MessageBox MB_ICONSTOP|MB_OK "AI Handoff CLI integration failed to uninstall (exit code $0). The GUI was kept so cleanup can be retried."
+    Abort
+  ai_handoff_uninstall_ok:
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL

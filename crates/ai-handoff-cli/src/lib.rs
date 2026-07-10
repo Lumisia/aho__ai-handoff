@@ -1,6 +1,9 @@
 use clap::{Parser, Subcommand, ValueEnum};
 
 pub mod commands;
+pub mod daemon_supply;
+pub mod host_launcher;
+pub mod host_runtime;
 
 #[derive(Debug, Parser)]
 #[command(name = "ai-handoff")]
@@ -21,6 +24,9 @@ pub enum Commands {
         action: DaemonAction,
         #[arg(long)]
         stay_alive: bool,
+        /// Override AI_HANDOFF_HOME for a host-managed daemon instance.
+        #[arg(long)]
+        home: Option<std::path::PathBuf>,
     },
     Doctor {
         #[arg(long)]
@@ -44,6 +50,9 @@ pub enum Commands {
         /// open capsule that any agent may pick up.
         #[arg(long)]
         target: Option<String>,
+        /// Checkpoint episode being committed after a five-hour prompt.
+        #[arg(long)]
+        episode: Option<String>,
         /// Read the JSON or Markdown capsule body from this file instead of
         /// stdin. Avoids native stdin quirks in shells such as PowerShell.
         #[arg(long)]
@@ -251,17 +260,24 @@ pub fn run_cli(cli: Cli) -> anyhow::Result<i32> {
     match cli.command {
         None | Some(Commands::Tui) => commands::tui::run(),
         Some(Commands::Hook { event, agent }) => commands::hook::run(&event, agent),
-        Some(Commands::Daemon { action, stay_alive }) => commands::daemon::run(action, stay_alive),
+        Some(Commands::Daemon {
+            action,
+            stay_alive,
+            home,
+        }) => commands::daemon::run(action, stay_alive, home.as_deref()),
         Some(Commands::Doctor { json, fix }) => commands::doctor::run(json, fix),
         Some(Commands::Checkpoint {
             action,
             message,
             agent,
             target,
+            episode,
             file,
             format,
             json,
-        }) => commands::checkpoint::run(action, format, json, message, agent, target, file),
+        }) => {
+            commands::checkpoint::run(action, format, json, message, agent, target, episode, file)
+        }
         Some(Commands::Handoff {
             agent,
             peek,
@@ -336,9 +352,34 @@ mod tests {
         let cli = Cli::try_parse_from(["ai-handoff", "daemon", "run", "--stay-alive"]).unwrap();
 
         match cli.command {
-            Some(Commands::Daemon { action, stay_alive }) => {
+            Some(Commands::Daemon {
+                action, stay_alive, ..
+            }) => {
                 assert_eq!(action, DaemonAction::Run);
                 assert!(stay_alive);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_daemon_run_home_override_for_host_launcher() {
+        let cli = Cli::try_parse_from([
+            "ai-handoff",
+            "daemon",
+            "run",
+            "--home",
+            r"C:\Users\me\.ai-handoff",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Some(Commands::Daemon { action, home, .. }) => {
+                assert_eq!(action, DaemonAction::Run);
+                assert_eq!(
+                    home,
+                    Some(std::path::PathBuf::from(r"C:\Users\me\.ai-handoff"))
+                );
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -732,6 +773,20 @@ mod tests {
             }) => {
                 assert_eq!(agent.as_deref(), Some("claude-code"));
                 assert!(json);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_checkpoint_episode_id() {
+        let cli =
+            Cli::try_parse_from(["ai-handoff", "checkpoint", "md", "--episode", "episode-123"])
+                .unwrap();
+
+        match cli.command {
+            Some(Commands::Checkpoint { episode, .. }) => {
+                assert_eq!(episode.as_deref(), Some("episode-123"));
             }
             other => panic!("unexpected command: {other:?}"),
         }

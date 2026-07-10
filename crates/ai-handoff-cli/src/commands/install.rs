@@ -18,10 +18,25 @@ type LauncherInstaller<'a> = &'a mut dyn FnMut(
     &std::path::Path,
     Option<&std::path::Path>,
 ) -> anyhow::Result<state::LauncherState>;
+type HostLauncherInstaller<'a> = &'a mut dyn FnMut(
+    &std::path::Path,
+    &std::path::Path,
+) -> anyhow::Result<state::HostLauncherState>;
+type HostLauncherRemover<'a> =
+    &'a mut dyn FnMut(Option<&state::HostLauncherState>) -> anyhow::Result<()>;
+type InstallApplier<'a> = &'a mut dyn FnMut(
+    &InstallTargets,
+    &AgentPresence,
+    &chrono::DateTime<chrono::Utc>,
+    bool,
+) -> anyhow::Result<state::InstallState>;
 
 struct InstallSideEffects<'a> {
     register_autostart: Option<AutostartRegistrar<'a>>,
     install_launcher: Option<LauncherInstaller<'a>>,
+    install_host_launcher: Option<HostLauncherInstaller<'a>>,
+    remove_host_launcher: Option<HostLauncherRemover<'a>>,
+    apply_install: Option<InstallApplier<'a>>,
 }
 
 pub fn run(
@@ -83,7 +98,10 @@ pub fn run_with_targets(
         }
     }
 
-    let mut register = |exe: &str| register_autostart(exe);
+    let mut register = |_exe: &str| {
+        let host = crate::host_launcher::resolve_host_executable(&targets.exe)?;
+        register_autostart(&host, &targets.home)
+    };
     let register = if autostart_enabled {
         Some(&mut register as AutostartRegistrar<'_>)
     } else {
@@ -95,6 +113,22 @@ pub fn run_with_targets(
         super::launcher::install_aho_launcher(home, gui)
     };
     let install_launcher = Some(&mut install_launcher as LauncherInstaller<'_>);
+    #[cfg(windows)]
+    let mut install_host = |exe: &std::path::Path, home: &std::path::Path| {
+        let host = crate::host_launcher::resolve_host_executable(exe)?;
+        crate::host_launcher::install(&host, home)
+    };
+    #[cfg(windows)]
+    let mut remove_host =
+        |state: Option<&state::HostLauncherState>| crate::host_launcher::remove(state);
+    #[cfg(windows)]
+    let install_host_launcher = Some(&mut install_host as HostLauncherInstaller<'_>);
+    #[cfg(windows)]
+    let remove_host_launcher = Some(&mut remove_host as HostLauncherRemover<'_>);
+    #[cfg(not(windows))]
+    let install_host_launcher: Option<HostLauncherInstaller<'_>> = None;
+    #[cfg(not(windows))]
+    let remove_host_launcher: Option<HostLauncherRemover<'_>> = None;
     run_with_targets_impl(
         targets,
         dry_run,
@@ -105,6 +139,9 @@ pub fn run_with_targets(
         InstallSideEffects {
             register_autostart: register,
             install_launcher,
+            install_host_launcher,
+            remove_host_launcher,
+            apply_install: None,
         },
         plugin,
     )
@@ -118,7 +155,7 @@ fn run_with_targets_impl(
     agents: Option<Vec<String>>,
     input: &mut dyn Read,
     out: &mut dyn Write,
-    side_effects: InstallSideEffects<'_>,
+    mut side_effects: InstallSideEffects<'_>,
     plugin: bool,
 ) -> anyhow::Result<i32> {
     let detected = detect_agents(targets);
@@ -149,18 +186,70 @@ fn run_with_targets_impl(
         return Ok(1);
     }
 
-    let autostart = if let Some(register) = side_effects.register_autostart {
-        Some(register(&targets.exe.to_string_lossy())?)
-    } else {
-        None
-    };
-    let launcher = if let Some(install_launcher) = side_effects.install_launcher {
-        Some(install_launcher(&targets.home, None)?)
+    let prior = state::load(&targets.home);
+    let had_host_launcher = prior.host_launcher.is_some();
+    let host_launcher = if selected.codex {
+        match side_effects.install_host_launcher.as_mut() {
+            Some(install) => match (**install)(&targets.exe, &targets.home) {
+                Ok(host) => Some(host),
+                Err(error) => {
+                    if let Err(cleanup) = rollback_host_launcher(
+                        &mut side_effects.remove_host_launcher,
+                        None,
+                        had_host_launcher,
+                    ) {
+                        return Err(error.context(format!(
+                            "host launcher install failed; orphan cleanup also failed: {cleanup}"
+                        )));
+                    }
+                    return Err(error);
+                }
+            },
+            None => None,
+        }
     } else {
         None
     };
 
-    let mut st = match apply_install(targets, &selected, now, plugin) {
+    let autostart = if let Some(register) = side_effects.register_autostart.as_mut() {
+        match (**register)(&targets.exe.to_string_lossy()) {
+            Ok(autostart) => Some(autostart),
+            Err(error) => {
+                rollback_host_launcher(
+                    &mut side_effects.remove_host_launcher,
+                    host_launcher.as_ref(),
+                    had_host_launcher,
+                )?;
+                return Err(error);
+            }
+        }
+    } else {
+        None
+    };
+    let launcher = if let Some(install_launcher) = side_effects.install_launcher.as_mut() {
+        match (**install_launcher)(&targets.home, None) {
+            Ok(launcher) => Some(launcher),
+            Err(error) => {
+                if let Some(autostart) = &autostart {
+                    let _ = delete_autostart_state(autostart);
+                }
+                rollback_host_launcher(
+                    &mut side_effects.remove_host_launcher,
+                    host_launcher.as_ref(),
+                    had_host_launcher,
+                )?;
+                return Err(error);
+            }
+        }
+    } else {
+        None
+    };
+
+    let apply_result = match side_effects.apply_install.as_mut() {
+        Some(apply) => (**apply)(targets, &selected, &now, plugin),
+        None => apply_install(targets, &selected, now, plugin),
+    };
+    let mut st = match apply_result {
         Ok(st) => st,
         Err(error) => {
             if let Some(autostart) = &autostart {
@@ -173,6 +262,15 @@ fn run_with_targets_impl(
                 };
                 let _ = super::launcher::remove_aho_launcher(&cleanup);
             }
+            if let Err(cleanup) = rollback_host_launcher(
+                &mut side_effects.remove_host_launcher,
+                host_launcher.as_ref(),
+                had_host_launcher,
+            ) {
+                return Err(error.context(format!(
+                    "install failed; host launcher rollback also failed: {cleanup}"
+                )));
+            }
             return Err(error);
         }
     };
@@ -183,7 +281,8 @@ fn run_with_targets_impl(
         st.autostart = Some(autostart.clone());
     }
     st.launcher = launcher;
-    if st.autostart.is_some() || st.launcher.is_some() {
+    st.host_launcher = host_launcher.or(prior.host_launcher);
+    if st.autostart.is_some() || st.launcher.is_some() || st.host_launcher.is_some() {
         state::save(&targets.home, &st)?;
     }
 
@@ -231,6 +330,20 @@ fn run_with_targets_impl(
         }
     }
     Ok(0)
+}
+
+fn rollback_host_launcher(
+    remover: &mut Option<HostLauncherRemover<'_>>,
+    state: Option<&state::HostLauncherState>,
+    had_prior: bool,
+) -> anyhow::Result<()> {
+    if had_prior {
+        return Ok(());
+    }
+    if let Some(remove) = remover.as_mut() {
+        (**remove)(state)?;
+    }
+    Ok(())
 }
 
 fn filter_agents(
@@ -321,6 +434,9 @@ mod tests {
             InstallSideEffects {
                 register_autostart: Some(&mut fail_register),
                 install_launcher: None,
+                install_host_launcher: None,
+                remove_host_launcher: None,
+                apply_install: None,
             },
             false,
         )
@@ -382,6 +498,9 @@ mod tests {
             InstallSideEffects {
                 register_autostart: Some(&mut register),
                 install_launcher: None,
+                install_host_launcher: None,
+                remove_host_launcher: None,
+                apply_install: None,
             },
             false,
         )
@@ -450,6 +569,9 @@ mod tests {
             InstallSideEffects {
                 register_autostart: Some(&mut register),
                 install_launcher: Some(&mut launcher),
+                install_host_launcher: None,
+                remove_host_launcher: None,
+                apply_install: None,
             },
             false,
         )
@@ -520,6 +642,9 @@ mod tests {
             InstallSideEffects {
                 register_autostart: None,
                 install_launcher: Some(&mut launcher),
+                install_host_launcher: None,
+                remove_host_launcher: None,
+                apply_install: None,
             },
             false,
         )
@@ -532,5 +657,122 @@ mod tests {
         assert!(st.launcher.is_some());
         let out = String::from_utf8(output).unwrap();
         assert!(out.contains("Autostart: disabled"));
+    }
+
+    #[test]
+    fn codex_install_records_host_launcher_when_autostart_is_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let user_home = dir.path();
+        std::fs::create_dir_all(user_home.join(".codex")).unwrap();
+        std::fs::write(
+            user_home.join(".codex/config.toml"),
+            "sandbox_mode = \"workspace-write\"\n",
+        )
+        .unwrap();
+        let ai_home = user_home.join("ai-home");
+        let targets = targets_for(
+            user_home,
+            &ai_home,
+            &ai_home.join("ipc"),
+            std::path::Path::new("C:/p/ai-handoff.exe"),
+        );
+        let expected = state::HostLauncherState {
+            kind: state::HostLauncherKind::WindowsTaskScheduler,
+            id: r"\AIHandoff\Daemon".into(),
+            artifact_paths: Vec::new(),
+        };
+        let mut installed = false;
+        let mut install_host = |exe: &std::path::Path, home: &std::path::Path| {
+            installed = true;
+            assert_eq!(exe, targets.exe);
+            assert_eq!(home, targets.home);
+            Ok(expected.clone())
+        };
+        let mut remove_host = |_state: Option<&state::HostLauncherState>| Ok(());
+        let mut input: &[u8] = b"";
+        let mut output = Vec::new();
+
+        let code = run_with_targets_impl(
+            &targets,
+            false,
+            true,
+            Some(vec!["codex".into()]),
+            &mut input,
+            &mut output,
+            InstallSideEffects {
+                register_autostart: None,
+                install_launcher: None,
+                install_host_launcher: Some(&mut install_host),
+                remove_host_launcher: Some(&mut remove_host),
+                apply_install: None,
+            },
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(code, 0);
+        assert!(installed);
+        let saved = state::load(&ai_home);
+        assert_eq!(saved.host_launcher, Some(expected));
+        assert!(saved.autostart.is_none());
+    }
+
+    #[test]
+    fn apply_install_failure_rolls_back_a_new_host_launcher() {
+        let dir = tempfile::tempdir().unwrap();
+        let user_home = dir.path();
+        std::fs::create_dir_all(user_home.join(".codex")).unwrap();
+        std::fs::write(
+            user_home.join(".codex/config.toml"),
+            "sandbox_mode = \"workspace-write\"\n",
+        )
+        .unwrap();
+        let ai_home = user_home.join("ai-home");
+        let targets = targets_for(
+            user_home,
+            &ai_home,
+            &ai_home.join("ipc"),
+            std::path::Path::new("C:/p/ai-handoff.exe"),
+        );
+        let host = state::HostLauncherState {
+            kind: state::HostLauncherKind::WindowsTaskScheduler,
+            id: r"\AIHandoff\Daemon".into(),
+            artifact_paths: Vec::new(),
+        };
+        let mut install_host = |_exe: &std::path::Path, _home: &std::path::Path| Ok(host.clone());
+        let removed = std::cell::RefCell::new(None);
+        let mut remove_host = |state: Option<&state::HostLauncherState>| {
+            *removed.borrow_mut() = state.cloned();
+            Ok(())
+        };
+        let mut fail_apply =
+            |_targets: &InstallTargets,
+             _selected: &AgentPresence,
+             _now: &chrono::DateTime<chrono::Utc>,
+             _plugin: bool| anyhow::bail!("simulated apply failure");
+        let mut input: &[u8] = b"";
+        let mut output = Vec::new();
+
+        let error = run_with_targets_impl(
+            &targets,
+            false,
+            true,
+            Some(vec!["codex".into()]),
+            &mut input,
+            &mut output,
+            InstallSideEffects {
+                register_autostart: None,
+                install_launcher: None,
+                install_host_launcher: Some(&mut install_host),
+                remove_host_launcher: Some(&mut remove_host),
+                apply_install: Some(&mut fail_apply),
+            },
+            false,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("simulated apply failure"));
+        assert_eq!(*removed.borrow(), Some(host));
+        assert!(!state::state_path(&ai_home).exists());
     }
 }

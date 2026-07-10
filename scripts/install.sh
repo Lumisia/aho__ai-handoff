@@ -90,10 +90,12 @@ esac
 if [ "$os_name" = "windows" ]; then
   ext="zip"
   exe_name="ai-handoff.exe"
+  host_name="ai-handoff-host.exe"
   need unzip
 else
   ext="tar.gz"
   exe_name="ai-handoff"
+  host_name="ai-handoff-host"
   need tar
 fi
 
@@ -197,12 +199,21 @@ found="$(find "$tmp_dir" -type f -name "$exe_name" | head -n 1)"
   echo "artifact did not contain $exe_name" >&2
   exit 1
 }
+host_found="$(find "$tmp_dir" -type f -name "$host_name" | head -n 1)"
+[ -n "$host_found" ] || {
+  echo "artifact did not contain $host_name" >&2
+  exit 1
+}
 
 dest="$bin_dir/$exe_name"
+host_dest="$bin_dir/$host_name"
 cp "$found" "$dest"
+cp "$host_found" "$host_dest"
 chmod +x "$dest" 2>/dev/null || true
+chmod +x "$host_dest" 2>/dev/null || true
 
 echo "Installed $dest"
+echo "Installed $host_dest"
 echo "Running ai-handoff install"
 
 # shellcheck disable=SC2086

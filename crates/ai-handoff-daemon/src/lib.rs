@@ -1,3 +1,4 @@
+pub mod checkpoint_episode;
 pub mod dedupe;
 pub mod router;
 pub mod store;

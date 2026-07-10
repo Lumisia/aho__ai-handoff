@@ -12,7 +12,8 @@ const EVENT_ARGS: [&str; 4] = ["session-start", "user-prompt", "post-tool-use", 
 ///    with `_aiHandoff == true` (those are "foreign" entries we preserve).
 /// 3. Appends exactly one new outer entry containing our managed inner hook in exec form.
 ///
-/// PostToolUse additionally carries `"matcher": "Write|Edit|Bash"` on the outer entry.
+/// PostToolUse additionally carries `"matcher": "Write|Edit|Bash|AskUserQuestion"`
+/// so the selected checkpoint decision returns through the same lifecycle hook.
 ///
 /// Returns `Ok((pretty_json, managed_event_names))`, or a parse error when
 /// `existing` contains invalid JSON (caller should abort; the backup is the
@@ -69,7 +70,7 @@ pub fn apply(existing: Option<&str>, exe: &str) -> serde_json::Result<(String, V
         // Build the outer entry (PostToolUse gets a matcher).
         let our_entry = if *event == "PostToolUse" {
             json!({
-                "matcher": "Write|Edit|Bash",
+                "matcher": "Write|Edit|Bash|AskUserQuestion",
                 "hooks": [inner_hook]
             })
         } else {
@@ -199,7 +200,10 @@ mod tests {
     fn post_tool_use_has_matcher() {
         let (json_str, _) = apply(None, "C:\\p\\ai-handoff.exe").unwrap();
         let v: Value = serde_json::from_str(&json_str).unwrap();
-        assert_eq!(v["hooks"]["PostToolUse"][0]["matcher"], "Write|Edit|Bash");
+        assert_eq!(
+            v["hooks"]["PostToolUse"][0]["matcher"],
+            "Write|Edit|Bash|AskUserQuestion"
+        );
         // Other events should NOT have matcher
         assert!(v["hooks"]["Stop"][0].get("matcher").is_none());
         assert!(v["hooks"]["SessionStart"][0].get("matcher").is_none());
