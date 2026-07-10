@@ -1036,9 +1036,9 @@ fn tokens_to_usage(tokens: Tokens) -> UsageTokens {
 
 fn account_report(force: bool) -> AccountReport {
     let (codex_status, codex_source) =
-        agent_status_resolved(Agent::Codex, account::codex_status(), force);
+        agent_status_resolved(Agent::Codex, account::display_status(Agent::Codex), force);
     let (claude_status, claude_source) =
-        agent_status_resolved(Agent::Claude, account::claude_status(), force);
+        agent_status_resolved(Agent::Claude, account::display_status(Agent::Claude), force);
     AccountReport {
         codex: account_agent_report(Agent::Codex, codex_status, codex_source),
         claude: account_agent_report(Agent::Claude, claude_status, claude_source),
@@ -2524,6 +2524,40 @@ mod tests {
         std::env::remove_var("CODEX_HOME");
     }
 
+    #[test]
+    fn account_report_withholds_local_windows_without_active_slot() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let codex_home = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        std::env::set_var("CODEX_HOME", codex_home.path());
+        let sessions = codex_home.path().join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(
+            sessions.join("rollout-test.jsonl"),
+            serde_json::json!({
+                "timestamp": "2026-06-26T16:58:48Z",
+                "payload": { "rate_limits": {
+                    "primary": { "used_percent": 23.0, "window_minutes": 300 },
+                    "secondary": { "used_percent": 50.0, "window_minutes": 10080 },
+                    "plan_type": "pro"
+                }}
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let report = account_report(false);
+
+        assert!(report.codex.active.is_none());
+        assert!(report.codex.slots.is_empty());
+        assert!(report.codex.five_hour.is_none());
+        assert!(report.codex.weekly.is_none());
+        assert_eq!(report.codex.usage_source, "none");
+
+        std::env::remove_var("AI_HANDOFF_HOME");
+        std::env::remove_var("CODEX_HOME");
+    }
     #[test]
     fn remote_refresh_requires_force_and_active_slot() {
         let _guard = ENV_LOCK.lock().unwrap();

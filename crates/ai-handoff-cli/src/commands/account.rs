@@ -61,27 +61,45 @@ fn list(json: bool) -> anyhow::Result<i32> {
 }
 
 fn status(json: bool, fetch: bool) -> anyhow::Result<i32> {
-    let codex = (account::codex_identity(), account::codex_status());
-    let claude_id = account::claude_identity();
-    let claude_status = if fetch {
-        claude_fetched_status(claude_id.as_ref()).or_else(account::claude_status)
-    } else {
-        account::claude_status()
-    };
-    let claude = (claude_id, claude_status);
+    let codex = display_account_status(Agent::Codex, false);
+    let claude = display_account_status(Agent::Claude, fetch);
     if json {
         let payload = serde_json::json!({
-            "codex": status_json(codex.0.as_ref(), codex.1.as_ref()),
-            "claude": status_json(claude.0.as_ref(), claude.1.as_ref()),
+            "codex": status_json(codex.1.as_ref(), codex.2.as_ref()),
+            "claude": status_json(claude.1.as_ref(), claude.2.as_ref()),
         });
         println!("{}", serde_json::to_string_pretty(&payload)?);
         return Ok(0);
     }
-    print_status("Codex", codex.0.as_ref(), codex.1.as_ref());
-    print_status("Claude", claude.0.as_ref(), claude.1.as_ref());
+    print_display_status("Codex", codex);
+    print_display_status("Claude", claude);
     Ok(0)
 }
 
+fn display_account_status(
+    agent: Agent,
+    fetch: bool,
+) -> (bool, Option<Identity>, Option<AccountStatus>) {
+    if !account::has_active_slot(agent) {
+        return (false, None, None);
+    }
+    match agent {
+        Agent::Codex => (
+            true,
+            account::codex_identity(),
+            account::display_status(agent),
+        ),
+        Agent::Claude => {
+            let id = account::claude_identity();
+            let status = if fetch {
+                claude_fetched_status(id.as_ref()).or_else(|| account::display_status(agent))
+            } else {
+                account::display_status(agent)
+            };
+            (true, id, status)
+        }
+    }
+}
 fn claude_fetched_status(id: Option<&Identity>) -> Option<AccountStatus> {
     let slots = account::list_slots(Agent::Claude);
     let selected = select_status_slot(&slots, id)?;
@@ -190,6 +208,13 @@ fn plan(id: Option<&Identity>, st: Option<&AccountStatus>) -> String {
         .unwrap_or_else(|| "unknown".into())
 }
 
+fn print_display_status(name: &str, data: (bool, Option<Identity>, Option<AccountStatus>)) {
+    if !data.0 {
+        println!("{name}: no added active account (add one first)");
+        return;
+    }
+    print_status(name, data.1.as_ref(), data.2.as_ref());
+}
 fn print_status(name: &str, id: Option<&Identity>, st: Option<&AccountStatus>) {
     let email = id
         .and_then(|i| i.email.as_deref())

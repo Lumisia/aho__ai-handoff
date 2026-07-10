@@ -7,7 +7,13 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 pub fn save_capsule(c: &Capsule) -> std::io::Result<PathBuf> {
-    let format = config::load().capsule.format;
+    save_capsule_with_format(c, config::load().capsule.format)
+}
+
+pub fn save_capsule_with_format(
+    c: &Capsule,
+    format: config::CapsuleFormat,
+) -> std::io::Result<PathBuf> {
     ai_handoff_core::secure_fs::ensure_private_dir(&paths::store_dir())?;
     let path =
         capsule_codec::capsule_path(&paths::project_dir(&c.project_id), &c.capsule_id, format);
@@ -637,6 +643,26 @@ mod tests {
         let updated = ai_handoff_core::capsule_codec::read_capsule(&path).unwrap();
         assert_eq!(updated.consumption.state, ConsumptionState::Consumed);
 
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn save_capsule_with_explicit_format_ignores_config_default() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+
+        let path = save_capsule_with_format(
+            &capsule("explicit-md", "2026-06-25T12:00:00Z", None),
+            config::CapsuleFormat::Md,
+        )
+        .unwrap();
+
+        assert_eq!(path.extension().and_then(|ext| ext.to_str()), Some("md"));
+        assert_eq!(
+            capsule_codec::read_capsule(&path).unwrap().capsule_id,
+            "explicit-md"
+        );
         std::env::remove_var("AI_HANDOFF_HOME");
     }
 }

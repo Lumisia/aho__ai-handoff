@@ -1,7 +1,8 @@
 use crate::{
     dedupe::{dedupe_key, Deduper},
     store::{
-        find_pending, list_pending, mark_consumed, pending_for, save_capsule, save_project_label,
+        find_pending, list_pending, mark_consumed, pending_for, save_capsule,
+        save_capsule_with_format, save_project_label,
     },
     trigger_mark,
 };
@@ -153,8 +154,9 @@ impl Handler for Router {
             HookEventKind::SessionStart | HookEventKind::UserPromptSubmit => {
                 // A pending capsule is only announced, never consumed here —
                 // consumption is explicit via `ai-handoff handoff` (/handoff).
-                if let Some(capsule) =
-                    find_pending(&project_id, normalized.agent.as_canonical_str())
+                if let Some(capsule) = pending_for(&project_id, normalized.agent.as_canonical_str())
+                    .into_iter()
+                    .find(|capsule| !same_session(capsule, &normalized.session_id))
                 {
                     let mark = session_mark_key("notice", &req.agent, &normalized, &project_id);
                     if !self.mark_seen(&mark) {
@@ -478,7 +480,10 @@ fn handle_checkpoint(req: &ai_handoff_ipc::protocol::Request) -> Response {
     capsule.created_at = now.to_rfc3339_opts(SecondsFormat::Secs, true);
 
     let _ = save_project_label(&project_id, &cwd);
-    match save_capsule(&capsule) {
+    let save_result = checkpoint_format_override(&raw)
+        .map(|format| save_capsule_with_format(&capsule, format))
+        .unwrap_or_else(|| save_capsule(&capsule));
+    match save_result {
         Ok(path) => Router::ok(
             req,
             json!({ "saved": true, "path": path.to_string_lossy() }),
@@ -491,6 +496,18 @@ fn handle_checkpoint(req: &ai_handoff_ipc::protocol::Request) -> Response {
             ));
             degraded(&req.request_id, store_error_reason(&error))
         }
+    }
+}
+
+fn checkpoint_format_override(raw: &Value) -> Option<config::CapsuleFormat> {
+    match raw
+        .get("_ai_handoff_capsule_format")
+        .and_then(Value::as_str)
+        .map(str::trim)
+    {
+        Some("md") => Some(config::CapsuleFormat::Md),
+        Some("json") => Some(config::CapsuleFormat::Json),
+        _ => None,
     }
 }
 
@@ -742,9 +759,10 @@ fn session_mark_key(
 }
 
 fn agent_cli_name(agent: &str) -> &str {
-    match agent {
-        "claude" | "claude-code" => "claude-code",
-        _ => "codex",
+    match agent.trim() {
+        "claude" | "claude-code" | "claude_code" | "claudecode" => "claude-code",
+        "" => "codex",
+        other => other,
     }
 }
 
@@ -773,7 +791,7 @@ fn render_trigger_context(
         "[ai-handoff] Five-hour usage {used_percent:.0}% reached the configured threshold {threshold:.0}%."
     );
     let checkpoint_steps = format!(
-        "Write a small JSON file summarizing the CURRENT work (fields: goal, done[], remaining[], risks[], next_prompt), then run:\n  ai-handoff checkpoint --agent {agent} --file <path-to.json>\nAfter the checkpoint succeeds, resume the interrupted work exactly where it stopped."
+        "First run:\n  ai-handoff checkpoint guidance --agent {agent} --json\nUse the returned input_format, language, limits, input_template, and command to write and save a checkpoint of the CURRENT work. After the checkpoint succeeds, resume the interrupted work exactly where it stopped."
     );
     match action {
         TriggerAction::Create => format!(
@@ -1629,6 +1647,47 @@ mod tests {
     }
 
     #[test]
+    fn session_start_suppresses_pending_notice_for_own_session_capsule() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        let project_id = fingerprint(cwd.path());
+        let mut capsule = pending_capsule(&project_id);
+        capsule.source_agent = "claude-code".into();
+        capsule.target_agent = None;
+        capsule.session.session_id = Some("s-own".into());
+        crate::store::save_capsule(&capsule).unwrap();
+
+        let router = Router::new();
+        let own = request(
+            "turn-own-notice",
+            "session-start",
+            "claude-code",
+            cwd.path(),
+            json!({ "cwd": cwd.path().to_string_lossy(), "session_id": "s-own" }),
+        );
+        let resp = router.handle(&own);
+        assert_eq!(resp.status, Status::Ok);
+        assert_eq!(resp.hook_stdout, json!({}));
+        assert!(crate::store::find_pending(&project_id, "claude-code").is_some());
+
+        let other = request(
+            "turn-other-notice",
+            "session-start",
+            "claude-code",
+            cwd.path(),
+            json!({ "cwd": cwd.path().to_string_lossy(), "session_id": "s-other" }),
+        );
+        let resp2 = router.handle(&other);
+        assert!(resp2.hook_stdout["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+            .contains("continue router"));
+
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+    #[test]
     fn handoff_consume_marks_consumed_and_returns_context() {
         let _guard = env_lock();
         let home = tempfile::tempdir().unwrap();
@@ -2100,7 +2159,7 @@ mod tests {
         assert!(context.contains("네"));
         assert!(context.contains("아니오"));
         assert!(context.contains("기타"));
-        assert!(context.contains("ai-handoff checkpoint --agent claude-code"));
+        assert!(context.contains("ai-handoff checkpoint guidance --agent claude-code --json"));
         assert!(context.contains("resume the interrupted work"));
         assert_eq!(resp.diagnostics["trigger_fired"], true);
         assert_eq!(resp.diagnostics["trigger_suppressed"], false);
@@ -2427,7 +2486,7 @@ mod tests {
         // rides in the block reason instead.
         let reason = resp.hook_stdout["reason"].as_str().unwrap();
         assert!(reason.contains("AskUserQuestion"));
-        assert!(reason.contains("ai-handoff checkpoint --agent claude-code"));
+        assert!(reason.contains("ai-handoff checkpoint guidance --agent claude-code --json"));
         assert!(resp.hook_stdout.get("hookSpecificOutput").is_none());
 
         // A Stop that ships a capsule skips the trigger entirely.
@@ -2481,7 +2540,7 @@ mod tests {
             .as_str()
             .expect("trigger context");
         assert!(context.contains("without asking"));
-        assert!(context.contains("ai-handoff checkpoint --agent claude-code"));
+        assert!(context.contains("ai-handoff checkpoint guidance --agent claude-code --json"));
         std::env::remove_var("AI_HANDOFF_HOME");
     }
 
@@ -2540,5 +2599,82 @@ mod tests {
             .count();
         assert_eq!(count, 1);
         std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn checkpoint_request_format_override_controls_saved_extension() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+
+        let mut markdown = request(
+            "checkpoint-md",
+            "checkpoint",
+            "codex",
+            cwd.path(),
+            json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "goal": "markdown capsule",
+                "_ai_handoff_capsule_format": "md"
+            }),
+        );
+        markdown.kind = "checkpoint".into();
+        let markdown_response = Router::new().handle(&markdown);
+        assert_eq!(markdown_response.status, Status::Ok);
+        assert!(markdown_response.hook_stdout["path"]
+            .as_str()
+            .unwrap()
+            .ends_with(".md"));
+
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[capsule]\nformat = \"md\"\n",
+        )
+        .unwrap();
+        let mut json_request = request(
+            "checkpoint-json",
+            "checkpoint",
+            "claude-code",
+            cwd.path(),
+            json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "goal": "json capsule",
+                "_ai_handoff_capsule_format": "json"
+            }),
+        );
+        json_request.kind = "checkpoint".into();
+        let json_response = Router::new().handle(&json_request);
+        assert_eq!(json_response.status, Status::Ok);
+        assert!(json_response.hook_stdout["path"]
+            .as_str()
+            .unwrap()
+            .ends_with(".json"));
+
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn trigger_context_resolves_checkpoint_guidance_for_each_agent() {
+        for (agent, canonical) in [
+            ("claude-code", "claude-code"),
+            ("codex", "codex"),
+            ("gemini", "gemini"),
+        ] {
+            let context = render_trigger_context(
+                TriggerAction::Create,
+                90.0,
+                85.0,
+                agent,
+                config::Language::Ko,
+            );
+
+            assert!(context.contains(&format!(
+                "ai-handoff checkpoint guidance --agent {canonical} --json"
+            )));
+            assert!(context.contains("input_template"));
+            assert!(context.contains("limits"));
+            assert!(!context.contains("Write a small JSON file"));
+        }
     }
 }

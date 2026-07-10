@@ -504,6 +504,31 @@ pub fn claude_status() -> Option<AccountStatus> {
 }
 
 // ---------------------------------------------------------------------------
+// Display-gated usage
+// ---------------------------------------------------------------------------
+
+/// True when this agent has a saved slot matching the current live credential.
+pub fn has_active_slot(agent: Agent) -> bool {
+    list_slots(agent).iter().any(|slot| slot.active)
+}
+
+/// Local usage status for display surfaces only.
+///
+/// Ambient CLI rollout/statusline samples belong to the current machine login,
+/// not necessarily to an account the user added to ai-handoff. Withhold them
+/// until a saved slot matches the live credential. Daemon handoff triggers keep
+/// using the raw status readers because they are intentionally live-session
+/// scoped.
+pub fn display_status(agent: Agent) -> Option<AccountStatus> {
+    if !has_active_slot(agent) {
+        return None;
+    }
+    match agent {
+        Agent::Codex => codex_status(),
+        Agent::Claude => claude_status(),
+    }
+}
+// ---------------------------------------------------------------------------
 // Credential vault (per-account slot dirs: metadata + credential)
 //
 // Layout: <AI_HANDOFF_HOME>/accounts/<agent>/<label>/{account.json, <cred>}
@@ -1162,6 +1187,54 @@ mod tests {
         assert!(parse_rate_limits(&line).is_none());
     }
 
+    fn write_codex_rollout(codex_home: &Path) {
+        let sessions = codex_home.join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(
+            sessions.join("rollout-test.jsonl"),
+            serde_json::json!({
+                "timestamp": "2026-06-26T16:58:48Z",
+                "payload": { "rate_limits": {
+                    "primary": { "used_percent": 23.0, "window_minutes": 300 },
+                    "secondary": { "used_percent": 50.0, "window_minutes": 10080 },
+                    "plan_type": "pro"
+                }}
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn display_status_requires_active_slot() {
+        let _guard = crate::test_support::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let codex_home = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        std::env::set_var("CODEX_HOME", codex_home.path());
+        write_codex_rollout(codex_home.path());
+
+        assert!(codex_status().is_some(), "raw rollout sample exists");
+        assert!(!has_active_slot(Agent::Codex));
+        assert!(display_status(Agent::Codex).is_none());
+
+        let live = codex_home.path().join("auth.json");
+        let credential =
+            br#"{"tokens":{"id_token":"x","account_id":"work","access_token":"secret"}}"#;
+        std::fs::write(&live, credential).unwrap();
+        save_slot(Agent::Codex, credential, None, "test").unwrap();
+
+        assert!(has_active_slot(Agent::Codex));
+        assert_eq!(
+            display_status(Agent::Codex)
+                .and_then(|status| status.five_hour)
+                .map(|window| window.used_percent),
+            Some(23.0)
+        );
+
+        std::env::remove_var("AI_HANDOFF_HOME");
+        std::env::remove_var("CODEX_HOME");
+    }
     #[test]
     fn claude_status_maps_statusline_seven_day_to_weekly() {
         let _guard = crate::test_support::env_lock();

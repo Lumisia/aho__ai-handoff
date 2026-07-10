@@ -26,6 +26,7 @@ const labels: Record<Language, Record<string, string>> = {
     autostart: "Autostart",
     agentLimits: "Agent limits",
     agentLimitsHelp: "Current local samples for five-hour and weekly windows.",
+    limitsNeedAccount: "Add an account to show limits.",
     systemStatus: "System status",
     weekly: "weekly",
     attention: "attention",

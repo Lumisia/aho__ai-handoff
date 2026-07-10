@@ -451,11 +451,11 @@ impl AccountData {
     fn load_live() -> Self {
         AccountData {
             codex: AgentAccount {
-                status: account::codex_status(),
+                status: account::display_status(Agent::Codex),
                 slots: account::list_slots(Agent::Codex),
             },
             claude: AgentAccount {
-                status: account::claude_status(),
+                status: account::display_status(Agent::Claude),
                 slots: account::list_slots(Agent::Claude),
             },
         }

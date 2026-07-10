@@ -3,6 +3,7 @@ pub mod account;
 pub mod account_api;
 pub mod capsule;
 pub mod capsule_codec;
+pub mod checkpoint_input;
 pub mod config;
 pub mod dashboard;
 pub mod fingerprint;

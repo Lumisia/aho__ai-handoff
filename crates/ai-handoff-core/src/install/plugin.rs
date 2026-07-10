@@ -603,4 +603,27 @@ mod tests {
     fn remove_marketplace_errors_on_malformed_json() {
         assert!(remove_marketplace_entry("{ not json").is_err());
     }
+
+    #[test]
+    fn checkpoint_skill_uses_guidance_for_claude_and_codex_bundles() {
+        for agent in [AgentKind::ClaudeCode, AgentKind::Codex] {
+            let dir = tempfile::tempdir().unwrap();
+            generate_bundle(agent, "C:\\tools\\ai-handoff.exe", dir.path()).unwrap();
+            let skill = read(dir.path(), "skills/handoff-checkpoint/SKILL.md");
+
+            assert!(skill.contains("ai-handoff checkpoint guidance --agent <self> --json"));
+            assert!(skill.contains("/handoff checkpoint md"));
+            assert!(skill.contains("/handoff checkpoint json"));
+            for field in [
+                "language",
+                "limits",
+                "input_format",
+                "input_template",
+                "command",
+            ] {
+                assert!(skill.contains(field), "missing guidance field {field}");
+            }
+            assert!(!skill.contains("config get capsule.language"));
+        }
+    }
 }

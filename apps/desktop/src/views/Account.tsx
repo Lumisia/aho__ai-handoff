@@ -153,14 +153,16 @@ function AgentPanel({
         </div>
       </div>
 
-      <div className="account-limit-stack">
-        <LimitBar agent={agent} label="5h" value={displayFiveHour} t={t} />
-        <LimitBar agent={agent} label={t("weekly")} value={displayWeekly} t={t} />
-        <ResetCreditsBlock usage={activeUsage} t={t} />
-      </div>
+      {activeSlot && (
+        <div className="account-limit-stack">
+          <LimitBar agent={agent} label="5h" value={displayFiveHour} t={t} />
+          <LimitBar agent={agent} label={t("weekly")} value={displayWeekly} t={t} />
+          <ResetCreditsBlock usage={activeUsage} t={t} />
+        </div>
+      )}
 
       {message && <div className="banner">{message}</div>}
-      {data.usage_source === "none" && <div className="empty">{t("noSampleHint")}</div>}
+      {activeSlot && data.usage_source === "none" && <div className="empty">{t("noSampleHint")}</div>}
 
       <div className="slot-list">
         {data.slots.length === 0 && <div className="empty">{t("noActiveSlot")}</div>}

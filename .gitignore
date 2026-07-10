@@ -22,6 +22,7 @@ apps/desktop/src-tauri/gen/
 
 # local runtime store + generated reports (per-machine, not source)
 .ai-handoff-store/
+.ah-debug-*/
 ai-handoff-hooks-report.md
 
 # local investigation scratch clones

@@ -100,6 +100,9 @@ export default function Overview({ snapshot, t }: { snapshot: DashboardSnapshot;
     snapshot.store,
   ];
   const issueCount = topRows.filter((row) => row.status !== "ok").length;
+  const claudeLimitsVisible = Boolean(accounts?.claude.active);
+  const codexLimitsVisible = Boolean(accounts?.codex.active);
+  const anyLimitsVisible = claudeLimitsVisible || codexLimitsVisible;
 
   return (
     <div className="overview-view">
@@ -109,11 +112,12 @@ export default function Overview({ snapshot, t }: { snapshot: DashboardSnapshot;
           <span>{t("agentLimitsHelp")}</span>
         </div>
         {loadingAccounts && <div className="overview-inline-loading">{t("loadingAccounts")}</div>}
+        {!loadingAccounts && !anyLimitsVisible && <div className="overview-inline-loading">{t("limitsNeedAccount")}</div>}
         <div className="overview-limits">
-          <LimitBar agent="claude" label={`${t("claude")} 5h`} value={accounts?.claude.five_hour} t={t} />
-          <LimitBar agent="claude" label={`${t("claude")} ${t("weekly")}`} value={accounts?.claude.weekly} t={t} />
-          <LimitBar agent="codex" label={`${t("codex")} 5h`} value={accounts?.codex.five_hour} t={t} />
-          <LimitBar agent="codex" label={`${t("codex")} ${t("weekly")}`} value={accounts?.codex.weekly} t={t} />
+          {claudeLimitsVisible && <LimitBar agent="claude" label={`${t("claude")} 5h`} value={accounts?.claude.five_hour} t={t} />}
+          {claudeLimitsVisible && <LimitBar agent="claude" label={`${t("claude")} ${t("weekly")}`} value={accounts?.claude.weekly} t={t} />}
+          {codexLimitsVisible && <LimitBar agent="codex" label={`${t("codex")} 5h`} value={accounts?.codex.five_hour} t={t} />}
+          {codexLimitsVisible && <LimitBar agent="codex" label={`${t("codex")} ${t("weekly")}`} value={accounts?.codex.weekly} t={t} />}
         </div>
       </section>
       <section className="overview-section">

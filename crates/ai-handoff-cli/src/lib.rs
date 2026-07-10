@@ -31,6 +31,9 @@ pub enum Commands {
         fix: bool,
     },
     Checkpoint {
+        /// Draft format (md or json), or the agent-facing guidance mode.
+        #[arg(value_enum)]
+        action: Option<CheckpointAction>,
         #[arg(long)]
         message: Option<String>,
         /// Agent id writing the capsule (e.g. codex, claude-code, grok).
@@ -41,10 +44,16 @@ pub enum Commands {
         /// open capsule that any agent may pick up.
         #[arg(long)]
         target: Option<String>,
-        /// Read the JSON capsule body from this file instead of stdin. Avoids
-        /// shell stdin quirks (PowerShell does not pipe to native stdin).
+        /// Read the JSON or Markdown capsule body from this file instead of
+        /// stdin. Avoids native stdin quirks in shells such as PowerShell.
         #[arg(long)]
         file: Option<std::path::PathBuf>,
+        /// Override the configured format. Primarily used with guidance.
+        #[arg(long, value_enum)]
+        format: Option<CheckpointFormatArg>,
+        /// Emit compact JSON from the agent-facing guidance command.
+        #[arg(long)]
+        json: bool,
     },
     /// Consume the pending handoff capsule for this project (the /handoff
     /// skill's backend). Prints hook-style JSON; `{}` means nothing pending.
@@ -144,6 +153,19 @@ pub enum Commands {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum CheckpointAction {
+    Md,
+    Json,
+    Guidance,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum CheckpointFormatArg {
+    Md,
+    Json,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum GroupByArg {
     Day,
     Model,
@@ -232,11 +254,14 @@ pub fn run_cli(cli: Cli) -> anyhow::Result<i32> {
         Some(Commands::Daemon { action, stay_alive }) => commands::daemon::run(action, stay_alive),
         Some(Commands::Doctor { json, fix }) => commands::doctor::run(json, fix),
         Some(Commands::Checkpoint {
+            action,
             message,
             agent,
             target,
             file,
-        }) => commands::checkpoint::run(message, agent, target, file),
+            format,
+            json,
+        }) => commands::checkpoint::run(action, format, json, message, agent, target, file),
         Some(Commands::Handoff {
             agent,
             peek,
@@ -641,6 +666,74 @@ mod tests {
                 Some(Commands::Autostart { action }) => assert_eq!(action, want),
                 other => panic!("unexpected command: {other:?}"),
             }
+        }
+    }
+    #[test]
+    fn parses_checkpoint_format_actions_and_guidance() {
+        let md = Cli::try_parse_from([
+            "ai-handoff",
+            "checkpoint",
+            "md",
+            "--agent",
+            "codex",
+            "--file",
+            "checkpoint.md",
+        ])
+        .unwrap();
+        match md.command {
+            Some(Commands::Checkpoint {
+                action: Some(CheckpointAction::Md),
+                agent,
+                file,
+                ..
+            }) => {
+                assert_eq!(agent.as_deref(), Some("codex"));
+                assert_eq!(file.unwrap(), std::path::PathBuf::from("checkpoint.md"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let json = Cli::try_parse_from([
+            "ai-handoff",
+            "checkpoint",
+            "json",
+            "--agent",
+            "claude-code",
+            "--file",
+            "checkpoint.json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            json.command,
+            Some(Commands::Checkpoint {
+                action: Some(CheckpointAction::Json),
+                ..
+            })
+        ));
+
+        let guidance = Cli::try_parse_from([
+            "ai-handoff",
+            "checkpoint",
+            "guidance",
+            "--agent",
+            "claude-code",
+            "--format",
+            "md",
+            "--json",
+        ])
+        .unwrap();
+        match guidance.command {
+            Some(Commands::Checkpoint {
+                action: Some(CheckpointAction::Guidance),
+                format: Some(CheckpointFormatArg::Md),
+                agent,
+                json,
+                ..
+            }) => {
+                assert_eq!(agent.as_deref(), Some("claude-code"));
+                assert!(json);
+            }
+            other => panic!("unexpected command: {other:?}"),
         }
     }
 }
