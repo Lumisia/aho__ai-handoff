@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "ai-handoff-cli"
-version = "2.2.2"
+version = "2.2.3"
 dependencies = [
  "ai-handoff-core",
  "ai-handoff-daemon",
@@ -40,7 +40,7 @@ dependencies = [
 
 [[package]]
 name = "ai-handoff-core"
-version = "2.2.2"
+version = "2.2.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -61,7 +61,7 @@ dependencies = [
 
 [[package]]
 name = "ai-handoff-daemon"
-version = "2.2.2"
+version = "2.2.3"
 dependencies = [
  "ai-handoff-core",
  "ai-handoff-ipc",
@@ -76,7 +76,7 @@ dependencies = [
 
 [[package]]
 name = "ai-handoff-desktop"
-version = "2.2.2"
+version = "2.2.3"
 dependencies = [
  "ai-handoff-core",
  "ai-handoff-ipc",
@@ -94,7 +94,7 @@ dependencies = [
 
 [[package]]
 name = "ai-handoff-ipc"
-version = "2.2.2"
+version = "2.2.3"
 dependencies = [
  "ai-handoff-core",
  "serde",
@@ -106,7 +106,7 @@ dependencies = [
 
 [[package]]
 name = "ai-handoff-tui"
-version = "2.2.2"
+version = "2.2.3"
 dependencies = [
  "ai-handoff-core",
  "ai-handoff-usage",
@@ -121,7 +121,7 @@ dependencies = [
 
 [[package]]
 name = "ai-handoff-usage"
-version = "2.2.2"
+version = "2.2.3"
 dependencies = [
  "chrono",
  "directories",

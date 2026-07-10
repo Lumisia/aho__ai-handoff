@@ -74,8 +74,16 @@ To pass more options (pick one agent, pin a version), keep the same scriptblock 
 Pin a release when you need repeatable installs:
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Lumisia/aho__ai-handoff/master/scripts/install.ps1))) -Yes -Version v2.2.2
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Lumisia/aho__ai-handoff/master/scripts/install.ps1))) -Yes -Version v2.2.3
 ```
+
+#### Windows SmartScreen
+
+The Windows installer is currently unsigned, so Microsoft Defender SmartScreen may show
+**Windows protected your PC** and **Unknown publisher**. Download only from the
+[official GitHub Releases](https://github.com/Lumisia/aho__ai-handoff/releases), verify the
+installer against its matching `.sha256` file, then choose **More info** if it is shown and
+select **Run anyway / Run** (`추가 정보` → `실행`). Do not disable SmartScreen system-wide.
 
 ### Shell Installer
 

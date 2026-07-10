@@ -23,6 +23,25 @@
     MessageBox MB_ICONSTOP|MB_OK "AI Handoff CLI integration failed to install (exit code $0)."
     Abort
   ai_handoff_install_ok:
+
+  ; Custom wizard pages do not run for /S or /P, so preserve config in both
+  ; non-interactive modes. Interactive choices are fixed en/ko/ja values.
+  IfSilent ai_handoff_config_done
+  StrCmp $PassiveMode "1" ai_handoff_config_done
+
+  nsExec::ExecToLog '"$PROFILE\.ai-handoff\bin\ai-handoff.exe" config set language "$AiHandoffUiLanguage"'
+  Pop $0
+  StrCmp $0 "0" ai_handoff_ui_language_ok
+    MessageBox MB_ICONSTOP|MB_OK "AI Handoff application language failed to save (exit code $0)."
+    Abort
+  ai_handoff_ui_language_ok:
+
+  nsExec::ExecToLog '"$PROFILE\.ai-handoff\bin\ai-handoff.exe" config set capsule.language "$AiHandoffCapsuleLanguage"'
+  Pop $0
+  StrCmp $0 "0" ai_handoff_config_done
+    MessageBox MB_ICONSTOP|MB_OK "AI Handoff capsule language failed to save (exit code $0)."
+    Abort
+  ai_handoff_config_done:
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL

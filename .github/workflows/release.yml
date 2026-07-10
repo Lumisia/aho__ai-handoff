@@ -149,6 +149,13 @@ jobs:
           "ARTIFACT=$artifact" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "CHECKSUM=$artifact.sha256" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
+      - name: Verify Windows installer icon
+        shell: pwsh
+        run: |
+          ./scripts/verify-windows-installer-icon.ps1 `
+            -InstallerPath $env:ARTIFACT `
+            -ExpectedIconPath apps/desktop/src-tauri/icons/icon.ico
+
       - name: Upload GUI to release
         uses: softprops/action-gh-release@v2
         with:
