@@ -14,6 +14,7 @@ import type {
   RepairRunResult,
   SlotUsageReport,
   ThemeReport,
+  UpdateStatus,
   UsageReport,
 } from "./types";
 
@@ -321,6 +322,10 @@ export function openProjectGithub(): Promise<MenuCommandResult> {
 
 export function getAppVersion(): Promise<string> {
   return invoke("get_app_version");
+}
+
+export function checkAppUpdate(): Promise<UpdateStatus> {
+  return invoke("check_app_update");
 }
 
 export function runAppUpdate(): Promise<MenuCommandResult> {

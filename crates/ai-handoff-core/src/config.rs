@@ -37,12 +37,19 @@ pub struct GuiConfig {
     /// shows a popup asking whether to switch to another saved account slot.
     /// Ask-only — the GUI never switches accounts by itself.
     pub limit_switch_prompt: bool,
+    /// Check GitHub Releases (at most once a day) for a newer stable version
+    /// and show a badge in the GUI. Check-only — installing stays manual.
+    pub update_check: bool,
+    /// Closing the GUI window hides it to the system tray instead of quitting.
+    pub close_to_tray: bool,
 }
 
 impl Default for GuiConfig {
     fn default() -> Self {
         Self {
             limit_switch_prompt: true,
+            update_check: true,
+            close_to_tray: false,
         }
     }
 }
@@ -1066,6 +1073,8 @@ const SETTABLE: &[(&str, ValueKind)] = &[
 
 const GUI_SETTABLE: &[(&str, ValueKind)] = &[
     ("gui.limit_switch_prompt", ValueKind::Bool),
+    ("gui.update_check", ValueKind::Bool),
+    ("gui.close_to_tray", ValueKind::Bool),
     ("gui_theme.preset", ValueKind::GuiThemePreset),
     ("gui_theme.mode", ValueKind::GuiThemeMode),
     ("gui_theme.light_theme", ValueKind::GuiThemeName),
@@ -1414,6 +1423,8 @@ pub fn get_value(cfg: &Config, key: &str) -> Result<String, ConfigWriteError> {
         "theme.selection_bg_color" => cfg.theme.selection_bg_color.to_string(),
         "theme.selection_fg_color" => cfg.theme.selection_fg_color.to_string(),
         "gui.limit_switch_prompt" => cfg.gui.limit_switch_prompt.to_string(),
+        "gui.update_check" => cfg.gui.update_check.to_string(),
+        "gui.close_to_tray" => cfg.gui.close_to_tray.to_string(),
         "gui_theme.preset" => gui_theme_preset_str(gui_theme.preset).to_string(),
         "gui_theme.mode" => gui_theme_mode_str(gui_theme.mode).to_string(),
         "gui_theme.light_theme" => gui_theme.light_theme.clone(),
@@ -1882,7 +1893,7 @@ enabled = true
             assert!(get_value(&cfg, key).is_ok(), "key {key} not readable");
             assert!(key_kind(key).is_some(), "no kind for {key}");
         }
-        assert_eq!(gui_settable_keys().count(), 14);
+        assert_eq!(gui_settable_keys().count(), 16);
     }
 
     #[test]
@@ -1897,6 +1908,34 @@ enabled = true
         let cfg = parse(&text).unwrap();
         assert!(!cfg.gui.limit_switch_prompt);
         assert_eq!(get_value(&cfg, "gui.limit_switch_prompt").unwrap(), "false");
+    }
+
+    #[test]
+    fn gui_update_check_defaults_on_and_round_trips() {
+        assert!(Config::default().gui.update_check);
+        assert_eq!(
+            get_value(&Config::default(), "gui.update_check").unwrap(),
+            "true"
+        );
+
+        let text = set_value(None, "gui.update_check", "false").unwrap();
+        let cfg = parse(&text).unwrap();
+        assert!(!cfg.gui.update_check);
+        assert_eq!(get_value(&cfg, "gui.update_check").unwrap(), "false");
+    }
+
+    #[test]
+    fn gui_close_to_tray_defaults_off_and_round_trips() {
+        assert!(!Config::default().gui.close_to_tray);
+        assert_eq!(
+            get_value(&Config::default(), "gui.close_to_tray").unwrap(),
+            "false"
+        );
+
+        let text = set_value(None, "gui.close_to_tray", "true").unwrap();
+        let cfg = parse(&text).unwrap();
+        assert!(cfg.gui.close_to_tray);
+        assert_eq!(get_value(&cfg, "gui.close_to_tray").unwrap(), "true");
     }
 
     #[test]

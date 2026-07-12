@@ -280,15 +280,59 @@ pub fn read_logs(max_bytes: u64) -> Vec<LogFile> {
     read_logs_for(&paths::home(), max_bytes)
 }
 
+/// List the log files that actually exist under `<home>/logs`, sorted by
+/// name. Only real logs are shown: hardcoding names here used to surface
+/// never-written files (`hook.log`, `install.log`) as os-error rows in the
+/// UIs. Matching on `.log` also picks up rotated files (`daemon.log.1`).
 pub fn read_logs_for(home: &Path, max_bytes: u64) -> Vec<LogFile> {
     let logs = home.join("logs");
-    ["daemon.log", "hook.log", "install.log"]
+    let mut names: Vec<String> = std::fs::read_dir(&logs)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let name = path.file_name()?.to_str()?.to_string();
+            (path.is_file() && name.contains(".log")).then_some(name)
+        })
+        .collect();
+    names.sort();
+    names
         .into_iter()
         .map(|name| LogFile {
-            name: name.into(),
-            result: read_text(&logs.join(name), max_bytes),
+            result: read_log_newest_first(&logs.join(&name), max_bytes),
+            name,
         })
         .collect()
+}
+
+/// Read an append-only log for display: newest line first, spending the
+/// `max_bytes` budget on the NEWEST lines. `read_text`'s plain head slice
+/// would keep a growing log's oldest lines and cut off exactly the part
+/// being debugged.
+fn read_log_newest_first(path: &Path, max_bytes: u64) -> ReadTextResult {
+    let raw = read_text(path, u64::MAX);
+    if raw.error.is_some() {
+        return raw;
+    }
+    let mut kept: Vec<&str> = Vec::new();
+    let mut used: u64 = 0;
+    let mut truncated = false;
+    for line in raw.text.lines().rev() {
+        used += line.len() as u64 + 1;
+        // Always keep at least one line so a single oversized line still shows.
+        if used > max_bytes && !kept.is_empty() {
+            truncated = true;
+            break;
+        }
+        kept.push(line);
+    }
+    ReadTextResult {
+        path: raw.path,
+        text: kept.join("\n"),
+        truncated,
+        error: None,
+    }
 }
 
 fn dashboard_paths(home: &Path, user_home: &Path) -> DashboardPaths {
@@ -745,6 +789,50 @@ mod tests {
                 consumed_despite_target: false,
             },
         }
+    }
+
+    #[test]
+    fn read_logs_lists_only_existing_log_files_sorted() {
+        let temp = tempfile::tempdir().unwrap();
+        write(&temp.path().join("logs").join("daemon.log.1"), "old");
+        write(
+            &temp.path().join("logs").join("daemon.log"),
+            "10:00 first\n10:05 second\n",
+        );
+        // Non-log files in the directory never show up as log rows.
+        write(&temp.path().join("logs").join("notes.txt"), "ignore");
+
+        let logs = read_logs_for(temp.path(), 1024);
+        let names = logs.iter().map(|log| log.name.as_str()).collect::<Vec<_>>();
+        assert_eq!(names, ["daemon.log", "daemon.log.1"]);
+        assert!(logs.iter().all(|log| log.result.error.is_none()));
+        // Newest line first for display.
+        assert_eq!(logs[0].result.text, "10:05 second\n10:00 first");
+    }
+
+    #[test]
+    fn read_log_budget_is_spent_on_newest_lines() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("logs").join("daemon.log");
+        write(&path, "aaaa old old old\nbb newest\n");
+
+        let result = read_log_newest_first(&path, 12);
+        assert_eq!(result.text, "bb newest");
+        assert!(
+            result.truncated,
+            "older lines beyond the budget are dropped"
+        );
+    }
+
+    #[test]
+    fn read_logs_is_empty_when_no_logs_were_written_yet() {
+        let temp = tempfile::tempdir().unwrap();
+        // No logs dir at all (fresh install): no rows, no os-error entries —
+        // the old hardcoded list surfaced never-written files as errors.
+        assert!(read_logs_for(temp.path(), 1024).is_empty());
+
+        std::fs::create_dir_all(temp.path().join("logs")).unwrap();
+        assert!(read_logs_for(temp.path(), 1024).is_empty());
     }
 
     #[test]

@@ -20,7 +20,14 @@ const fields = [
   { id: "risks", labelKey: "risks" },
 ];
 
-const states = ["pending", "in_progress", "blocked", "needs_review", "consumed", "archived"];
+export const capsuleStates = [
+  "pending",
+  "in_progress",
+  "blocked",
+  "needs_review",
+  "consumed",
+  "archived",
+];
 
 const stateLabelKeys: Record<string, string> = {
   pending: "statePending",
@@ -31,7 +38,7 @@ const stateLabelKeys: Record<string, string> = {
   archived: "stateArchived",
 };
 
-function stateLabel(t: Translator, state: string) {
+export function stateLabel(t: Translator, state: string) {
   return t(stateLabelKeys[state] ?? state);
 }
 
@@ -147,7 +154,7 @@ export default function Capsules({
               </button>
               {stateOpen && (
                 <div className="capsule-state-menu">
-                  {states.map((item) => (
+                  {capsuleStates.map((item) => (
                     <button
                       key={item}
                       className={item === selected.state ? "active" : undefined}

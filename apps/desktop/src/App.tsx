@@ -27,11 +27,13 @@ import * as Menubar from "@radix-ui/react-menubar";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  checkAppUpdate,
   createCheckpoint,
   deleteCapsule,
   dismissLimitAlert,
   ensureDaemonRunning,
   getAccountReport,
+  getAppVersion,
   getDashboardSnapshot,
   getLimitAlerts,
   getTheme,
@@ -42,6 +44,7 @@ import {
   pollAccountLogin,
   refreshAccountSlotUsage,
   reinstallHooks,
+  runAppUpdate,
   runDoctor,
   startAccountLogin,
   switchAccountSlot,
@@ -57,10 +60,11 @@ import type {
   LimitAlert,
   SlotUsageReport,
   ThemeReport,
+  UpdateStatus,
 } from "./types";
 import type { Translator } from "./i18n";
 import Account from "./views/Account";
-import Capsules from "./views/Capsules";
+import Capsules, { capsuleStates, stateLabel } from "./views/Capsules";
 import Integration from "./views/Integration";
 import Overview from "./views/Overview";
 import SettingsView from "./views/Settings";
@@ -701,11 +705,32 @@ function AppTitlebar({
   );
 }
 
+/// Client-side capsule filter: the list is already in memory, so search stays
+/// instant and never touches the backend.
+function filterCapsules(items: CapsuleSummary[], query: string, state: string) {
+  const needle = query.trim().toLowerCase();
+  return items.filter((item) => {
+    if (state !== "all" && item.state !== state) return false;
+    if (!needle) return true;
+    return [
+      item.summary_preview,
+      item.capsule_id,
+      item.project_label,
+      item.source_agent,
+      item.target_agent,
+    ].some((field) => field.toLowerCase().includes(needle));
+  });
+}
+
 function CapsuleNavigator({
   items,
   selectedPath,
   openAgents,
   openProjectKeys,
+  query,
+  stateFilter,
+  onQueryChange,
+  onStateFilterChange,
   onToggleAgent,
   onToggleProject,
   onSelectCapsule,
@@ -716,13 +741,26 @@ function CapsuleNavigator({
   selectedPath?: string | null;
   openAgents: AgentName[];
   openProjectKeys: string[];
+  query: string;
+  stateFilter: string;
+  onQueryChange: (query: string) => void;
+  onStateFilterChange: (state: string) => void;
   onToggleAgent: (agent: AgentName) => void;
   onToggleProject: (key: string) => void;
   onSelectCapsule: (path: string) => void;
   onCapsuleContextMenu: (event: MouseEvent, item: CapsuleSummary) => void;
   t: Translator;
 }) {
-  const tree = useMemo(() => buildCapsuleTree(items), [items]);
+  const filterActive = query.trim() !== "" || stateFilter !== "all";
+  const visible = useMemo(
+    () => filterCapsules(items, query, stateFilter),
+    [items, query, stateFilter],
+  );
+  const tree = useMemo(() => buildCapsuleTree(visible), [visible]);
+  // While a filter is active the matches are the point — the tree opens fully
+  // instead of making the user re-expand branches to see them.
+  const agentOpen = (agent: AgentName) => filterActive || openAgents.includes(agent);
+  const projectOpen = (key: string) => filterActive || openProjectKeys.includes(key);
 
   return (
     <section className="sidebar-capsules" aria-label={t("capsules")}>
@@ -730,20 +768,43 @@ function CapsuleNavigator({
         <FolderKanban size={15} />
         <span>{t("capsules")}</span>
       </div>
+      <div className="sidebar-capsule-filter">
+        <input
+          value={query}
+          onChange={(event) => onQueryChange(event.target.value)}
+          placeholder={t("capsuleSearch")}
+          aria-label={t("capsuleSearch")}
+        />
+        <select
+          value={stateFilter}
+          onChange={(event) => onStateFilterChange(event.target.value)}
+          aria-label={t("statusLabel")}
+        >
+          <option value="all">{t("allStates")}</option>
+          {capsuleStates.map((state) => (
+            <option key={state} value={state}>
+              {stateLabel(t, state)}
+            </option>
+          ))}
+        </select>
+      </div>
       {items.length === 0 && <div className="sidebar-empty">{t("noCapsules")}</div>}
-      {tree.map((agent) => (
+      {items.length > 0 && filterActive && visible.length === 0 && (
+        <div className="sidebar-empty">{t("noMatches")}</div>
+      )}
+      {tree.filter((agent) => !filterActive || agent.count > 0).map((agent) => (
         <div className={`side-agent ${agent.agent.toLowerCase()}`} key={agent.agent}>
           <button className="side-agent-row" onClick={() => onToggleAgent(agent.agent)}>
             <span className="agent-title">
-              {openAgents.includes(agent.agent) ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+              {agentOpen(agent.agent) ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
               <AgentLogo agent={agent.agent} />
               <strong>{agent.agent === "Codex" ? t("codex") : t("claude")}</strong>
             </span>
             <span className="side-count">{agent.count}</span>
           </button>
-          {openAgents.includes(agent.agent) && agent.projects.map((project) => {
+          {agentOpen(agent.agent) && agent.projects.map((project) => {
             const key = `${agent.agent}-${project.project_id}`;
-            const open = openProjectKeys.includes(key);
+            const open = projectOpen(key);
             return (
               <div className="side-project" key={key}>
                 <button
@@ -801,6 +862,10 @@ export default function App() {
   const [titleStatus, setTitleStatus] = useState<string | null>(null);
   const [titlebarLogin, setTitlebarLogin] = useState<AccountLoginSession | null>(null);
   const [limitAlert, setLimitAlert] = useState<LimitAlert | null>(null);
+  const [capsuleQuery, setCapsuleQuery] = useState("");
+  const [capsuleStateFilter, setCapsuleStateFilter] = useState("all");
+  const [appVersion, setAppVersion] = useState("");
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
   const [osDark, setOsDark] = useState(
     () => window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false,
   );
@@ -846,6 +911,17 @@ export default function App() {
 
   useEffect(() => {
     void refresh();
+  }, []);
+
+  // One-shot startup lookups: version chip and the daily update check
+  // (cached in the backend, opt-out via gui.update_check).
+  useEffect(() => {
+    getAppVersion()
+      .then(setAppVersion)
+      .catch(() => {});
+    checkAppUpdate()
+      .then(setUpdateStatus)
+      .catch(() => {});
   }, []);
 
   // Track the OS light/dark preference so "system" mode auto-switches themes.
@@ -1061,6 +1137,13 @@ export default function App() {
     void runTitlebarAction(async () => openProjectGithub());
   }
 
+  function handleUpdateNow() {
+    const latest = updateStatus?.latest;
+    if (!latest) return;
+    if (!window.confirm(fmtTemplate(t("updateConfirm"), { version: latest }))) return;
+    void runTitlebarAction(async () => runAppUpdate());
+  }
+
   function handleCapsuleContextMenu(event: MouseEvent, item: CapsuleSummary) {
     event.preventDefault();
     setSelectedCapsulePath(item.path);
@@ -1178,6 +1261,10 @@ export default function App() {
             selectedPath={selectedCapsulePath}
             openAgents={openAgents}
             openProjectKeys={openProjectKeys}
+            query={capsuleQuery}
+            stateFilter={capsuleStateFilter}
+            onQueryChange={setCapsuleQuery}
+            onStateFilterChange={setCapsuleStateFilter}
             onToggleAgent={toggleAgent}
             onToggleProject={toggleProject}
             onCapsuleContextMenu={handleCapsuleContextMenu}
@@ -1188,6 +1275,16 @@ export default function App() {
             t={t}
           />
         )}
+        <div className="sidebar-version">
+          {updateStatus?.update_available && updateStatus.latest ? (
+            <button className="sidebar-update" title={t("updateBadgeTitle")} onClick={handleUpdateNow}>
+              <span className="update-dot" aria-hidden="true" />
+              <span>{appVersion ? `v${appVersion} → ${updateStatus.latest}` : updateStatus.latest}</span>
+            </button>
+          ) : (
+            appVersion && <span className="sidebar-version-text">v{appVersion}</span>
+          )}
+        </div>
         <button
           className="sidebar-resizer"
           aria-label="Resize sidebar"

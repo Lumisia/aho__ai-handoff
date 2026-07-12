@@ -24,14 +24,26 @@ function pct(value: number) {
   return `${Math.round(value)}%`;
 }
 
-function resetText(value: AccountWindow | null | undefined) {
-  if (!value?.resets_at) return null;
-  return new Date(value.resets_at * 1000).toLocaleString(undefined, {
+function clockText(secs: number | null | undefined) {
+  if (!secs) return null;
+  return new Date(secs * 1000).toLocaleString(undefined, {
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+function resetText(value: AccountWindow | null | undefined) {
+  return clockText(value?.resets_at);
+}
+
+/// Projected exhaust time, shown only when the window runs out BEFORE it
+/// resets — the case worth acting on. Otherwise the reset line is the story.
+function exhaustText(value: AccountWindow | null | undefined) {
+  if (!value?.projected_exhaust_at || !value.resets_at) return null;
+  if (value.projected_exhaust_at >= value.resets_at) return null;
+  return clockText(value.projected_exhaust_at);
 }
 
 function LimitBar({
@@ -47,6 +59,8 @@ function LimitBar({
 }) {
   const used = value ? Math.max(0, Math.min(100, value.used_percent)) : 0;
   const reset = resetText(value);
+  const exhaust = exhaustText(value);
+  const rate = value?.burn_rate_per_hour;
   return (
     <div className={`limit-row ${agent}`}>
       <strong>{label}</strong>
@@ -58,6 +72,11 @@ function LimitBar({
         {reset && (
           <small className="limit-reset">
             {t("resetsAt")} {reset}
+          </small>
+        )}
+        {exhaust && (
+          <small className="limit-exhaust" title={rate ? `≈ ${rate.toFixed(1)}%/h` : undefined}>
+            {t("runsOutAt")} ~{exhaust}
           </small>
         )}
       </span>

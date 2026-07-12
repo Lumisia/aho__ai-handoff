@@ -255,6 +255,13 @@ const labels: Record<Language, Record<string, string>> = {
     limitSwitchDone: "Switched to {label}",
     limitSwitchFailed: "Account switch failed",
     settingHelpGuiLimitSwitchPrompt: "Ask (via a popup) whether to switch accounts when the five-hour limit is reached. Never switches automatically.",
+    runsOutAt: "runs out",
+    capsuleSearch: "Search capsules",
+    allStates: "All states",
+    noMatches: "No matching capsules.",
+    updateBadgeTitle: "A new version is available",
+    updateConfirm: "Update to {version}? The app closes and the installer runs in a console window.",
+    noLogsYet: "No log files yet.",
   },
   ko: {
     overview: "개요",
@@ -507,6 +514,13 @@ const labels: Record<Language, Record<string, string>> = {
     limitSwitchDone: "{label}(으)로 전환했습니다",
     limitSwitchFailed: "계정 전환 실패",
     settingHelpGuiLimitSwitchPrompt: "5시간 한도 도달 시 팝업으로 계정 전환을 물어봅니다. 자동으로 전환하지 않습니다.",
+    runsOutAt: "예상 소진",
+    capsuleSearch: "캡슐 검색",
+    allStates: "모든 상태",
+    noMatches: "일치하는 캡슐이 없습니다.",
+    updateBadgeTitle: "새 버전이 있습니다",
+    updateConfirm: "{version}(으)로 업데이트할까요? 앱이 종료되고 콘솔 창에서 설치가 진행됩니다.",
+    noLogsYet: "아직 기록된 로그 파일이 없습니다.",
   },
   ja: {
     overview: "概要",
@@ -759,6 +773,13 @@ const labels: Record<Language, Record<string, string>> = {
     limitSwitchDone: "{label}に切り替えました",
     limitSwitchFailed: "アカウント切り替えに失敗しました",
     settingHelpGuiLimitSwitchPrompt: "5時間の上限に達したときにポップアップでアカウント切り替えを尋ねます。自動では切り替えません。",
+    runsOutAt: "枯渇予想",
+    capsuleSearch: "カプセルを検索",
+    allStates: "すべての状態",
+    noMatches: "一致するカプセルがありません。",
+    updateBadgeTitle: "新しいバージョンがあります",
+    updateConfirm: "{version}に更新しますか？アプリが終了し、コンソールウィンドウでインストールが実行されます。",
+    noLogsYet: "まだログファイルがありません。",
   }
 };
 

@@ -3687,3 +3687,70 @@ body {
 .theme-card-check {
   font-size: 13px;
 }
+
+/* Overview limit rows: projected exhaust line (shown only when the window
+   runs out before it resets). */
+.limit-exhaust {
+  color: var(--warning-color);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+/* Sidebar capsule search + state filter. */
+.sidebar-capsule-filter {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  padding: 0 4px;
+}
+
+.sidebar-capsule-filter input,
+.sidebar-capsule-filter select {
+  padding: 5px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.sidebar-capsule-filter select {
+  max-width: 110px;
+}
+
+/* Sidebar footer: version text, or the update badge when a newer release
+   exists. */
+.sidebar-version {
+  display: flex;
+  margin-top: auto;
+  padding: 8px 4px 2px;
+}
+
+.sidebar-version-text {
+  color: var(--subtle-color);
+  font-size: 11px;
+  padding: 4px 8px;
+}
+
+.sidebar-update {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--panel-bg-color);
+  color: var(--text-color);
+  font-size: 11.5px;
+  padding: 4px 9px;
+  cursor: pointer;
+}
+
+.sidebar-update:hover {
+  border-color: var(--focus-border-color);
+}
+
+.update-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ok-color);
+  flex-shrink: 0;
+}
+

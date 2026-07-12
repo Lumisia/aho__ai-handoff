@@ -18,6 +18,7 @@ pub mod secure_fs;
 pub mod sensor;
 pub mod statusline;
 pub mod trigger;
+pub mod update_check;
 
 #[cfg(test)]
 pub(crate) mod test_support {

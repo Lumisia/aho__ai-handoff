@@ -19,8 +19,9 @@ ai-handoff-ipc = { path = "../../../crates/ai-handoff-ipc" }
 ai-handoff-tui = { path = "../../../crates/ai-handoff-tui" }
 ai-handoff-usage = { path = "../../../crates/ai-handoff-usage" }
 chrono.workspace = true
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-single-instance = "2"
+tauri-plugin-notification = "2"
 uuid.workspace = true
 
 [dev-dependencies]

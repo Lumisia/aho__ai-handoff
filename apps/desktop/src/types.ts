@@ -99,6 +99,16 @@ export interface AccountWindow {
   remaining_percent: number;
   window_minutes: number;
   resets_at?: number | null;
+  /** Average burn since the window opened (percent per hour), when estimable. */
+  burn_rate_per_hour?: number | null;
+  /** Unix seconds when usage reaches 100% at that pace. */
+  projected_exhaust_at?: number | null;
+}
+
+export interface UpdateStatus {
+  current: string;
+  latest?: string | null;
+  update_available: boolean;
 }
 
 export interface AccountSlotRow {

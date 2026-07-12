@@ -129,6 +129,11 @@ struct AccountWindow {
     remaining_percent: f64,
     window_minutes: u64,
     resets_at: Option<i64>,
+    /// Average burn since this window opened (percent per hour). `None` when
+    /// it cannot be estimated honestly (see [`window_projection`]).
+    burn_rate_per_hour: Option<f64>,
+    /// Unix seconds when the window hits 100% at that average pace.
+    projected_exhaust_at: Option<i64>,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
@@ -596,6 +601,26 @@ fn get_app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+/// Daily release check for the sidebar badge. Check-only — install stays a
+/// user action (`run_app_update`). Respects `gui.update_check = false` by
+/// answering "no update" without touching the network.
+#[tauri::command]
+async fn check_app_update() -> Result<ai_handoff_core::update_check::UpdateStatus, String> {
+    blocking_command("check_app_update", || {
+        if !config::load().gui.update_check {
+            return Ok(ai_handoff_core::update_check::UpdateStatus {
+                current: env!("CARGO_PKG_VERSION").to_string(),
+                latest: None,
+                update_available: false,
+            });
+        }
+        Ok(ai_handoff_core::update_check::check(env!(
+            "CARGO_PKG_VERSION"
+        )))
+    })
+    .await
+}
+
 /// Start `ai-handoff update --gui` in a visible console window, then quit the
 /// app shortly after so the installer can replace the running GUI files.
 #[tauri::command]
@@ -762,7 +787,11 @@ fn category_for_key(key: &str) -> &'static str {
         "language"
     } else if key.starts_with("gui_theme.") || key.starts_with("theme.") {
         "theme"
-    } else if key.starts_with("autostart.") || key.starts_with("daemon.") {
+    } else if key.starts_with("autostart.")
+        || key.starts_with("daemon.")
+        || key == "gui.close_to_tray"
+        || key == "gui.update_check"
+    {
         "automation"
     } else if key.starts_with("statusline.") {
         "agents"
@@ -786,6 +815,12 @@ fn description_for_key(key: &str) -> &'static str {
         }
         "gui.limit_switch_prompt" => {
             "Ask via a popup whether to switch accounts when the five-hour limit is reached (never switches automatically)."
+        }
+        "gui.close_to_tray" => {
+            "Keep the app running in the system tray when the window is closed."
+        }
+        "gui.update_check" => {
+            "Check GitHub Releases once a day and show an update badge (never installs by itself)."
         }
         "autostart.enabled" => "Start the daemon automatically when the user logs in.",
         "daemon.idle_timeout_seconds" => {
@@ -1137,12 +1172,56 @@ fn account_agent_report(
 }
 
 fn account_window(window: &RateWindow) -> AccountWindow {
+    account_window_at(window, chrono::Utc::now().timestamp())
+}
+
+fn account_window_at(window: &RateWindow, now_secs: i64) -> AccountWindow {
+    let projection = window_projection(window, now_secs);
     AccountWindow {
         used_percent: window.used_percent,
         remaining_percent: window.remaining_percent(),
         window_minutes: window.window_minutes,
         resets_at: window.resets_at,
+        burn_rate_per_hour: projection.map(|(rate, _)| rate),
+        projected_exhaust_at: projection.map(|(_, at)| at),
     }
+}
+
+/// How much of a window must have elapsed before its average burn is worth
+/// showing: a slope over a few minutes swings wildly with a single burst.
+const PROJECTION_MIN_ELAPSED_SECS: i64 = 30 * 60;
+
+/// Average-burn projection for a rate window: `(percent per hour since the
+/// window opened, unix seconds when usage reaches 100% at that pace)`.
+///
+/// `None` when it cannot be estimated honestly: no reset timestamp, an
+/// already-expired window, less than [`PROJECTION_MIN_ELAPSED_SECS`] elapsed,
+/// or zero usage so far. The provider reports only the current percent, so an
+/// average over the whole window is the strongest claim the data supports.
+fn window_projection(window: &RateWindow, now_secs: i64) -> Option<(f64, i64)> {
+    let resets_at = window.resets_at?;
+    let span_secs = i64::try_from(window.window_minutes).ok()?.checked_mul(60)?;
+    if span_secs <= 0 || resets_at <= now_secs {
+        return None;
+    }
+    let elapsed = now_secs - (resets_at - span_secs);
+    if elapsed < PROJECTION_MIN_ELAPSED_SECS {
+        return None;
+    }
+    let used = window.used_percent;
+    if used <= 0.0 {
+        return None;
+    }
+    let rate = used / (elapsed as f64 / 3600.0);
+    if !rate.is_finite() || rate <= 0.0 {
+        return None;
+    }
+    let projected = if used >= 100.0 {
+        now_secs
+    } else {
+        now_secs + ((100.0 - used) / rate * 3600.0) as i64
+    };
+    Some((rate, projected))
 }
 
 fn slot_usage_report_from_data(usage: ai_handoff_tui::account_api::UsageData) -> SlotUsageReport {
@@ -2102,18 +2181,241 @@ fn ps_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
+// ---------------------------------------------------------------------------
+// System tray + limit notifications
+// ---------------------------------------------------------------------------
+
+const TRAY_ID: &str = "main";
+
+/// Tray menu labels in the configured shared language. The tray lives outside
+/// the webview, so it cannot use the frontend i18n table.
+struct TrayLabels {
+    open: &'static str,
+    checkpoint: &'static str,
+    quit: &'static str,
+}
+
+fn tray_labels(lang: config::Language) -> TrayLabels {
+    match lang {
+        config::Language::Ko => TrayLabels {
+            open: "AI Handoff 열기",
+            checkpoint: "지금 체크포인트 저장",
+            quit: "종료",
+        },
+        config::Language::Ja => TrayLabels {
+            open: "AI Handoff を開く",
+            checkpoint: "今すぐチェックポイントを保存",
+            quit: "終了",
+        },
+        config::Language::En => TrayLabels {
+            open: "Open AI Handoff",
+            checkpoint: "Save checkpoint now",
+            quit: "Quit",
+        },
+    }
+}
+
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+fn main_window_visible(app: &tauri::AppHandle) -> bool {
+    app.get_webview_window("main")
+        .map(|window| {
+            window.is_visible().unwrap_or(false) && !window.is_minimized().unwrap_or(false)
+        })
+        .unwrap_or(false)
+}
+
+fn notify(app: &tauri::AppHandle, title: &str, body: &str) {
+    use tauri_plugin_notification::NotificationExt;
+    let _ = app.notification().builder().title(title).body(body).show();
+}
+
+fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
+    use tauri::menu::{MenuBuilder, MenuItemBuilder};
+    use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+
+    let labels = tray_labels(config::load().language);
+    let open = MenuItemBuilder::with_id("open", labels.open).build(app)?;
+    let checkpoint = MenuItemBuilder::with_id("checkpoint", labels.checkpoint).build(app)?;
+    let quit = MenuItemBuilder::with_id("quit", labels.quit).build(app)?;
+    let menu = MenuBuilder::new(app)
+        .item(&open)
+        .separator()
+        .item(&checkpoint)
+        .separator()
+        .item(&quit)
+        .build()?;
+
+    let mut tray = TrayIconBuilder::with_id(TRAY_ID)
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .tooltip("AI Handoff")
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "open" => show_main_window(app),
+            "checkpoint" => {
+                // The CLI call takes seconds; never block the menu thread.
+                let app = app.clone();
+                std::thread::spawn(move || {
+                    let lang = config::load().language;
+                    match run_cli_capture(
+                        &[
+                            "checkpoint",
+                            "--agent",
+                            "codex",
+                            "--message",
+                            "GUI checkpoint",
+                        ],
+                        false,
+                    ) {
+                        Ok(output) => notify(&app, checkpoint_saved_title(lang), &output),
+                        Err(error) => notify(&app, checkpoint_failed_title(lang), &error),
+                    }
+                });
+            }
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            // Left click opens the window (menu stays on right click).
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_main_window(tray.app_handle());
+            }
+        });
+    if let Some(icon) = app.default_window_icon() {
+        tray = tray.icon(icon.clone());
+    }
+    tray.build(app)?;
+    Ok(())
+}
+
+fn checkpoint_saved_title(lang: config::Language) -> &'static str {
+    match lang {
+        config::Language::Ko => "체크포인트 저장됨",
+        config::Language::Ja => "チェックポイントを保存しました",
+        config::Language::En => "Checkpoint saved",
+    }
+}
+
+fn checkpoint_failed_title(lang: config::Language) -> &'static str {
+    match lang {
+        config::Language::Ko => "체크포인트 실패",
+        config::Language::Ja => "チェックポイントに失敗しました",
+        config::Language::En => "Checkpoint failed",
+    }
+}
+
+fn limit_notification_text(lang: config::Language, alert: &LimitAlert) -> (String, String) {
+    let agent = if alert.agent == "claude" {
+        "Claude"
+    } else {
+        "Codex"
+    };
+    let used = format!("{:.0}", alert.used_percent);
+    match lang {
+        config::Language::Ko => (
+            format!("{agent} 5시간 사용량 {used}%"),
+            "설정한 임계값에 도달했습니다. 앱을 열어 계정을 전환하거나 체크포인트를 저장하세요.".to_string(),
+        ),
+        config::Language::Ja => (
+            format!("{agent} の5時間使用量が {used}% です"),
+            "設定したしきい値に達しました。アプリを開いてアカウントを切り替えるか、チェックポイントを保存してください。".to_string(),
+        ),
+        config::Language::En => (
+            format!("{agent} five-hour usage at {used}%"),
+            "The configured threshold was reached. Open the app to switch accounts or save a checkpoint.".to_string(),
+        ),
+    }
+}
+
+/// Background limit watcher: the in-app popup only exists while the window is
+/// visible, so a hidden/tray-minimized app surfaces the same alert as an OS
+/// notification instead. One toast per agent per reset window (in-memory mark;
+/// an app restart may re-notify once, which is acceptable for a limit warning).
+fn spawn_limit_notifier(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        // Let startup settle before the first (possibly network-bound) pass.
+        std::thread::sleep(Duration::from_secs(30));
+        let mut notified: std::collections::HashSet<String> = std::collections::HashSet::new();
+        loop {
+            if !main_window_visible(&app) {
+                // limit_alerts() applies every config gate (prompt enabled,
+                // >1 saved account, not dismissed) and fails closed.
+                for alert in limit_alerts() {
+                    let key = format!("{}:{}", alert.agent, alert.resets_at.unwrap_or_default());
+                    if notified.contains(&key) {
+                        continue;
+                    }
+                    let (title, body) = limit_notification_text(config::load().language, &alert);
+                    notify(&app, &title, &body);
+                    notified.insert(key);
+                }
+            }
+            update_tray_tooltip(&app);
+            // Same cadence as the frontend popup poll; five-hour windows move
+            // slowly and each pass may hit the provider API.
+            std::thread::sleep(Duration::from_secs(300));
+        }
+    });
+}
+
+/// Local-sample tooltip so hovering the tray answers "how close am I" without
+/// opening the window. No network: `account_report(false)` reads local files.
+fn update_tray_tooltip(app: &tauri::AppHandle) {
+    let Some(tray) = app.tray_by_id(TRAY_ID) else {
+        return;
+    };
+    let report = account_report(false);
+    let mut parts = Vec::new();
+    for agent in [&report.claude, &report.codex] {
+        if let Some(window) = &agent.five_hour {
+            let name = if agent.agent == "claude" {
+                "Claude"
+            } else {
+                "Codex"
+            };
+            parts.push(format!("{name} 5h {:.0}%", window.used_percent));
+        }
+    }
+    let tooltip = if parts.is_empty() {
+        "AI Handoff".to_string()
+    } else {
+        format!("AI Handoff — {}", parts.join(" · "))
+    };
+    let _ = tray.set_tooltip(Some(&tooltip));
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.unminimize();
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
+            show_main_window(app);
         }))
-        .setup(|_| {
+        .plugin(tauri_plugin_notification::init())
+        .setup(|app| {
             ensure_windows_search_shortcuts();
+            setup_tray(app.handle())?;
+            spawn_limit_notifier(app.handle().clone());
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            // Opt-in close-to-tray: the window hides and the tray keeps the
+            // app (and its limit notifications) alive. Default stays quit.
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" && config::load().gui.close_to_tray {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             get_dashboard_snapshot,
@@ -2151,6 +2453,7 @@ fn main() {
             ensure_daemon_running,
             open_project_github,
             get_app_version,
+            check_app_update,
             run_app_update,
             run_app_uninstall
         ])
@@ -2188,6 +2491,86 @@ mod tests {
             plugin < setup,
             "single-instance plugin must be registered before setup"
         );
+    }
+
+    #[test]
+    fn window_projection_reports_average_rate_and_exhaust_time() {
+        // 5h window, opened 2.5h ago, 50% used → 20%/h, exhausted in 2.5h.
+        let now = 1_000_000;
+        let window = RateWindow {
+            used_percent: 50.0,
+            window_minutes: 300,
+            resets_at: Some(now + 9_000), // 2.5h left of the 5h span
+        };
+        let (rate, projected) = window_projection(&window, now).expect("projection");
+        assert!((rate - 20.0).abs() < 0.01, "rate was {rate}");
+        assert_eq!(projected, now + 9_000);
+    }
+
+    #[test]
+    fn window_projection_declines_when_it_cannot_be_honest() {
+        let now = 1_000_000;
+        let base = RateWindow {
+            used_percent: 50.0,
+            window_minutes: 300,
+            resets_at: Some(now + 9_000),
+        };
+        // No reset timestamp.
+        assert_eq!(
+            window_projection(
+                &RateWindow {
+                    resets_at: None,
+                    ..base.clone()
+                },
+                now
+            ),
+            None
+        );
+        // Window opened less than 30 minutes ago.
+        assert_eq!(
+            window_projection(
+                &RateWindow {
+                    resets_at: Some(now + 300 * 60 - 600),
+                    ..base.clone()
+                },
+                now
+            ),
+            None
+        );
+        // Nothing used yet.
+        assert_eq!(
+            window_projection(
+                &RateWindow {
+                    used_percent: 0.0,
+                    ..base.clone()
+                },
+                now
+            ),
+            None
+        );
+        // Window already expired.
+        assert_eq!(
+            window_projection(
+                &RateWindow {
+                    resets_at: Some(now - 1),
+                    ..base
+                },
+                now
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn window_projection_clamps_exhaust_to_now_at_full_usage() {
+        let now = 1_000_000;
+        let window = RateWindow {
+            used_percent: 100.0,
+            window_minutes: 300,
+            resets_at: Some(now + 3_600),
+        };
+        let (_, projected) = window_projection(&window, now).expect("projection");
+        assert_eq!(projected, now);
     }
 
     fn sample_capsule() -> Capsule {

@@ -157,6 +157,7 @@ export default function Integration({ initial, t }: { initial: DashboardSnapshot
             {t("refresh")}
           </button>
         </div>
+        {logs.length === 0 && <pre>{t("noLogsYet")}</pre>}
         <div className="log-grid">
           {logs.map((log) => (
             <article key={log.name}>
