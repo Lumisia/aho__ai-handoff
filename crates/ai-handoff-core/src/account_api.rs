@@ -17,6 +17,14 @@ use serde_json::Value;
 const USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const RESET_CREDITS_URL: &str = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
 const CLAUDE_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
+/// Claude Code's public OAuth token endpoint and client id (mechanical
+/// refresh-token grant only — the interactive login flow still belongs to the
+/// official CLI). Values match the installed Claude Code CLI.
+const CLAUDE_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
+const CLAUDE_OAUTH_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+/// A saved access token expiring within this margin is treated as already
+/// stale, so a token dying mid-request is refreshed ahead of time.
+const CLAUDE_TOKEN_REFRESH_MARGIN_MS: i64 = 60_000;
 
 /// Network timeouts for a usage fetch. The interactive GUI/TUI can afford the
 /// generous default; the daemon's hook-time fetch passes a short budget so it
@@ -69,9 +77,10 @@ pub fn fetch_slot_usage_with(
             fetch_usage(&token, account_id.as_deref(), timeouts)
         }
         Agent::Claude => {
-            // Re-syncs the active slot from the (fresher) live credential and
-            // fails fast on an expired token — no doomed network call.
-            let (token, plan) = account::claude_slot_fetch_token(label)?;
+            // Re-syncs the active slot from the (fresher) live credential, then
+            // — if the saved token has still expired — exchanges the stored
+            // refresh token for a new one so a non-active slot stays usable.
+            let (token, plan) = claude_token_refreshing(label, timeouts)?;
             fetch_claude_usage(&token, plan, timeouts)
         }
     }
@@ -83,6 +92,101 @@ fn build_agent(user_agent: &str, timeouts: FetchTimeouts) -> ureq::Agent {
         .timeout_read(timeouts.read)
         .user_agent(user_agent)
         .build()
+}
+
+/// A saved Claude slot's usable access token, refreshing it first if the stored
+/// one has expired. The active-slot live re-sync happens inside
+/// [`account::claude_slot_synced_bytes`]; only a still-expired token (a slot
+/// that is not the current login) triggers the network refresh grant.
+fn claude_token_refreshing(
+    label: &str,
+    timeouts: FetchTimeouts,
+) -> Result<(String, Option<String>), String> {
+    let bytes = account::claude_slot_synced_bytes(label)
+        .ok_or_else(|| "no usable token in this account".to_string())?;
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let fresh_enough = account::claude_credential_expires_at(&bytes)
+        .is_none_or(|expires_at| expires_at > now_ms + CLAUDE_TOKEN_REFRESH_MARGIN_MS);
+    if fresh_enough {
+        return account::claude_oauth_pair(&bytes)
+            .ok_or_else(|| "no usable token in this account".to_string());
+    }
+    // The stored access token has expired; exchange the refresh token for a new
+    // one and persist it so the slot keeps working without a manual re-add.
+    let expired_err =
+        || "token expired; launch this account (l) or open Claude Code to refresh it".to_string();
+    // The active login is Claude Code's to refresh — rotating its refresh token
+    // here would break the live session (forcing a browser re-login). Only
+    // non-active slots (the ones that go stale from disuse) are refreshed.
+    if account::claude_slot_is_active(label) {
+        return Err(expired_err());
+    }
+    let Some(refresh_token) = account::claude_credential_refresh_token(&bytes) else {
+        return Err(expired_err());
+    };
+    let refreshed = refresh_claude_oauth(&refresh_token, timeouts).map_err(|_| expired_err())?;
+    let expires_at_ms = now_ms + refreshed.expires_in_secs.unwrap_or(0).saturating_mul(1000);
+    account::persist_claude_slot_refresh(
+        label,
+        &refreshed.access_token,
+        refreshed.refresh_token.as_deref(),
+        expires_at_ms,
+    )
+}
+
+/// The subset of an OAuth refresh response we persist.
+struct RefreshedClaudeToken {
+    access_token: String,
+    /// Present when the provider rotates the refresh token; when absent the old
+    /// one stays valid and is kept.
+    refresh_token: Option<String>,
+    expires_in_secs: Option<i64>,
+}
+
+/// Exchange a Claude OAuth refresh token for a fresh access token via the
+/// public token endpoint. No credential is read or written here — the caller
+/// owns persistence.
+fn refresh_claude_oauth(
+    refresh_token: &str,
+    timeouts: FetchTimeouts,
+) -> Result<RefreshedClaudeToken, String> {
+    let agent = build_agent("claude-code", timeouts);
+    let body = serde_json::json!({
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+        "client_id": CLAUDE_OAUTH_CLIENT_ID,
+    });
+    match agent
+        .post(CLAUDE_TOKEN_URL)
+        .set("anthropic-beta", "oauth-2025-04-20")
+        .set("Accept", "application/json")
+        .send_json(body)
+    {
+        Ok(resp) => {
+            let value: Value = resp
+                .into_json()
+                .map_err(|_| "bad refresh response".to_string())?;
+            let access_token = value
+                .get("access_token")
+                .and_then(Value::as_str)
+                .filter(|token| !token.is_empty())
+                .ok_or_else(|| "refresh response missing access_token".to_string())?
+                .to_string();
+            let refresh_token = value
+                .get("refresh_token")
+                .and_then(Value::as_str)
+                .filter(|token| !token.is_empty())
+                .map(String::from);
+            let expires_in_secs = value.get("expires_in").and_then(Value::as_i64);
+            Ok(RefreshedClaudeToken {
+                access_token,
+                refresh_token,
+                expires_in_secs,
+            })
+        }
+        Err(ureq::Error::Status(code, _)) => Err(format!("refresh failed: http {code}")),
+        Err(_) => Err("refresh failed: network error".to_string()),
+    }
 }
 
 fn fetch_usage(

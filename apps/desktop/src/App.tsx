@@ -873,6 +873,11 @@ export default function App() {
   const seededProjectRef = useRef(false);
   const sidebarDragOffset = useRef(0);
   const suppressedLimitAlerts = useRef(new Set<string>());
+  // Mirrors `limitAlert` so the poll effect can read "is a modal already open?"
+  // without depending on it. A dependency would re-run the effect on dismiss
+  // and fire an immediate re-poll that races the async dismiss mark-write,
+  // re-opening the popup the user just closed.
+  const limitAlertRef = useRef<LimitAlert | null>(null);
   const language = normalizeLanguage(theme?.language);
   const t = useMemo(() => createTranslator(language), [language]);
 
@@ -952,16 +957,25 @@ export default function App() {
     return () => window.clearInterval(timer);
   }, [titlebarLogin]);
 
+  // Keep the ref in step with the state for the poll guard below.
+  useEffect(() => {
+    limitAlertRef.current = limitAlert;
+  }, [limitAlert]);
+
   // Poll for limit-reached account-switch popups. Only shows one at a time; a
   // dismiss/switch marks the reset window so it does not immediately reappear.
+  // Runs once (stable interval): the open-modal guard reads `limitAlertRef` so
+  // dismissing never re-runs this effect — an immediate re-poll on dismiss would
+  // race the async dismiss mark-write and re-open the just-closed popup.
   useEffect(() => {
     let cancelled = false;
     function poll() {
-      if (limitAlert) return;
+      if (limitAlertRef.current) return;
       getLimitAlerts()
         .then((alerts) => {
+          if (cancelled || limitAlertRef.current) return;
           const next = alerts.find((alert) => !suppressedLimitAlerts.current.has(limitAlertKey(alert)));
-          if (!cancelled && next && !limitAlert) {
+          if (next) {
             setLimitAlert(next);
           }
         })
@@ -977,7 +991,7 @@ export default function App() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [limitAlert]);
+  }, []);
 
   function limitAlertKey(alert: LimitAlert) {
     return `${alert.agent}:${alert.resets_at ?? "unknown"}`;

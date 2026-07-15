@@ -435,6 +435,100 @@ fn claude_oauth_from_bytes(bytes: &[u8]) -> Option<(String, Option<String>)> {
     Some((access_token, plan))
 }
 
+// ---------------------------------------------------------------------------
+// Claude token refresh support (the network exchange lives in `account_api`;
+// only local file access lives here so this module stays network-free).
+//
+// A saved slot is a point-in-time snapshot of `.credentials.json`. Claude
+// rotates its short-lived OAuth access token every few hours, so a slot that is
+// NOT the active login (and so is never re-synced from the live file) goes stale
+// within a day or two and its usage fetch errors out. The stored refresh token
+// exchanges for a new access token; these helpers give `account_api` the pieces
+// it needs and persist the result back into the slot.
+// ---------------------------------------------------------------------------
+
+/// The slot's Claude credential bytes after a best-effort active-slot re-sync
+/// from the fresher live login (same identity only). No network.
+pub fn claude_slot_synced_bytes(label: &str) -> Option<Vec<u8>> {
+    sync_active_claude_slot(label);
+    let path = slot_dir(Agent::Claude, label).join(cred_filename(Agent::Claude));
+    std::fs::read(&path).ok()
+}
+
+/// Unix-ms access-token expiry recorded in a Claude credential, if present.
+pub fn claude_credential_expires_at(bytes: &[u8]) -> Option<i64> {
+    claude_expires_at(bytes)
+}
+
+/// `(access_token, plan)` from a Claude credential, with no expiry gate.
+pub fn claude_oauth_pair(bytes: &[u8]) -> Option<(String, Option<String>)> {
+    claude_oauth_from_bytes(bytes)
+}
+
+/// Whether a saved Claude slot is the current live login (matches the live
+/// credential by bytes or identity). The active login's token rotation belongs
+/// to Claude Code itself, so this slot must NOT be network-refreshed — doing so
+/// would rotate the refresh token out from under the live session.
+pub fn claude_slot_is_active(label: &str) -> bool {
+    list_slots(Agent::Claude)
+        .iter()
+        .any(|slot| slot.meta.label == label && slot.active)
+}
+
+/// The stored OAuth refresh token, if any (used to exchange for a fresh access
+/// token when the saved one has expired).
+pub fn claude_credential_refresh_token(bytes: &[u8]) -> Option<String> {
+    let value: Value = serde_json::from_slice(bytes).ok()?;
+    let oauth = value.get("claudeAiOauth").or_else(|| value.get("oauth"))?;
+    oauth
+        .get("refreshToken")
+        .or_else(|| oauth.get("refresh_token"))
+        .and_then(Value::as_str)
+        .filter(|token| !token.is_empty())
+        .map(String::from)
+}
+
+/// Merge a refreshed token set into the slot's Claude credential and persist it
+/// atomically with private permissions, preserving every other field. Returns
+/// the new `(access_token, plan)`. Only rewrites the saved slot snapshot — the
+/// live login file is Claude Code's to manage.
+pub fn persist_claude_slot_refresh(
+    label: &str,
+    access_token: &str,
+    refresh_token: Option<&str>,
+    expires_at_ms: i64,
+) -> Result<(String, Option<String>), String> {
+    let path = slot_dir(Agent::Claude, label).join(cred_filename(Agent::Claude));
+    let bytes = std::fs::read(&path).map_err(|_| "no usable token in this account".to_string())?;
+    let mut value: Value =
+        serde_json::from_slice(&bytes).map_err(|_| "credential is not valid JSON".to_string())?;
+    let oauth_key = if value.get("claudeAiOauth").is_some() {
+        "claudeAiOauth"
+    } else if value.get("oauth").is_some() {
+        "oauth"
+    } else {
+        return Err("credential has no oauth block".to_string());
+    };
+    let oauth = value
+        .get_mut(oauth_key)
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "credential oauth block is malformed".to_string())?;
+    oauth.insert(
+        "accessToken".to_string(),
+        Value::String(access_token.to_string()),
+    );
+    if let Some(token) = refresh_token {
+        oauth.insert("refreshToken".to_string(), Value::String(token.to_string()));
+    }
+    oauth.insert("expiresAt".to_string(), Value::Number(expires_at_ms.into()));
+    let serialized =
+        serde_json::to_vec(&value).map_err(|_| "could not serialize credential".to_string())?;
+    private_write(&path, &serialized)
+        .map_err(|error| format!("could not persist refreshed token: {error}"))?;
+    claude_oauth_from_bytes(&serialized)
+        .ok_or_else(|| "no usable token in this account".to_string())
+}
+
 fn default_organization_id(auth: &Value) -> Option<String> {
     let orgs = auth.get("organizations")?.as_array()?;
     orgs.iter()
@@ -1326,6 +1420,109 @@ mod tests {
         assert_eq!(plan.as_deref(), Some("pro"));
         std::env::remove_var("AI_HANDOFF_HOME");
         std::env::remove_var("CLAUDE_CONFIG_DIR");
+    }
+
+    #[test]
+    fn claude_credential_refresh_token_reads_stored_token() {
+        let with =
+            br#"{"claudeAiOauth":{"accessToken":"a","refreshToken":"rt-123","expiresAt":1000}}"#;
+        assert_eq!(
+            claude_credential_refresh_token(with).as_deref(),
+            Some("rt-123")
+        );
+        let snake = br#"{"oauth":{"access_token":"a","refresh_token":"rt-9"}}"#;
+        assert_eq!(
+            claude_credential_refresh_token(snake).as_deref(),
+            Some("rt-9")
+        );
+        let none = br#"{"claudeAiOauth":{"accessToken":"a"}}"#;
+        assert!(claude_credential_refresh_token(none).is_none());
+        let empty = br#"{"claudeAiOauth":{"accessToken":"a","refreshToken":""}}"#;
+        assert!(claude_credential_refresh_token(empty).is_none());
+    }
+
+    #[test]
+    fn persist_claude_slot_refresh_rewrites_token_and_preserves_other_fields() {
+        let _guard = crate::test_support::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+
+        let dir = slot_dir(Agent::Claude, "dev@example.com");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(".credentials.json"),
+            br#"{"claudeAiOauth":{"accessToken":"old","refreshToken":"rt-old","expiresAt":1000,"subscriptionType":"pro","scopes":["a","b"]}}"#,
+        )
+        .unwrap();
+
+        let (token, plan) = persist_claude_slot_refresh(
+            "dev@example.com",
+            "new-access",
+            Some("rt-new"),
+            9_999_999_999_999,
+        )
+        .expect("persist");
+
+        assert_eq!(token, "new-access");
+        assert_eq!(plan.as_deref(), Some("pro"));
+
+        let written: Value =
+            serde_json::from_slice(&std::fs::read(dir.join(".credentials.json")).unwrap()).unwrap();
+        let oauth = &written["claudeAiOauth"];
+        assert_eq!(oauth["accessToken"], "new-access");
+        assert_eq!(oauth["refreshToken"], "rt-new");
+        assert_eq!(oauth["expiresAt"], 9_999_999_999_999i64);
+        // Untouched fields survive the merge.
+        assert_eq!(oauth["subscriptionType"], "pro");
+        assert_eq!(oauth["scopes"][1], "b");
+
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn claude_slot_is_active_tracks_the_live_credential() {
+        let _guard = crate::test_support::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let live = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        std::env::set_var("CLAUDE_CONFIG_DIR", live.path());
+
+        let cred = br#"{"claudeAiOauth":{"accessToken":"tok","subscriptionType":"pro"}}"#;
+        let label = save_slot(Agent::Claude, cred, None, "test").unwrap();
+
+        // No live credential → the slot is not the active login.
+        assert!(!claude_slot_is_active(&label));
+
+        // Live credential matches the slot → active.
+        std::fs::write(live.path().join(".credentials.json"), cred).unwrap();
+        assert!(claude_slot_is_active(&label));
+
+        std::env::remove_var("AI_HANDOFF_HOME");
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+    }
+
+    #[test]
+    fn persist_claude_slot_refresh_keeps_old_refresh_token_when_none_returned() {
+        let _guard = crate::test_support::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+
+        let dir = slot_dir(Agent::Claude, "keep@example.com");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(".credentials.json"),
+            br#"{"claudeAiOauth":{"accessToken":"old","refreshToken":"rt-keep","expiresAt":1000}}"#,
+        )
+        .unwrap();
+
+        persist_claude_slot_refresh("keep@example.com", "new", None, 5000).expect("persist");
+
+        let written: Value =
+            serde_json::from_slice(&std::fs::read(dir.join(".credentials.json")).unwrap()).unwrap();
+        assert_eq!(written["claudeAiOauth"]["refreshToken"], "rt-keep");
+        assert_eq!(written["claudeAiOauth"]["accessToken"], "new");
+
+        std::env::remove_var("AI_HANDOFF_HOME");
     }
 
     #[test]
