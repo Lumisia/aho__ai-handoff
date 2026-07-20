@@ -465,14 +465,43 @@ pub fn claude_oauth_pair(bytes: &[u8]) -> Option<(String, Option<String>)> {
     claude_oauth_from_bytes(bytes)
 }
 
-/// Whether a saved Claude slot is the current live login (matches the live
-/// credential by bytes or identity). The active login's token rotation belongs
-/// to Claude Code itself, so this slot must NOT be network-refreshed — doing so
-/// would rotate the refresh token out from under the live session.
-pub fn claude_slot_is_active(label: &str) -> bool {
-    list_slots(Agent::Claude)
-        .iter()
-        .any(|slot| slot.meta.label == label && slot.active)
+/// True when the live Claude credential currently holds exactly `bytes`.
+/// The active slot is kept byte-identical to the live login by
+/// [`sync_active_claude_slot`], so this identifies "this slot IS the live
+/// login" without any identity guesswork.
+pub fn claude_live_credential_equals(bytes: &[u8]) -> bool {
+    live_credential_bytes(Agent::Claude).is_some_and(|live| live == bytes)
+}
+
+/// Copy a slot's (just-refreshed) Claude credential over the live login, but
+/// only if the live credential still holds exactly `expected` — the bytes the
+/// refresh started from. Needed because the OAuth refresh grant ROTATES the
+/// refresh token: after refreshing the active slot, the live file still holds
+/// the now-invalidated old refresh token, and Claude Code would be forced into
+/// a browser re-login on its next refresh unless it gets the new one.
+/// A diverged live credential (Claude Code rotated it itself meanwhile, or the
+/// user switched accounts) is never overwritten.
+pub fn propagate_claude_slot_to_live(label: &str, expected: &[u8]) -> std::io::Result<()> {
+    let current = live_credential_bytes(Agent::Claude)
+        .ok_or_else(|| std::io::Error::other("no live credential"))?;
+    if current != expected {
+        return Err(std::io::Error::other(
+            "live credential changed since the refresh started",
+        ));
+    }
+    let bytes = std::fs::read(slot_dir(Agent::Claude, label).join(cred_filename(Agent::Claude)))?;
+    // macOS Claude may keep the live credential in the Keychain, not the file.
+    #[cfg(target_os = "macos")]
+    if live_auth_path(Agent::Claude)
+        .map(|p| !p.exists())
+        .unwrap_or(false)
+        && crate::keychain::claude_item_exists()
+    {
+        return crate::keychain::write_claude_credentials(&bytes);
+    }
+    let live = live_auth_path(Agent::Claude).ok_or_else(|| std::io::Error::other("no home dir"))?;
+    let tmp = live.with_extension("tmp");
+    crate::secure_fs::write_private_atomic_file(&live, &tmp, &bytes)
 }
 
 /// The stored OAuth refresh token, if any (used to exchange for a fresh access
@@ -1480,22 +1509,58 @@ mod tests {
     }
 
     #[test]
-    fn claude_slot_is_active_tracks_the_live_credential() {
+    fn propagate_claude_slot_to_live_updates_byte_identical_live() {
         let _guard = crate::test_support::env_lock();
         let home = tempfile::tempdir().unwrap();
         let live = tempfile::tempdir().unwrap();
         std::env::set_var("AI_HANDOFF_HOME", home.path());
         std::env::set_var("CLAUDE_CONFIG_DIR", live.path());
 
-        let cred = br#"{"claudeAiOauth":{"accessToken":"tok","subscriptionType":"pro"}}"#;
-        let label = save_slot(Agent::Claude, cred, None, "test").unwrap();
+        let stale =
+            br#"{"claudeAiOauth":{"accessToken":"old","refreshToken":"rt-old","expiresAt":1000}}"#;
+        let label = save_slot(Agent::Claude, stale, None, "test").unwrap();
+        std::fs::write(live.path().join(".credentials.json"), stale).unwrap();
 
-        // No live credential → the slot is not the active login.
-        assert!(!claude_slot_is_active(&label));
+        // Refresh the slot, then propagate to the (still byte-identical) live.
+        persist_claude_slot_refresh(&label, "new-access", Some("rt-new"), 5000).unwrap();
+        propagate_claude_slot_to_live(&label, stale).expect("propagate");
 
-        // Live credential matches the slot → active.
-        std::fs::write(live.path().join(".credentials.json"), cred).unwrap();
-        assert!(claude_slot_is_active(&label));
+        let live_bytes = std::fs::read(live.path().join(".credentials.json")).unwrap();
+        assert_eq!(
+            live_bytes,
+            std::fs::read(slot_dir(Agent::Claude, &label).join(".credentials.json")).unwrap(),
+            "live must hold the refreshed slot credential"
+        );
+        let value: Value = serde_json::from_slice(&live_bytes).unwrap();
+        assert_eq!(value["claudeAiOauth"]["refreshToken"], "rt-new");
+
+        std::env::remove_var("AI_HANDOFF_HOME");
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+    }
+
+    #[test]
+    fn propagate_claude_slot_to_live_refuses_a_diverged_live() {
+        let _guard = crate::test_support::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let live = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        std::env::set_var("CLAUDE_CONFIG_DIR", live.path());
+
+        let stale =
+            br#"{"claudeAiOauth":{"accessToken":"old","refreshToken":"rt-old","expiresAt":1000}}"#;
+        let label = save_slot(Agent::Claude, stale, None, "test").unwrap();
+        // Live moved on (Claude Code rotated it itself, or another account).
+        let diverged = br#"{"claudeAiOauth":{"accessToken":"cc-new","refreshToken":"rt-cc","expiresAt":9999}}"#;
+        std::fs::write(live.path().join(".credentials.json"), diverged).unwrap();
+
+        persist_claude_slot_refresh(&label, "new-access", Some("rt-new"), 5000).unwrap();
+        propagate_claude_slot_to_live(&label, stale).expect_err("must refuse");
+
+        assert_eq!(
+            std::fs::read(live.path().join(".credentials.json")).unwrap(),
+            diverged,
+            "a diverged live credential must never be overwritten"
+        );
 
         std::env::remove_var("AI_HANDOFF_HOME");
         std::env::remove_var("CLAUDE_CONFIG_DIR");

@@ -115,23 +115,28 @@ fn claude_token_refreshing(
     // one and persist it so the slot keeps working without a manual re-add.
     let expired_err =
         || "token expired; launch this account (l) or open Claude Code to refresh it".to_string();
-    // The active login is Claude Code's to refresh — rotating its refresh token
-    // here would break the live session (forcing a browser re-login). Only
-    // non-active slots (the ones that go stale from disuse) are refreshed.
-    if account::claude_slot_is_active(label) {
-        return Err(expired_err());
-    }
     let Some(refresh_token) = account::claude_credential_refresh_token(&bytes) else {
         return Err(expired_err());
     };
+    // When this slot IS the live login (byte-identical — Claude Code left the
+    // live credential expired), the rotated refresh token must be written back
+    // to the live file too, or Claude Code's stored refresh token is
+    // invalidated by this very refresh and its next start forces a re-login.
+    let live_was_identical = account::claude_live_credential_equals(&bytes);
     let refreshed = refresh_claude_oauth(&refresh_token, timeouts).map_err(|_| expired_err())?;
     let expires_at_ms = now_ms + refreshed.expires_in_secs.unwrap_or(0).saturating_mul(1000);
-    account::persist_claude_slot_refresh(
+    let persisted = account::persist_claude_slot_refresh(
         label,
         &refreshed.access_token,
         refreshed.refresh_token.as_deref(),
         expires_at_ms,
-    )
+    )?;
+    if live_was_identical {
+        // Best-effort: a failed propagation must not fail the usage fetch —
+        // the slot itself now holds a valid token either way.
+        let _ = account::propagate_claude_slot_to_live(label, &bytes);
+    }
+    Ok(persisted)
 }
 
 /// The subset of an OAuth refresh response we persist.
