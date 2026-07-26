@@ -152,14 +152,25 @@ pub fn plan_install(
 
 /// Write the file `plan.after` text to `path`, backing up any existing file
 /// first and creating parent directories as needed. Returns the backup path (if
-/// a file existed) as a string for recording into [`InstallState`].
+/// one was taken) as a string for recording into [`InstallState`].
+///
+/// A file whose content already matches `after` is left alone: re-running the
+/// installer over an unchanged config used to copy a byte-identical snapshot
+/// every time, which is how one config directory ended up with 25 backups
+/// holding 5 distinct contents. Backups that survive a real write are then
+/// pruned to [`backup::KEEP_BACKUPS`].
 fn write_with_backup(
     path: &Path,
     after: &str,
     now: DateTime<Utc>,
 ) -> std::io::Result<Option<String>> {
+    if read_existing(path)?.as_deref() == Some(after) {
+        return Ok(None);
+    }
     let backup = backup::backup_file(path, now)?;
     write_text_atomic(path, after)?;
+    // Best-effort: a stale backup we cannot delete must not fail the install.
+    let _ = backup::prune_backups(path, backup::KEEP_BACKUPS);
     Ok(backup.map(|b| b.to_string_lossy().into_owned()))
 }
 
@@ -570,7 +581,7 @@ fn remove_recorded_files(rec: &PluginRecord) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
+    use chrono::{TimeZone, Utc};
 
     #[test]
     fn install_then_user_edit_then_uninstall_preserves_user_edit() {
@@ -678,6 +689,93 @@ mod tests {
         // empty tables we created are dropped
         assert!(!final_cfg.contains("sandbox_workspace_write"));
         assert!(!final_cfg.contains("shell_environment_policy"));
+    }
+
+    /// Count the timestamped backups sitting next to `file`.
+    fn backup_count(file: &Path) -> usize {
+        let name = file.file_name().unwrap().to_string_lossy().into_owned();
+        let prefix = format!("{name}.ai-handoff-backup-");
+        std::fs::read_dir(file.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+            .count()
+    }
+
+    #[test]
+    fn repeated_installs_do_not_pile_up_identical_backups() {
+        // Regression: write_with_backup used to snapshot unconditionally, so a
+        // no-op re-install copied a byte-identical backup every run. Releases
+        // that re-run the installer turned one config dir into 25 backups
+        // holding 5 distinct contents.
+        let dir = tempfile::tempdir().unwrap();
+        let uh = dir.path();
+        std::fs::create_dir_all(uh.join(".claude")).unwrap();
+        let settings = uh.join(".claude/settings.json");
+        std::fs::write(&settings, r#"{"model":"opus"}"#).unwrap();
+        let ai_home = uh.join("ai-home");
+        let t = targets_for(
+            uh,
+            &ai_home,
+            &ai_home.join("ipc"),
+            std::path::Path::new("C:/p/ai-handoff.exe"),
+        );
+        let agents = AgentPresence {
+            codex: false,
+            claude: true,
+        };
+
+        // First install changes the file, so it earns exactly one backup.
+        apply_install(&t, &agents, Utc::now(), false).unwrap();
+        assert_eq!(backup_count(&settings), 1);
+        let after_first = std::fs::read_to_string(&settings).unwrap();
+
+        // Six further no-op installs must add nothing.
+        for _ in 0..6 {
+            let st = apply_install(&t, &agents, Utc::now(), false).unwrap();
+            assert_eq!(
+                st.claude.settings_file.as_ref().unwrap().backup,
+                None,
+                "an unchanged file must not record a backup"
+            );
+        }
+        assert_eq!(backup_count(&settings), 1, "no-op installs snapshotted");
+        assert_eq!(std::fs::read_to_string(&settings).unwrap(), after_first);
+    }
+
+    #[test]
+    fn backups_are_capped_at_the_retention_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let uh = dir.path();
+        std::fs::create_dir_all(uh.join(".claude")).unwrap();
+        let settings = uh.join(".claude/settings.json");
+        let ai_home = uh.join("ai-home");
+        let t = targets_for(
+            uh,
+            &ai_home,
+            &ai_home.join("ipc"),
+            std::path::Path::new("C:/p/ai-handoff.exe"),
+        );
+        let agents = AgentPresence {
+            codex: false,
+            claude: true,
+        };
+
+        // Each round edits the file behind our back so the next install is a
+        // real write, the only case that takes a backup. Timestamps are explicit
+        // and one second apart: backup names carry second resolution, so
+        // `Utc::now()` in a tight loop would collide and undercount.
+        for i in 0..(backup::KEEP_BACKUPS + 4) {
+            std::fs::write(&settings, format!(r#"{{"model":"m{i}"}}"#)).unwrap();
+            let now = Utc.with_ymd_and_hms(2026, 6, 25, 1, 2, i as u32).unwrap();
+            apply_install(&t, &agents, now, false).unwrap();
+        }
+
+        assert_eq!(
+            backup_count(&settings),
+            backup::KEEP_BACKUPS,
+            "retention limit not enforced"
+        );
     }
 
     #[test]
