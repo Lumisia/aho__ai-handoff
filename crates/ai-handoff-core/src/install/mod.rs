@@ -13,8 +13,8 @@ pub mod state;
 pub use backup::{backup_file, backup_path};
 pub use detect::{detect_agents, targets_for, AgentPresence, InstallTargets};
 pub use managed_hook::{
-    event_has_managed_hook, inner_hook_is_managed, outer_entry_is_managed, AGENT_CLAUDE,
-    AGENT_CODEX,
+    event_has_managed_hook, inner_hook_is_managed, outer_entry_is_managed,
+    without_managed_inner_hooks, AGENT_CLAUDE, AGENT_CODEX, MANAGED_EVENTS,
 };
 pub use plugin::{
     generate_bundle, merge_marketplace_entry, remove_handoff_user_skills, remove_marketplace_entry,

@@ -1,17 +1,11 @@
-use super::managed_hook::{outer_entry_is_managed, AGENT_CLAUDE};
-
-/// Lifecycle event names as they appear in Claude settings.json `hooks` object keys.
-pub const EVENTS: [&str; 4] = ["SessionStart", "UserPromptSubmit", "PostToolUse", "Stop"];
-
-/// CLI kebab arg strings corresponding to each entry in EVENTS (same order).
-const EVENT_ARGS: [&str; 4] = ["session-start", "user-prompt", "post-tool-use", "stop"];
+use super::managed_hook::{without_managed_inner_hooks, AGENT_CLAUDE, MANAGED_EVENTS};
 
 /// Apply our managed hooks into `existing` JSON (or a blank object when `None`).
 ///
 /// For each of the 4 events the function:
 /// 1. Gets or creates the event array under `hooks.<Event>`.
-/// 2. Retains all outer entries that are not ours (see
-///    [`super::managed_hook`]) — those are "foreign" entries we preserve.
+/// 2. Removes only our managed inner hooks (see [`super::managed_hook`]),
+///    preserving foreign inner hooks and their outer metadata.
 /// 3. Appends exactly one new outer entry containing our managed inner hook in exec form.
 ///
 /// Ownership is NOT decided by the `_aiHandoff` marker alone: Claude Code
@@ -40,17 +34,16 @@ pub fn apply(existing: Option<&str>, exe: &str) -> serde_json::Result<(String, V
 
     let mut managed_events: Vec<String> = Vec::new();
 
-    for (event, event_arg) in EVENTS.iter().zip(EVENT_ARGS.iter()) {
+    for (event, event_arg) in MANAGED_EVENTS {
         let hooks_obj = root["hooks"].as_object_mut().unwrap();
 
-        // Collect existing outer entries that are NOT ours.
+        // Remove only our inner hooks, preserving foreign hooks and outer metadata.
         let foreign: Vec<Value> = hooks_obj
-            .get(*event)
+            .get(event)
             .and_then(|v| v.as_array())
             .map(|arr| {
                 arr.iter()
-                    .filter(|outer| !outer_entry_is_managed(outer, AGENT_CLAUDE))
-                    .cloned()
+                    .filter_map(|outer| without_managed_inner_hooks(outer, AGENT_CLAUDE, event_arg))
                     .collect()
             })
             .unwrap_or_default();
@@ -59,13 +52,13 @@ pub fn apply(existing: Option<&str>, exe: &str) -> serde_json::Result<(String, V
         let inner_hook = json!({
             "type": "command",
             "command": exe,
-            "args": ["hook", *event_arg, "--agent", "claude-code"],
+            "args": ["hook", event_arg, "--agent", "claude-code"],
             "_aiHandoff": true,
             "timeout": 10
         });
 
         // Build the outer entry (PostToolUse gets a matcher).
-        let our_entry = if *event == "PostToolUse" {
+        let our_entry = if event == "PostToolUse" {
             json!({
                 "matcher": "Write|Edit|Bash|AskUserQuestion",
                 "hooks": [inner_hook]
@@ -87,9 +80,10 @@ pub fn apply(existing: Option<&str>, exe: &str) -> serde_json::Result<(String, V
     Ok((pretty, managed_events))
 }
 
-/// Remove every outer hook entry that is ours (see [`super::managed_hook`] —
-/// marker or invocation, so entries whose marker Claude Code stripped are still
-/// cleaned up).  Prune event arrays that become empty after removal.
+/// Remove every managed inner hook (see [`super::managed_hook`] — marker or
+/// invocation, so entries whose marker Claude Code stripped are still cleaned
+/// up). Preserve foreign inner hooks sharing the same outer entry. Prune event
+/// arrays that become empty after removal.
 /// Prune an empty `hooks` object entirely.
 /// Foreign entries are preserved unchanged.
 ///
@@ -103,11 +97,14 @@ pub fn remove(existing: &str) -> serde_json::Result<String> {
     if let Some(hooks_obj) = root.get_mut("hooks").and_then(Value::as_object_mut) {
         let mut empty_events: Vec<String> = Vec::new();
 
-        for (event, arr_val) in hooks_obj.iter_mut() {
-            if let Some(arr) = arr_val.as_array_mut() {
-                arr.retain(|outer| !outer_entry_is_managed(outer, AGENT_CLAUDE));
+        for (event, event_arg) in MANAGED_EVENTS {
+            if let Some(arr) = hooks_obj.get_mut(event).and_then(Value::as_array_mut) {
+                *arr = arr
+                    .iter()
+                    .filter_map(|outer| without_managed_inner_hooks(outer, AGENT_CLAUDE, event_arg))
+                    .collect();
                 if arr.is_empty() {
-                    empty_events.push(event.clone());
+                    empty_events.push(event.to_string());
                 }
             }
         }
@@ -185,6 +182,44 @@ mod tests {
     }
 
     #[test]
+    fn apply_and_remove_preserve_foreign_inner_hook_in_a_mixed_outer() {
+        let existing = r#"{
+          "hooks": {
+            "Stop": [{
+              "matcher": "user-matcher",
+              "custom": true,
+              "hooks": [
+                {
+                  "type": "command",
+                  "command": "C:\\p\\ai-handoff.exe",
+                  "args": ["hook", "stop", "--agent", "claude-code"]
+                },
+                {"type": "command", "command": "user-tool --save"}
+              ]
+            }]
+          }
+        }"#;
+
+        let (applied, _) = apply(Some(existing), "C:\\p\\ai-handoff.exe").unwrap();
+        let applied: Value = serde_json::from_str(&applied).unwrap();
+        let stop = applied["hooks"]["Stop"].as_array().unwrap();
+        assert_eq!(stop.len(), 2, "foreign outer plus new managed outer");
+        assert_eq!(stop[0]["matcher"], "user-matcher");
+        assert_eq!(stop[0]["custom"], true);
+        assert_eq!(stop[0]["hooks"].as_array().unwrap().len(), 1);
+        assert_eq!(stop[0]["hooks"][0]["command"], "user-tool --save");
+
+        let removed = remove(existing).unwrap();
+        let removed: Value = serde_json::from_str(&removed).unwrap();
+        assert_eq!(removed["hooks"]["Stop"][0]["matcher"], "user-matcher");
+        assert_eq!(removed["hooks"]["Stop"][0]["custom"], true);
+        assert_eq!(
+            removed["hooks"]["Stop"][0]["hooks"][0]["command"],
+            "user-tool --save"
+        );
+    }
+
+    #[test]
     fn post_tool_use_has_matcher() {
         let (json_str, _) = apply(None, "C:\\p\\ai-handoff.exe").unwrap();
         let v: Value = serde_json::from_str(&json_str).unwrap();
@@ -231,7 +266,7 @@ mod tests {
 
         let (second, _) = apply(Some(&stripped), exe).unwrap();
         let v: Value = serde_json::from_str(&second).unwrap();
-        for event in EVENTS {
+        for (event, _) in MANAGED_EVENTS {
             assert_eq!(
                 v["hooks"][event].as_array().unwrap().len(),
                 1,
@@ -256,7 +291,7 @@ mod tests {
 
         let (repaired, _) = apply(Some(&triple), exe).unwrap();
         let v: Value = serde_json::from_str(&repaired).unwrap();
-        for event in EVENTS {
+        for (event, _) in MANAGED_EVENTS {
             assert_eq!(v["hooks"][event].as_array().unwrap().len(), 1, "{event}");
         }
     }

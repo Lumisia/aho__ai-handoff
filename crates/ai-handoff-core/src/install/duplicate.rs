@@ -8,7 +8,7 @@ use serde_json::Value;
 use toml_edit::DocumentMut;
 
 use super::codex_config::PLUGIN_ENABLE_KEY;
-use super::managed_hook::{outer_entry_is_managed, AGENT_CODEX};
+use super::managed_hook::{outer_entry_is_managed, AGENT_CODEX, MANAGED_EVENTS};
 
 /// A single finding produced by [`detect`].
 #[derive(Debug, PartialEq)]
@@ -152,7 +152,7 @@ pub fn codex_v2_plugin_trusted(config_text: &str) -> bool {
         .ok()
         .and_then(|doc| hooks_state_keys(&doc))
         .map(|keys| {
-            super::codex_hooks::EVENTS.iter().all(|event| {
+            MANAGED_EVENTS.iter().all(|(event, _)| {
                 keys.iter()
                     .any(|key| is_v2_codex_plugin_hook_for_event(key, event))
             })
@@ -181,11 +181,13 @@ fn value_has_ai_handoff_hooks(value: &Value) -> bool {
         .get("hooks")
         .and_then(Value::as_object)
         .map(|events| {
-            events.values().any(|event| {
-                event.as_array().is_some_and(|outer_entries| {
-                    outer_entries
-                        .iter()
-                        .any(|outer| outer_entry_is_managed(outer, AGENT_CODEX))
+            MANAGED_EVENTS.iter().any(|(event, event_arg)| {
+                events.get(*event).is_some_and(|event_value| {
+                    event_value.as_array().is_some_and(|outer_entries| {
+                        outer_entries
+                            .iter()
+                            .any(|outer| outer_entry_is_managed(outer, AGENT_CODEX, event_arg))
+                    })
                 })
             })
         })

@@ -77,12 +77,9 @@ fn build_hooks_json(agent: AgentKind, exe: &str) -> String {
     debug_assert_eq!(agent, AgentKind::Codex, "only Codex bundles carry hooks");
 
     let mut hooks = Map::new();
-    for (event, event_arg) in super::codex_hooks::EVENTS
-        .iter()
-        .zip(CODEX_EVENT_ARGS.iter())
-    {
+    for (event, event_arg) in super::managed_hook::MANAGED_EVENTS {
         let command = super::codex_hooks::managed_command(exe, event_arg);
-        let inner = if *event == "PostToolUse" {
+        let inner = if event == "PostToolUse" {
             json!({
                 "type": "command",
                 "command": command,
@@ -105,9 +102,6 @@ fn build_hooks_json(agent: AgentKind, exe: &str) -> String {
     let root = json!({ "hooks": Value::Object(hooks) });
     serde_json::to_string_pretty(&root).expect("serialization cannot fail")
 }
-
-/// Kebab CLI arg strings for the Codex events (same order as `codex_hooks::EVENTS`).
-const CODEX_EVENT_ARGS: [&str; 4] = ["session-start", "user-prompt", "post-tool-use", "stop"];
 
 // ---------------------------------------------------------------------------
 // Atomic write helper (local, to avoid widening mod.rs visibility)
@@ -466,7 +460,7 @@ mod tests {
         assert!(!root.join(".claude-plugin/plugin.json").exists());
 
         let hooks: Value = serde_json::from_str(&read(root, "hooks/hooks.json")).unwrap();
-        for ev in super::super::codex_hooks::EVENTS {
+        for (ev, _) in super::super::managed_hook::MANAGED_EVENTS {
             assert!(hooks["hooks"][ev].is_array(), "missing codex event {ev}");
         }
 
@@ -479,7 +473,7 @@ mod tests {
 
         // Every Codex inner hook carries `_aiHandoff: true` for parity with the
         // direct `codex_hooks` path — `codex_hooks::remove` keys off this flag.
-        for ev in super::super::codex_hooks::EVENTS {
+        for (ev, _) in super::super::managed_hook::MANAGED_EVENTS {
             assert_eq!(
                 hooks["hooks"][ev][0]["hooks"][0]["_aiHandoff"].as_bool(),
                 Some(true),

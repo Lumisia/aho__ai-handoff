@@ -12,13 +12,11 @@ use crate::{
     fingerprint::fingerprint,
     install::{
         duplicate,
-        managed_hook::{event_has_managed_hook, AGENT_CLAUDE, AGENT_CODEX},
+        managed_hook::{event_has_managed_hook, AGENT_CLAUDE, AGENT_CODEX, MANAGED_EVENTS},
         state,
     },
     paths,
 };
-
-const EVENTS: [&str; 4] = ["SessionStart", "UserPromptSubmit", "PostToolUse", "Stop"];
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -504,9 +502,9 @@ fn check_codex_hooks(
     let hooks = value.get("hooks").and_then(Value::as_object);
     let installed = hooks
         .map(|obj| {
-            EVENTS
-                .iter()
-                .all(|event| event_has_managed_hook(obj.get(*event), AGENT_CODEX))
+            MANAGED_EVENTS.iter().all(|(event, event_arg)| {
+                event_has_managed_hook(obj.get(*event), AGENT_CODEX, event_arg)
+            })
         })
         .unwrap_or(false);
     if installed {
@@ -545,9 +543,9 @@ fn check_claude_settings(path: &Path, existing: Option<&str>) -> CheckRow {
     let hooks = value.get("hooks").and_then(Value::as_object);
     let installed = hooks
         .map(|obj| {
-            EVENTS
-                .iter()
-                .all(|event| event_has_managed_hook(obj.get(*event), AGENT_CLAUDE))
+            MANAGED_EVENTS.iter().all(|(event, event_arg)| {
+                event_has_managed_hook(obj.get(*event), AGENT_CLAUDE, event_arg)
+            })
         })
         .unwrap_or(false);
     if installed {
@@ -638,9 +636,9 @@ fn check_plugin_hooks(
     let hooks = value.get("hooks").and_then(Value::as_object);
     let installed = hooks
         .map(|obj| {
-            EVENTS
+            MANAGED_EVENTS
                 .iter()
-                .all(|event| event_has_managed_hook(obj.get(*event), agent))
+                .all(|(event, event_arg)| event_has_managed_hook(obj.get(*event), agent, event_arg))
         })
         .unwrap_or(false);
     if installed {
