@@ -170,7 +170,7 @@ fn write_with_backup(
     let backup = backup::backup_file(path, now)?;
     write_text_atomic(path, after)?;
     // Best-effort: a stale backup we cannot delete must not fail the install.
-    let _ = backup::prune_backups(path, backup::KEEP_BACKUPS);
+    let _ = backup::prune_backups(path, backup::KEEP_BACKUPS, backup.as_deref());
     Ok(backup.map(|b| b.to_string_lossy().into_owned()))
 }
 
@@ -776,6 +776,34 @@ mod tests {
             backup::KEEP_BACKUPS,
             "retention limit not enforced"
         );
+    }
+
+    #[test]
+    fn returned_backup_survives_prune_with_newer_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+
+        for second in 0..backup::KEEP_BACKUPS {
+            std::fs::write(&file, format!("future generation {second}")).unwrap();
+            let future = Utc
+                .with_ymd_and_hms(2099, 1, 1, 0, 0, second as u32)
+                .unwrap();
+            backup::backup_file(&file, future).unwrap().unwrap();
+        }
+
+        std::fs::write(&file, "current pre-write contents").unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 7, 26, 1, 2, 3).unwrap();
+        let returned = write_with_backup(&file, "after", now)
+            .unwrap()
+            .expect("existing file must produce a backup");
+        let returned = PathBuf::from(returned);
+
+        assert!(returned.exists(), "InstallState path must not be pruned");
+        assert_eq!(
+            std::fs::read_to_string(returned).unwrap(),
+            "current pre-write contents"
+        );
+        assert_eq!(std::fs::read_to_string(file).unwrap(), "after");
     }
 
     #[test]
