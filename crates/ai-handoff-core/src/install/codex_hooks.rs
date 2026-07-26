@@ -1,3 +1,5 @@
+use super::managed_hook::{outer_entry_is_managed, AGENT_CODEX};
+
 /// Lifecycle event names as they appear in Codex hooks.json keys.
 pub const EVENTS: [&str; 4] = ["SessionStart", "UserPromptSubmit", "PostToolUse", "Stop"];
 
@@ -15,9 +17,13 @@ pub fn managed_command(exe: &str, event_arg: &str) -> String {
 ///
 /// For each of the 4 events the function:
 /// 1. Gets or creates the event array under `hooks.<Event>`.
-/// 2. Retains all outer entries whose inner `hooks[]` array contains NO entry
-///    with `_aiHandoff == true` (those are "foreign" entries we preserve).
+/// 2. Retains all outer entries that are not ours (see
+///    [`super::managed_hook`]) — those are "foreign" entries we preserve.
 /// 3. Appends exactly one new outer entry containing our managed inner hook.
+///
+/// Ownership does not rely on the `_aiHandoff` marker alone; matching the
+/// invocation too keeps re-apply idempotent if a host ever re-serializes
+/// hooks.json and drops the unknown key, as Claude Code does to settings.json.
 ///
 /// Returns `Ok((pretty_json, managed_event_names))`, or a parse error when
 /// `existing` contains invalid JSON (caller should abort; the backup is the
@@ -40,23 +46,13 @@ pub fn apply(existing: Option<&str>, exe: &str) -> serde_json::Result<(String, V
     for (event, event_arg) in EVENTS.iter().zip(EVENT_ARGS.iter()) {
         let hooks_obj = root["hooks"].as_object_mut().unwrap();
 
-        // Collect existing outer entries that are NOT ours (no _aiHandoff inner hook).
+        // Collect existing outer entries that are NOT ours.
         let foreign: Vec<Value> = hooks_obj
             .get(*event)
             .and_then(|v| v.as_array())
             .map(|arr| {
                 arr.iter()
-                    .filter(|outer| {
-                        // An outer entry is "ours" if ANY of its inner hooks has _aiHandoff:true.
-                        !outer["hooks"]
-                            .as_array()
-                            .map(|inner_hooks| {
-                                inner_hooks
-                                    .iter()
-                                    .any(|h| h["_aiHandoff"].as_bool() == Some(true))
-                            })
-                            .unwrap_or(false)
-                    })
+                    .filter(|outer| !outer_entry_is_managed(outer, AGENT_CODEX))
                     .cloned()
                     .collect()
             })
@@ -87,8 +83,8 @@ pub fn apply(existing: Option<&str>, exe: &str) -> serde_json::Result<(String, V
     Ok((pretty, managed_events))
 }
 
-/// Remove every outer hook entry whose inner `hooks[]` array contains an entry
-/// with `_aiHandoff == true`.  Prune event arrays that become empty after removal.
+/// Remove every outer hook entry that is ours (see [`super::managed_hook`] —
+/// marker or invocation).  Prune event arrays that become empty after removal.
 /// Foreign entries are preserved unchanged.
 ///
 /// Returns `Ok(pretty_json)`, or a parse error when `existing` contains invalid
@@ -103,17 +99,7 @@ pub fn remove(existing: &str) -> serde_json::Result<String> {
 
         for (event, arr_val) in hooks_obj.iter_mut() {
             if let Some(arr) = arr_val.as_array_mut() {
-                arr.retain(|outer| {
-                    // Keep outer entries that contain NO _aiHandoff inner hook.
-                    !outer["hooks"]
-                        .as_array()
-                        .map(|inner_hooks| {
-                            inner_hooks
-                                .iter()
-                                .any(|h| h["_aiHandoff"].as_bool() == Some(true))
-                        })
-                        .unwrap_or(false)
-                });
+                arr.retain(|outer| !outer_entry_is_managed(outer, AGENT_CODEX));
                 if arr.is_empty() {
                     empty_events.push(event.clone());
                 }
@@ -166,6 +152,33 @@ mod tests {
         let exe = "C:\\p\\ai-handoff.exe";
         assert!(apply(Some("not valid json"), exe).is_err());
         assert!(remove("not valid json").is_err());
+    }
+
+    #[test]
+    fn apply_is_idempotent_after_the_marker_is_stripped() {
+        // Parity with install::claude — a host that re-serializes hooks.json and
+        // drops the unknown `_aiHandoff` key must not cause duplicate entries.
+        let exe = "C:\\p\\ai-handoff.exe";
+        let (first, _) = apply(None, exe).unwrap();
+        let mut root: Value = serde_json::from_str(&first).unwrap();
+        for arr in root["hooks"].as_object_mut().unwrap().values_mut() {
+            for outer in arr.as_array_mut().unwrap() {
+                for inner in outer["hooks"].as_array_mut().unwrap() {
+                    inner.as_object_mut().unwrap().remove("_aiHandoff");
+                }
+            }
+        }
+        let stripped = serde_json::to_string_pretty(&root).unwrap();
+
+        let (second, _) = apply(Some(&stripped), exe).unwrap();
+        let v: Value = serde_json::from_str(&second).unwrap();
+        for event in EVENTS {
+            assert_eq!(v["hooks"][event].as_array().unwrap().len(), 1, "{event}");
+        }
+
+        let cleaned = remove(&stripped).unwrap();
+        let c: Value = serde_json::from_str(&cleaned).unwrap();
+        assert!(c.get("hooks").is_none() || c["hooks"].as_object().unwrap().is_empty());
     }
 
     #[test]

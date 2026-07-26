@@ -6,11 +6,16 @@ pub mod codex_hooks;
 pub mod detect;
 pub mod diff;
 pub mod duplicate;
+pub mod managed_hook;
 pub mod plugin;
 pub mod state;
 
 pub use backup::{backup_file, backup_path};
 pub use detect::{detect_agents, targets_for, AgentPresence, InstallTargets};
+pub use managed_hook::{
+    event_has_managed_hook, inner_hook_is_managed, outer_entry_is_managed, AGENT_CLAUDE,
+    AGENT_CODEX,
+};
 pub use plugin::{
     generate_bundle, merge_marketplace_entry, remove_handoff_user_skills, remove_marketplace_entry,
 };

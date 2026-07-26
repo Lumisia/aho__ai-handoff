@@ -8,6 +8,7 @@ use serde_json::Value;
 use toml_edit::DocumentMut;
 
 use super::codex_config::PLUGIN_ENABLE_KEY;
+use super::managed_hook::{outer_entry_is_managed, AGENT_CODEX};
 
 /// A single finding produced by [`detect`].
 #[derive(Debug, PartialEq)]
@@ -30,7 +31,8 @@ pub struct DuplicateFinding {
 ///   such keys as v1 is a false positive.
 /// - If the v2 plugin is active (already enabled in config, or this scan is
 ///   running for a plugin-mode install), user-level `~/.codex/hooks.json`
-///   entries carrying `_aiHandoff:true` are flagged as direct-hook residue.
+///   entries recognised by [`super::managed_hook`] are flagged as direct-hook
+///   residue — marker or invocation, so a stripped marker still gets reported.
 ///
 /// # Claude
 /// Parses `claude_settings_text` as JSON. If `enabledPlugins` contains any
@@ -181,16 +183,9 @@ fn value_has_ai_handoff_hooks(value: &Value) -> bool {
         .map(|events| {
             events.values().any(|event| {
                 event.as_array().is_some_and(|outer_entries| {
-                    outer_entries.iter().any(|outer| {
-                        outer
-                            .get("hooks")
-                            .and_then(Value::as_array)
-                            .is_some_and(|inner_hooks| {
-                                inner_hooks.iter().any(|hook| {
-                                    hook.get("_aiHandoff").and_then(Value::as_bool) == Some(true)
-                                })
-                            })
-                    })
+                    outer_entries
+                        .iter()
+                        .any(|outer| outer_entry_is_managed(outer, AGENT_CODEX))
                 })
             })
         })

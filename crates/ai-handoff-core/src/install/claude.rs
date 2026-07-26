@@ -1,3 +1,5 @@
+use super::managed_hook::{outer_entry_is_managed, AGENT_CLAUDE};
+
 /// Lifecycle event names as they appear in Claude settings.json `hooks` object keys.
 pub const EVENTS: [&str; 4] = ["SessionStart", "UserPromptSubmit", "PostToolUse", "Stop"];
 
@@ -8,9 +10,14 @@ const EVENT_ARGS: [&str; 4] = ["session-start", "user-prompt", "post-tool-use", 
 ///
 /// For each of the 4 events the function:
 /// 1. Gets or creates the event array under `hooks.<Event>`.
-/// 2. Retains all outer entries whose inner `hooks[]` array contains NO entry
-///    with `_aiHandoff == true` (those are "foreign" entries we preserve).
+/// 2. Retains all outer entries that are not ours (see
+///    [`super::managed_hook`]) — those are "foreign" entries we preserve.
 /// 3. Appends exactly one new outer entry containing our managed inner hook in exec form.
+///
+/// Ownership is NOT decided by the `_aiHandoff` marker alone: Claude Code
+/// rewrites settings.json and drops that unknown key, and marker-only matching
+/// then re-classified our own entry as foreign and appended a duplicate on
+/// every install. See [`super::managed_hook`] for the full matching rule.
 ///
 /// PostToolUse additionally carries `"matcher": "Write|Edit|Bash|AskUserQuestion"`
 /// so the selected checkpoint decision returns through the same lifecycle hook.
@@ -36,23 +43,13 @@ pub fn apply(existing: Option<&str>, exe: &str) -> serde_json::Result<(String, V
     for (event, event_arg) in EVENTS.iter().zip(EVENT_ARGS.iter()) {
         let hooks_obj = root["hooks"].as_object_mut().unwrap();
 
-        // Collect existing outer entries that are NOT ours (no _aiHandoff inner hook).
+        // Collect existing outer entries that are NOT ours.
         let foreign: Vec<Value> = hooks_obj
             .get(*event)
             .and_then(|v| v.as_array())
             .map(|arr| {
                 arr.iter()
-                    .filter(|outer| {
-                        // An outer entry is "ours" if ANY of its inner hooks has _aiHandoff:true.
-                        !outer["hooks"]
-                            .as_array()
-                            .map(|inner_hooks| {
-                                inner_hooks
-                                    .iter()
-                                    .any(|h| h["_aiHandoff"].as_bool() == Some(true))
-                            })
-                            .unwrap_or(false)
-                    })
+                    .filter(|outer| !outer_entry_is_managed(outer, AGENT_CLAUDE))
                     .cloned()
                     .collect()
             })
@@ -90,8 +87,9 @@ pub fn apply(existing: Option<&str>, exe: &str) -> serde_json::Result<(String, V
     Ok((pretty, managed_events))
 }
 
-/// Remove every outer hook entry whose inner `hooks[]` array contains an entry
-/// with `_aiHandoff == true`.  Prune event arrays that become empty after removal.
+/// Remove every outer hook entry that is ours (see [`super::managed_hook`] —
+/// marker or invocation, so entries whose marker Claude Code stripped are still
+/// cleaned up).  Prune event arrays that become empty after removal.
 /// Prune an empty `hooks` object entirely.
 /// Foreign entries are preserved unchanged.
 ///
@@ -107,17 +105,7 @@ pub fn remove(existing: &str) -> serde_json::Result<String> {
 
         for (event, arr_val) in hooks_obj.iter_mut() {
             if let Some(arr) = arr_val.as_array_mut() {
-                arr.retain(|outer| {
-                    // Keep outer entries that contain NO _aiHandoff inner hook.
-                    !outer["hooks"]
-                        .as_array()
-                        .map(|inner_hooks| {
-                            inner_hooks
-                                .iter()
-                                .any(|h| h["_aiHandoff"].as_bool() == Some(true))
-                        })
-                        .unwrap_or(false)
-                });
+                arr.retain(|outer| !outer_entry_is_managed(outer, AGENT_CLAUDE));
                 if arr.is_empty() {
                     empty_events.push(event.clone());
                 }
@@ -214,6 +202,84 @@ mod tests {
         let exe = "C:\\p\\ai-handoff.exe";
         assert!(apply(Some("not valid json"), exe).is_err());
         assert!(remove("not valid json").is_err());
+    }
+
+    /// Strip the `_aiHandoff` marker from every inner hook, reproducing what
+    /// Claude Code does when it re-serializes settings.json.
+    fn strip_markers(text: &str) -> String {
+        let mut root: Value = serde_json::from_str(text).unwrap();
+        let hooks = root["hooks"].as_object_mut().unwrap();
+        for arr in hooks.values_mut() {
+            for outer in arr.as_array_mut().unwrap() {
+                for inner in outer["hooks"].as_array_mut().unwrap() {
+                    inner.as_object_mut().unwrap().remove("_aiHandoff");
+                }
+            }
+        }
+        serde_json::to_string_pretty(&root).unwrap()
+    }
+
+    #[test]
+    fn apply_is_idempotent_after_the_marker_is_stripped() {
+        // Regression: Claude Code drops the unknown `_aiHandoff` key when it
+        // rewrites settings.json. Marker-only matching then read our own entry
+        // as foreign and appended a second copy on every install, growing the
+        // array 1 -> 2 -> 3 across releases.
+        let exe = "C:\\p\\ai-handoff.exe";
+        let (first, _) = apply(None, exe).unwrap();
+        let stripped = strip_markers(&first);
+
+        let (second, _) = apply(Some(&stripped), exe).unwrap();
+        let v: Value = serde_json::from_str(&second).unwrap();
+        for event in EVENTS {
+            assert_eq!(
+                v["hooks"][event].as_array().unwrap().len(),
+                1,
+                "{event} must keep exactly one managed entry"
+            );
+        }
+    }
+
+    #[test]
+    fn apply_collapses_pre_existing_unmarked_duplicates() {
+        // Settings that already accumulated three unmarked copies per event
+        // must come back down to one.
+        let exe = "C:\\p\\ai-handoff.exe";
+        let (base, _) = apply(None, exe).unwrap();
+        let mut root: Value = serde_json::from_str(&strip_markers(&base)).unwrap();
+        for arr in root["hooks"].as_object_mut().unwrap().values_mut() {
+            let entry = arr[0].clone();
+            arr.as_array_mut().unwrap().push(entry.clone());
+            arr.as_array_mut().unwrap().push(entry);
+        }
+        let triple = serde_json::to_string_pretty(&root).unwrap();
+
+        let (repaired, _) = apply(Some(&triple), exe).unwrap();
+        let v: Value = serde_json::from_str(&repaired).unwrap();
+        for event in EVENTS {
+            assert_eq!(v["hooks"][event].as_array().unwrap().len(), 1, "{event}");
+        }
+    }
+
+    #[test]
+    fn remove_strips_entries_whose_marker_was_stripped() {
+        let (applied, _) = apply(None, "C:\\p\\ai-handoff.exe").unwrap();
+        let cleaned = remove(&strip_markers(&applied)).unwrap();
+        let c: Value = serde_json::from_str(&cleaned).unwrap();
+        assert!(c.get("hooks").is_none(), "unmarked leftovers: {cleaned}");
+    }
+
+    #[test]
+    fn apply_preserves_a_user_hook_that_calls_our_binary_for_something_else() {
+        let user = r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"\"C:\\p\\ai-handoff.exe\" statusline"}]}]}}"#;
+        let (merged, _) = apply(Some(user), "C:\\p\\ai-handoff.exe").unwrap();
+        let v: Value = serde_json::from_str(&merged).unwrap();
+        let stop = v["hooks"]["Stop"].as_array().unwrap();
+        assert_eq!(stop.len(), 2, "user entry must survive alongside ours");
+        assert_eq!(
+            stop[0]["hooks"][0]["command"],
+            "\"C:\\p\\ai-handoff.exe\" statusline"
+        );
     }
 
     #[test]

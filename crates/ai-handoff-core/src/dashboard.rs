@@ -10,7 +10,11 @@ use crate::{
     capsule::Capsule,
     capsule_codec,
     fingerprint::fingerprint,
-    install::{duplicate, state},
+    install::{
+        duplicate,
+        managed_hook::{event_has_managed_hook, AGENT_CLAUDE, AGENT_CODEX},
+        state,
+    },
     paths,
 };
 
@@ -460,7 +464,7 @@ fn check_codex_hooks(
     codex_config: Option<&str>,
     plugin: &Option<state::PluginRecord>,
 ) -> CheckRow {
-    if let Some(row) = check_plugin_hooks("codex-hooks", "Codex hooks", plugin) {
+    if let Some(row) = check_plugin_hooks("codex-hooks", "Codex hooks", plugin, AGENT_CODEX) {
         if row.status != CheckStatus::Ok {
             return row;
         }
@@ -502,7 +506,7 @@ fn check_codex_hooks(
         .map(|obj| {
             EVENTS
                 .iter()
-                .all(|event| event_has_ai_handoff(obj.get(*event)))
+                .all(|event| event_has_managed_hook(obj.get(*event), AGENT_CODEX))
         })
         .unwrap_or(false);
     if installed {
@@ -543,7 +547,7 @@ fn check_claude_settings(path: &Path, existing: Option<&str>) -> CheckRow {
         .map(|obj| {
             EVENTS
                 .iter()
-                .all(|event| event_has_ai_handoff(obj.get(*event)))
+                .all(|event| event_has_managed_hook(obj.get(*event), AGENT_CLAUDE))
         })
         .unwrap_or(false);
     if installed {
@@ -616,6 +620,7 @@ fn check_plugin_hooks(
     id: &str,
     label: &str,
     plugin: &Option<state::PluginRecord>,
+    agent: &str,
 ) -> Option<CheckRow> {
     let rec = plugin.as_ref()?;
     let path = Path::new(&rec.root).join("hooks").join("hooks.json");
@@ -635,7 +640,7 @@ fn check_plugin_hooks(
         .map(|obj| {
             EVENTS
                 .iter()
-                .all(|event| event_has_ai_handoff(obj.get(*event)))
+                .all(|event| event_has_managed_hook(obj.get(*event), agent))
         })
         .unwrap_or(false);
     if installed {
@@ -649,25 +654,6 @@ fn check_plugin_hooks(
             path: Some(path.to_string_lossy().into_owned()),
         })
     }
-}
-
-fn event_has_ai_handoff(value: Option<&Value>) -> bool {
-    value
-        .and_then(Value::as_array)
-        .map(|outer| {
-            outer.iter().any(|entry| {
-                entry
-                    .get("hooks")
-                    .and_then(Value::as_array)
-                    .map(|inner| {
-                        inner.iter().any(|hook| {
-                            hook.get("_aiHandoff").and_then(Value::as_bool) == Some(true)
-                        })
-                    })
-                    .unwrap_or(false)
-            })
-        })
-        .unwrap_or(false)
 }
 
 fn summary_from_capsule(capsule: Capsule, path: PathBuf, project_label: String) -> CapsuleSummary {
