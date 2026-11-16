@@ -17,6 +17,7 @@ const required = [
   '.claude-plugin/plugin.json', '.codex-plugin/plugin.json',
   '.claude-plugin/marketplace.json', '.agents/plugins/marketplace.json',
   'scripts/install.sh',
+  'apps/desktop/src-tauri/icons/icon.png',
   'skills/handoff/SKILL.md',
   'skills/handoff-checkpoint/SKILL.md',
   'skills/handoff-doctor/SKILL.md',
