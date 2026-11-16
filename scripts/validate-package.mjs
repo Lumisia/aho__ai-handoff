@@ -29,8 +29,13 @@ for (const relative of required) {
 const claude = JSON.parse(readFileSync(join(root, '.claude-plugin/plugin.json'), 'utf8'));
 const codex = JSON.parse(readFileSync(join(root, '.codex-plugin/plugin.json'), 'utf8'));
 const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+const cargoVersion = readFileSync(join(root, 'Cargo.toml'), 'utf8')
+  .match(/\[workspace\.package\][\s\S]*?^version\s*=\s*"([^"]+)"/m)?.[1];
 if (claude.name !== codex.name || claude.version !== codex.version || pkg.version !== codex.version) {
   throw new Error('manifest mismatch');
+}
+if (cargoVersion !== pkg.version || tauriConf.version !== pkg.version) {
+  throw new Error('Rust, desktop and plugin release versions must match');
 }
 if (claude.experimental?.monitors || codex.hooks) {
   throw new Error('source plugin must not expose legacy v1 monitors or hook templates');

@@ -235,6 +235,10 @@ Error: $($_.Exception.Message)
 
     Write-Host "Running ai-handoff $($installArgs -join ' ')"
     & $dest @installArgs
+    $installExitCode = $LASTEXITCODE
+    if ($installExitCode -ne 0) {
+        throw "ai-handoff install failed with exit code $installExitCode."
+    }
 
     if ($WithGui) {
         Install-Gui -Url $guiUrl -Artifact $guiArtifact -TmpDir $tmpDir -Silent ([bool]$Yes)

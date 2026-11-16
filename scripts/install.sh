@@ -70,6 +70,7 @@ need() {
 }
 
 need curl
+need mktemp
 
 os="$(uname -s)"
 arch="$(uname -m)"
@@ -163,9 +164,13 @@ bin_dir="$home/bin"
 tmp_dir="${TMPDIR:-/tmp}/ai-handoff-install-$$"
 archive="$tmp_dir/$artifact"
 checksum="$archive.sha256"
+staging_dir=""
 
 mkdir -p "$tmp_dir" "$bin_dir"
 cleanup() {
+  if [ -n "$staging_dir" ]; then
+    rm -rf "$staging_dir"
+  fi
   rm -rf "$tmp_dir"
 }
 trap cleanup EXIT INT TERM
@@ -207,10 +212,20 @@ host_found="$(find "$tmp_dir" -type f -name "$host_name" | head -n 1)"
 
 dest="$bin_dir/$exe_name"
 host_dest="$bin_dir/$host_name"
-cp "$found" "$dest"
-cp "$host_found" "$host_dest"
-chmod +x "$dest" 2>/dev/null || true
-chmod +x "$host_dest" 2>/dev/null || true
+if [ -d "$dest" ] || [ -d "$host_dest" ]; then
+  echo "binary destination is a directory" >&2
+  exit 1
+fi
+# Prepare both files beside their destinations before replacing either inode.
+# Renaming on the same filesystem also works while an old binary is executing.
+staging_dir="$(mktemp -d "$bin_dir/.ai-handoff-install-XXXXXX")"
+cp "$found" "$staging_dir/$exe_name"
+cp "$host_found" "$staging_dir/$host_name"
+chmod +x "$staging_dir/$exe_name" "$staging_dir/$host_name"
+mv -f "$staging_dir/$exe_name" "$dest"
+mv -f "$staging_dir/$host_name" "$host_dest"
+rmdir "$staging_dir"
+staging_dir=""
 
 echo "Installed $dest"
 echo "Installed $host_dest"
