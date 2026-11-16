@@ -7,16 +7,18 @@
 //! Lives in core (not the TUI) so the daemon can consult a slot's real usage at
 //! hook time — the only account-scoped usage source for the five-hour trigger.
 
-use std::cmp::Ordering;
 use std::time::Duration;
 
 use crate::account::{self, Agent, RateWindow};
-use chrono::DateTime;
+use chrono::{DateTime, FixedOffset, Utc};
 use serde_json::Value;
 
 const USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const RESET_CREDITS_URL: &str = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
 const CLAUDE_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
+/// Compatibility identity observed in OpenUsage's published implementation.
+/// Keep this confined to interactive inventory reads; see docs/advanced/claude-reset-credits.md.
+const CLAUDE_RESET_USER_AGENT: &str = "claude-cli/2.1.294 (external, cli)";
 /// Claude Code's public OAuth token endpoint and client id (mechanical
 /// refresh-token grant only — the interactive login flow still belongs to the
 /// official CLI). Values match the installed Claude Code CLI.
@@ -51,24 +53,63 @@ pub struct UsageData {
     pub weekly: Option<RateWindow>,
     pub reset_credits: Option<i64>,
     pub reset_credit_details: Vec<ResetCredit>,
+    /// None means the provider did not expose a trustworthy inventory.
+    pub claude_reset_credits: Option<Vec<ClaudeResetCredit>>,
+}
+
+/// Display-only data: redemption handles and provider text never leave the parser.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct ClaudeResetCredit {
+    pub remaining: i64,
+    pub starts_at: Option<i64>,
+    pub expires_at: Option<i64>,
+    pub kind: ClaudeResetKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaudeResetKind {
+    Full,
+    Weekly,
+    Session,
+    Scoped,
+    Other,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ResetCredit {
-    pub granted_at: String,
-    pub expires_at: String,
+    pub granted_at: Option<DateTime<FixedOffset>>,
+    pub expires_at: Option<DateTime<FixedOffset>>,
+    pub kind: CodexResetKind,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexResetKind {
+    Full,
+    #[default]
+    Other,
 }
 
 /// Fetch a saved slot's usage with the default (interactive) timeouts.
 pub fn fetch_slot_usage(agent: Agent, label: &str) -> Result<UsageData, String> {
-    fetch_slot_usage_with(agent, label, FetchTimeouts::default())
+    fetch_slot_usage_impl(agent, label, FetchTimeouts::default(), true)
 }
 
-/// Fetch a saved slot's usage with explicit network timeouts.
+/// Fetch usage for a latency-sensitive caller without optional Claude inventory.
 pub fn fetch_slot_usage_with(
     agent: Agent,
     label: &str,
     timeouts: FetchTimeouts,
+) -> Result<UsageData, String> {
+    fetch_slot_usage_impl(agent, label, timeouts, false)
+}
+
+fn fetch_slot_usage_impl(
+    agent: Agent,
+    label: &str,
+    timeouts: FetchTimeouts,
+    include_reset_credits: bool,
 ) -> Result<UsageData, String> {
     match agent {
         Agent::Codex => {
@@ -81,7 +122,7 @@ pub fn fetch_slot_usage_with(
             // — if the saved token has still expired — exchanges the stored
             // refresh token for a new one so a non-active slot stays usable.
             let (token, plan) = claude_token_refreshing(label, timeouts)?;
-            fetch_claude_usage(&token, plan, timeouts)
+            fetch_claude_usage(&token, plan, timeouts, include_reset_credits)
         }
     }
 }
@@ -127,6 +168,7 @@ fn claude_token_refreshing(
     let expires_at_ms = now_ms + refreshed.expires_in_secs.unwrap_or(0).saturating_mul(1000);
     let persisted = account::persist_claude_slot_refresh(
         label,
+        &bytes,
         &refreshed.access_token,
         refreshed.refresh_token.as_deref(),
         expires_at_ms,
@@ -134,7 +176,7 @@ fn claude_token_refreshing(
     if live_was_identical {
         // Best-effort: a failed propagation must not fail the usage fetch —
         // the slot itself now holds a valid token either way.
-        let _ = account::propagate_claude_slot_to_live(label, &bytes);
+        let _ = account::propagate_claude_slot_to_live(label, &bytes, &persisted.0);
     }
     Ok(persisted)
 }
@@ -256,6 +298,7 @@ fn parse_usage(body: &Value) -> UsageData {
             .and_then(|c| c.get("available_count"))
             .and_then(Value::as_i64),
         reset_credit_details: Vec::new(),
+        claude_reset_credits: None,
     }
 }
 
@@ -263,9 +306,23 @@ fn fetch_claude_usage(
     access_token: &str,
     plan: Option<String>,
     timeouts: FetchTimeouts,
+    include_reset_credits: bool,
 ) -> Result<UsageData, String> {
-    let agent = build_agent("claude-code", timeouts);
-    match fetch_claude_oauth_usage(&agent, access_token, plan) {
+    // A bearer-authenticated usage read must stay on its fixed HTTPS endpoint.
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(timeouts.connect)
+        .timeout_read(timeouts.read)
+        .user_agent("claude-code")
+        .https_only(true)
+        .redirects(0)
+        .build();
+    match fetch_claude_oauth_usage_using(
+        &agent,
+        access_token,
+        plan,
+        include_reset_credits,
+        |request| request.call(),
+    ) {
         Ok(usage) if claude_usage_has_windows(&usage) => Ok(usage),
         Ok(_) => Err(
             "usage response missing limits; open Claude Code and send a message to record a sample"
@@ -275,18 +332,39 @@ fn fetch_claude_usage(
     }
 }
 
-fn fetch_claude_oauth_usage(
+fn fetch_claude_oauth_usage_using(
     agent: &ureq::Agent,
     access_token: &str,
     plan: Option<String>,
+    include_reset_credits: bool,
+    mut send: impl FnMut(ureq::Request) -> Result<ureq::Response, ureq::Error>,
 ) -> Result<UsageData, ClaudeUsageFetchError> {
-    match agent
-        .get(CLAUDE_USAGE_URL)
-        .set("Authorization", &format!("Bearer {access_token}"))
-        .set("anthropic-beta", "oauth-2025-04-20")
-        .set("Accept", "application/json")
-        .call()
-    {
+    let request = |inventory| {
+        agent
+            .get(if inventory {
+                "https://api.anthropic.com/api/oauth/usage?cedar_ember=1"
+            } else {
+                CLAUDE_USAGE_URL
+            })
+            .set("Authorization", &format!("Bearer {access_token}"))
+            .set("anthropic-beta", "oauth-2025-04-20")
+            .set("Accept", "application/json")
+            .set(
+                "User-Agent",
+                if inventory {
+                    CLAUDE_RESET_USER_AGENT
+                } else {
+                    "claude-code"
+                },
+            )
+    };
+    let mut response = send(request(include_reset_credits));
+    if include_reset_credits && matches!(response, Err(ureq::Error::Status(400 | 403, _))) {
+        // Optional inventory rejection must not break existing quota reporting.
+        // Same credential, same origin, once; never retry 401/429 or network errors.
+        response = send(request(false));
+    }
+    match response {
         Ok(resp) => {
             let body: Value = resp
                 .into_json()
@@ -329,12 +407,92 @@ fn claude_usage_has_windows(usage: &UsageData) -> bool {
 }
 
 fn parse_claude_usage(body: &Value, plan: Option<String>) -> UsageData {
+    parse_claude_usage_at(body, plan, chrono::Utc::now().timestamp())
+}
+
+fn parse_claude_usage_at(body: &Value, plan: Option<String>, now: i64) -> UsageData {
+    let credits = parse_claude_reset_credits(body, now);
     UsageData {
         plan,
         five_hour: claude_window(body, &["five_hour", "five_hour_limit"], 300),
         weekly: claude_window(body, &["seven_day", "weekly", "weekly_limit"], 10080),
-        reset_credits: None,
+        reset_credits: credits
+            .as_ref()
+            .map(|rows| rows.iter().map(|row| row.remaining).sum()),
         reset_credit_details: Vec::new(),
+        claude_reset_credits: credits,
+    }
+}
+
+fn parse_claude_reset_credits(body: &Value, now: i64) -> Option<Vec<ClaudeResetCredit>> {
+    let inventory = body.get("cedar_ember")?;
+    // Surface/version restrictions do not establish an empty balance.
+    if inventory.get("eligible").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    let grants = inventory.get("grants")?.as_array()?;
+    if grants.len() > 1000 {
+        return None;
+    }
+    let mut credits = Vec::new();
+    let mut total = 0i64;
+    for grant in grants {
+        let remaining = grant.get("resets_left")?.as_i64()?;
+        let granted = grant.get("resets_total")?.as_i64()?;
+        if !(0..=1000).contains(&remaining) || granted < remaining {
+            return None;
+        }
+        let starts_at = optional_claude_credit_time(grant.get("starts_at"))?;
+        let expires_at = optional_claude_credit_time(grant.get("ends_at"))?;
+        let paused = grant.get("paused")?.as_bool()?;
+        if remaining == 0
+            || paused
+            || starts_at.is_some_and(|start| start > now)
+            || expires_at.is_some_and(|end| end <= now)
+        {
+            continue;
+        }
+        total = total.checked_add(remaining)?;
+        if total > 1000 {
+            return None;
+        }
+        let clears = grant.get("clears").and_then(Value::as_array);
+        let clears_window = |name: &str| {
+            clears.is_some_and(|values| values.iter().any(|v| v.as_str() == Some(name)))
+        };
+        let scoped = grant.get("gives_back_weekly").and_then(Value::as_bool) == Some(true);
+        let kind = if scoped
+            || (clears_window("seven_day_overage_included") && !clears_window("seven_day"))
+        {
+            ClaudeResetKind::Scoped
+        } else if clears_window("five_hour") && clears_window("seven_day") {
+            ClaudeResetKind::Full
+        } else if clears_window("seven_day") {
+            ClaudeResetKind::Weekly
+        } else if clears_window("five_hour") {
+            ClaudeResetKind::Session
+        } else {
+            ClaudeResetKind::Other
+        };
+        // `usable_now` describes redemption gates, not how many resets are saved.
+        credits.push(ClaudeResetCredit {
+            remaining,
+            starts_at,
+            expires_at,
+            kind,
+        });
+    }
+    credits.sort_by_key(|credit| credit.expires_at.unwrap_or(i64::MAX));
+    Some(credits)
+}
+
+fn optional_claude_credit_time(value: Option<&Value>) -> Option<Option<i64>> {
+    match value {
+        None | Some(Value::Null) => Some(None),
+        Some(Value::String(value)) => DateTime::parse_from_rfc3339(value)
+            .ok()
+            .map(|date| Some(date.timestamp())),
+        _ => None,
     }
 }
 
@@ -388,12 +546,9 @@ fn claude_limit_array_item<'a>(body: &'a Value, keys: &[&str]) -> Option<&'a Val
 }
 
 fn normalize_claude_percent(value: f64) -> f64 {
-    let pct = if (0.0..=1.0).contains(&value) {
-        value * 100.0
-    } else {
-        value
-    };
-    pct.clamp(0.0, 100.0)
+    // OAuth utilization and the percentage aliases are already in 0..100 units.
+    // Guessing a fraction from a value <= 1 turns real 1% usage into 100%.
+    value.clamp(0.0, 100.0)
 }
 
 fn parse_claude_reset(value: &Value) -> Option<i64> {
@@ -419,7 +574,7 @@ fn fetch_reset_credit_details(
     {
         Ok(resp) => {
             let body: Value = resp.into_json().map_err(|_| "bad response".to_string())?;
-            Ok(parse_reset_credit_details(&body))
+            Ok(parse_reset_credit_details(&body, Utc::now()))
         }
         Err(ureq::Error::Status(401, _)) | Err(ureq::Error::Status(403, _)) => {
             Err("auth expired; re-add this account".to_string())
@@ -429,39 +584,48 @@ fn fetch_reset_credit_details(
     }
 }
 
-fn parse_reset_credit_details(body: &Value) -> Vec<ResetCredit> {
+fn parse_reset_credit_details(body: &Value, now: DateTime<Utc>) -> Vec<ResetCredit> {
     let mut credits: Vec<ResetCredit> = body
         .get("credits")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter_map(|raw| {
-            let granted_at = raw.get("granted_at").and_then(Value::as_str)?;
-            let expires_at = raw.get("expires_at").and_then(Value::as_str)?;
+            let date = |field| {
+                raw.get(field)
+                    .and_then(Value::as_str)
+                    .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+            };
+            let granted_at = date("granted_at");
+            let expires_at = date("expires_at");
+            match raw.get("status") {
+                Some(status) if status.as_str() == Some("available") => {}
+                // Older responses could omit status and only carry the dates.
+                None if granted_at.is_some() && expires_at.is_some() => {}
+                _ => return None,
+            }
+            if expires_at.is_some_and(|expires| expires <= now) {
+                return None;
+            }
+            let kind = match raw.get("reset_type").and_then(Value::as_str) {
+                Some("codex_rate_limits") => CodexResetKind::Full,
+                _ => CodexResetKind::Other,
+            };
             Some(ResetCredit {
-                granted_at: granted_at.to_string(),
-                expires_at: expires_at.to_string(),
+                granted_at,
+                expires_at,
+                kind,
             })
         })
         .collect();
-    credits.sort_by(|a, b| {
-        cmp_credit_datetime(&a.expires_at, &b.expires_at)
-            .then_with(|| cmp_credit_datetime(&a.granted_at, &b.granted_at))
+    credits.sort_by_key(|credit| {
+        (
+            credit.expires_at.is_none(),
+            credit.expires_at,
+            credit.granted_at,
+        )
     });
     credits
-}
-
-fn cmp_credit_datetime(a: &str, b: &str) -> Ordering {
-    match (
-        DateTime::parse_from_rfc3339(a),
-        DateTime::parse_from_rfc3339(b),
-    ) {
-        (Ok(a), Ok(b)) => a
-            .timestamp()
-            .cmp(&b.timestamp())
-            .then_with(|| a.timestamp_subsec_nanos().cmp(&b.timestamp_subsec_nanos())),
-        _ => a.cmp(b),
-    }
 }
 
 #[cfg(test)]
@@ -509,7 +673,7 @@ mod tests {
 
         assert_eq!(u.plan.as_deref(), Some("pro"));
         let five = u.five_hour.expect("5h");
-        assert_eq!(five.used_percent, 42.0);
+        assert_eq!(five.used_percent, 0.42);
         assert_eq!(five.window_minutes, 300);
         assert_eq!(five.resets_at, Some(1782864000));
         let weekly = u.weekly.expect("weekly");
@@ -537,7 +701,7 @@ mod tests {
 
         assert_eq!(u.plan.as_deref(), Some("pro"));
         let five = u.five_hour.expect("5h");
-        assert_eq!(five.used_percent, 62.0);
+        assert_eq!(five.used_percent, 0.62);
         assert_eq!(five.window_minutes, 300);
         assert_eq!(five.resets_at, Some(1782864000));
         let weekly = u.weekly.expect("weekly");
@@ -547,40 +711,285 @@ mod tests {
     }
 
     #[test]
+    fn claude_low_usage_percentages_are_not_inferred_as_fractions() {
+        for percent in [0.0, 0.42, 1.0, 1.01, 42.0, 100.0] {
+            let body = serde_json::json!({
+                "five_hour": { "utilization": percent },
+                "seven_day": { "used_percentage": percent },
+            });
+            let usage = parse_claude_usage(&body, None);
+            assert_eq!(usage.five_hour.unwrap().used_percent, percent);
+            assert_eq!(usage.weekly.unwrap().used_percent, percent);
+        }
+        let usage = parse_claude_usage(
+            &serde_json::json!({"five_hour": {"percent_remaining": 1.0}}),
+            None,
+        );
+        assert_eq!(usage.five_hour.unwrap().used_percent, 99.0);
+    }
+
+    fn claude_reset_body(grants: Value) -> Value {
+        serde_json::json!({
+            "five_hour": { "utilization": 42 },
+            "cedar_ember": { "eligible": true, "grants": grants, "next_grant_id": "private-handle" }
+        })
+    }
+
+    fn claude_grant() -> Value {
+        serde_json::json!({
+            "id": "private-handle", "label": "untrusted label",
+            "resets_left": 2, "resets_total": 3,
+            "starts_at": "2026-11-01T00:00:00Z", "ends_at": "2026-12-11T22:00:00Z",
+            "paused": false, "usable_now": false, "use_requires_limit": true,
+            "clears": ["five_hour", "seven_day"], "type": "full", "gives_back_weekly": false
+        })
+    }
+
+    #[test]
+    fn claude_resets_sum_remaining_counts_and_exclude_redemption_identifiers() {
+        let body = claude_reset_body(serde_json::json!([claude_grant()]));
+        let usage = parse_claude_usage_at(&body, Some("pro".into()), 1794787200);
+        assert_eq!(usage.reset_credits, Some(2));
+        let credits = usage.claude_reset_credits.unwrap();
+        assert_eq!(credits.len(), 1);
+        assert_eq!(credits[0].remaining, 2);
+        assert_eq!(credits[0].kind, ClaudeResetKind::Full);
+        assert!(credits[0].expires_at.is_some());
+        let serialized = serde_json::to_string(&credits).unwrap();
+        assert!(!serialized.contains("private-handle"));
+        assert!(!serialized.contains("untrusted label"));
+        assert!(usage.reset_credit_details.is_empty());
+    }
+
+    #[test]
+    fn claude_resets_filter_inactive_grants_at_exact_time_boundaries() {
+        let now = DateTime::parse_from_rfc3339("2026-11-16T00:00:00Z")
+            .unwrap()
+            .timestamp();
+        let mut expired = claude_grant();
+        expired["ends_at"] = "2026-11-16T00:00:00Z".into();
+        let mut future = claude_grant();
+        future["starts_at"] = "2026-11-16T00:00:01Z".into();
+        let mut paused = claude_grant();
+        paused["paused"] = true.into();
+        let mut exhausted = claude_grant();
+        exhausted["resets_left"] = 0.into();
+        let mut active = claude_grant();
+        active["starts_at"] = "2026-11-16T00:00:00Z".into();
+        let body = claude_reset_body(serde_json::json!([
+            expired, future, paused, exhausted, active
+        ]));
+        let credits = parse_claude_reset_credits(&body, now).unwrap();
+        assert_eq!(credits.len(), 1);
+        assert_eq!(credits[0].remaining, 2);
+    }
+
+    #[test]
+    fn claude_resets_distinguish_unknown_from_known_empty_inventory() {
+        for body in [
+            serde_json::json!({}),
+            serde_json::json!({"cedar_ember": null}),
+            serde_json::json!({"cedar_ember": {"eligible": false, "ineligible_reason": "surface", "grants": []}}),
+            serde_json::json!({"cedar_ember": {"eligible": true}}),
+        ] {
+            assert!(parse_claude_usage_at(&body, None, 1794787200)
+                .reset_credits
+                .is_none());
+        }
+        let usage =
+            parse_claude_usage_at(&claude_reset_body(serde_json::json!([])), None, 1794787200);
+        assert_eq!(usage.reset_credits, Some(0));
+        assert_eq!(usage.claude_reset_credits, Some(vec![]));
+    }
+
+    #[test]
+    fn claude_resets_reject_malformed_inventory_without_losing_usage_windows() {
+        for (field, value) in [
+            ("resets_left", serde_json::json!(-1)),
+            ("resets_left", serde_json::json!(1.5)),
+            ("resets_left", serde_json::json!("2")),
+            ("resets_left", serde_json::json!(1001)),
+            ("resets_left", serde_json::json!(4)),
+            ("ends_at", serde_json::json!("private-not-a-date")),
+            ("starts_at", serde_json::json!(55)),
+            ("paused", serde_json::json!("false")),
+        ] {
+            let mut grant = claude_grant();
+            grant[field] = value;
+            let usage = parse_claude_usage_at(
+                &claude_reset_body(serde_json::json!([grant])),
+                None,
+                1794787200,
+            );
+            assert!(usage.reset_credits.is_none(), "field {field}");
+            assert!(usage.five_hour.is_some());
+        }
+    }
+
+    #[test]
+    fn claude_resets_do_not_mislabel_model_specific_full_type() {
+        let mut grant = claude_grant();
+        grant["gives_back_weekly"] = true.into();
+        grant["clears"] = serde_json::json!(["five_hour", "seven_day_overage_included"]);
+        grant["starts_at"] = Value::Null;
+        grant["ends_at"] = Value::Null;
+        let usage = parse_claude_usage_at(
+            &claude_reset_body(serde_json::json!([grant])),
+            None,
+            1794787200,
+        );
+        let credits = usage.claude_reset_credits.unwrap();
+        assert_eq!(credits[0].kind, ClaudeResetKind::Scoped);
+        assert_eq!(credits[0].expires_at, None);
+        assert_eq!(credits[0].starts_at, None);
+    }
+
+    #[test]
+    fn claude_inventory_request_uses_cli_compatibility_without_extra_spend_or_redemption() {
+        let agent = build_agent("claude-code", FetchTimeouts::default());
+        let mut calls = 0;
+        let usage = fetch_claude_oauth_usage_using(&agent, "test-token", None, true, |request| {
+            calls += 1;
+            assert_eq!(request.method(), "GET");
+            assert_eq!(
+                request.url(),
+                "https://api.anthropic.com/api/oauth/usage?cedar_ember=1"
+            );
+            assert_eq!(request.header("Authorization"), Some("Bearer test-token"));
+            assert_eq!(
+                request.header("User-Agent"),
+                Some("claude-cli/2.1.294 (external, cli)")
+            );
+            assert_eq!(request.header("anthropic-beta"), Some("oauth-2025-04-20"));
+            Ok(ureq::Response::new(
+                200,
+                "OK",
+                r#"{"five_hour":{"utilization":42},"cedar_ember":{"eligible":true,"grants":[]}}"#,
+            )
+            .unwrap())
+        })
+        .unwrap();
+        assert_eq!(calls, 1);
+        assert!(usage.five_hour.is_some());
+        assert_eq!(usage.reset_credits, Some(0));
+    }
+
+    #[test]
+    fn claude_optional_inventory_rejection_falls_back_once_with_same_account() {
+        let agent = build_agent("claude-code", FetchTimeouts::default());
+        for status in [400, 403, 401, 429] {
+            let mut calls = 0;
+            let result =
+                fetch_claude_oauth_usage_using(&agent, "test-token", None, true, |request| {
+                    calls += 1;
+                    assert_eq!(request.header("Authorization"), Some("Bearer test-token"));
+                    if calls == 1 {
+                        return Err(ureq::Error::Status(
+                            status,
+                            ureq::Response::new(status, "error", "private-provider-error").unwrap(),
+                        ));
+                    }
+                    assert_eq!(request.url(), "https://api.anthropic.com/api/oauth/usage");
+                    assert_eq!(request.header("User-Agent"), Some("claude-code"));
+                    Ok(
+                        ureq::Response::new(200, "OK", r#"{"five_hour":{"utilization":42}}"#)
+                            .unwrap(),
+                    )
+                });
+            assert_eq!(calls, if status == 400 || status == 403 { 2 } else { 1 });
+            if status == 400 || status == 403 {
+                let usage = result.unwrap();
+                assert!(usage.five_hour.is_some());
+                assert_eq!(usage.reset_credits, None);
+            } else {
+                assert!(!result
+                    .unwrap_err()
+                    .message()
+                    .contains("private-provider-error"));
+            }
+        }
+    }
+
+    #[test]
+    fn claude_hook_fetch_does_not_opt_in_to_inventory_or_retry() {
+        let agent = build_agent("claude-code", FetchTimeouts::default());
+        let mut calls = 0;
+        let result = fetch_claude_oauth_usage_using(&agent, "test-token", None, false, |request| {
+            calls += 1;
+            assert_eq!(request.url(), "https://api.anthropic.com/api/oauth/usage");
+            assert_eq!(request.header("User-Agent"), Some("claude-code"));
+            Err(ureq::Error::Status(
+                400,
+                ureq::Response::new(400, "error", "").unwrap(),
+            ))
+        });
+        assert!(result.is_err());
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn parse_reset_credit_details_lists_available_cards_with_missing_expiration() {
+        let body = serde_json::json!({
+            "credits": [
+                { "status": "redeemed", "granted_at": "2026-06-17T00:00:00Z", "expires_at": "2099-07-17T00:00:00Z" },
+                { "status": "available", "reset_type": "codex_rate_limits", "granted_at": "2026-06-18T00:00:00Z", "expires_at": null },
+                { "status": "available", "granted_at": "2026-06-19T00:00:00Z", "expires_at": "2026-06-21T00:00:00Z" },
+                { "status": "redeeming", "granted_at": "2026-06-20T00:00:00Z", "expires_at": "2099-07-18T00:00:00Z" },
+            ],
+            "available_count": 1
+        });
+
+        let credits = parse_reset_credit_details(&body, "2026-06-21T00:00:00Z".parse().unwrap());
+        assert_eq!(
+            credits,
+            vec![ResetCredit {
+                granted_at: Some("2026-06-18T00:00:00Z".parse().unwrap()),
+                expires_at: None,
+                kind: CodexResetKind::Full,
+            }]
+        );
+    }
+
+    #[test]
     fn parse_reset_credit_details_sorts_by_expiration() {
         let body = serde_json::json!({
             "credits": [
-                { "granted_at": "2026-06-27T00:00:00Z", "expires_at": "2026-07-27T00:00:00Z" },
+                { "status": "available", "reset_type": "codex_rate_limits", "granted_at": "2026-06-27T00:00:00Z", "expires_at": "2026-07-27T00:00:00Z" },
                 { "granted_at": "2026-06-18T00:00:00Z", "expires_at": "2026-07-18T00:00:00Z" },
                 { "granted_at": "2026-06-18T00:00:01Z", "expires_at": "2026-07-18T09:00:00+09:00" },
-                { "granted_at": "2026-06-19T00:00:00Z", "expires_at": "2026-07-19T00:00:00Z" },
+                { "status": "available", "reset_type": "future_reset_type", "title": "Full reset", "granted_at": "2026-06-19T00:00:00Z", "expires_at": "2026-07-19T00:00:00Z" },
+                { "status": "available", "granted_at": "bad", "expires_at": "bad" },
                 { "granted_at": "bad" },
                 null
             ],
-            "rate_limit_reset_credits": { "available_count": 4 }
+            "available_count": 5
         });
 
-        let credits = parse_reset_credit_details(&body);
-        assert_eq!(credits.len(), 4);
+        let credits = parse_reset_credit_details(&body, "2026-06-21T00:00:00Z".parse().unwrap());
         assert_eq!(
             credits,
             vec![
                 ResetCredit {
-                    granted_at: "2026-06-18T00:00:00Z".into(),
-                    expires_at: "2026-07-18T00:00:00Z".into(),
+                    granted_at: Some("2026-06-18T00:00:00Z".parse().unwrap()),
+                    expires_at: Some("2026-07-18T00:00:00Z".parse().unwrap()),
+                    kind: CodexResetKind::Other,
                 },
                 ResetCredit {
-                    granted_at: "2026-06-18T00:00:01Z".into(),
-                    expires_at: "2026-07-18T09:00:00+09:00".into(),
+                    granted_at: Some("2026-06-18T00:00:01Z".parse().unwrap()),
+                    expires_at: Some("2026-07-18T09:00:00+09:00".parse().unwrap()),
+                    kind: CodexResetKind::Other,
                 },
                 ResetCredit {
-                    granted_at: "2026-06-19T00:00:00Z".into(),
-                    expires_at: "2026-07-19T00:00:00Z".into(),
+                    granted_at: Some("2026-06-19T00:00:00Z".parse().unwrap()),
+                    expires_at: Some("2026-07-19T00:00:00Z".parse().unwrap()),
+                    kind: CodexResetKind::Other,
                 },
                 ResetCredit {
-                    granted_at: "2026-06-27T00:00:00Z".into(),
-                    expires_at: "2026-07-27T00:00:00Z".into(),
+                    granted_at: Some("2026-06-27T00:00:00Z".parse().unwrap()),
+                    expires_at: Some("2026-07-27T00:00:00Z".parse().unwrap()),
+                    kind: CodexResetKind::Full,
                 },
+                ResetCredit::default(),
             ]
         );
     }

@@ -322,12 +322,20 @@ fn identity_from_auth(value: &Value) -> Option<Identity> {
 
 /// The `(access_token, account_id)` stored in a saved Codex slot.
 pub fn slot_request_auth(agent: Agent, label: &str) -> Option<(String, Option<String>)> {
-    request_auth_from_path(&slot_dir(agent, label).join(cred_filename(agent)))
+    request_auth_from_path(
+        &checked_slot_dir(agent, label)
+            .ok()?
+            .join(cred_filename(agent)),
+    )
 }
 
 /// The `(access_token, plan)` stored in a saved Claude slot.
 pub fn claude_slot_oauth(label: &str) -> Option<(String, Option<String>)> {
-    claude_oauth_from_path(&slot_dir(Agent::Claude, label).join(cred_filename(Agent::Claude)))
+    claude_oauth_from_path(
+        &checked_slot_dir(Agent::Claude, label)
+            .ok()?
+            .join(cred_filename(Agent::Claude)),
+    )
 }
 
 /// The Claude slot token for a usage fetch, handling snapshot staleness:
@@ -341,7 +349,9 @@ pub fn claude_slot_oauth(label: &str) -> Option<(String, Option<String>)> {
 ///    error instead of a doomed network call and a misleading "re-add".
 pub fn claude_slot_fetch_token(label: &str) -> Result<(String, Option<String>), String> {
     sync_active_claude_slot(label);
-    let path = slot_dir(Agent::Claude, label).join(cred_filename(Agent::Claude));
+    let path = checked_slot_dir(Agent::Claude, label)
+        .map_err(|_| "invalid saved account".to_string())?
+        .join(cred_filename(Agent::Claude));
     let bytes = std::fs::read(&path).map_err(|_| "no usable token in this account".to_string())?;
     if let Some(expires_at) = claude_expires_at(&bytes) {
         // 60s margin so a token expiring mid-request already counts as stale.
@@ -370,7 +380,12 @@ fn claude_expires_at(bytes: &[u8]) -> Option<i64> {
 /// copies a different account's credential, and never replaces a fresher
 /// snapshot with a staler token.
 fn sync_active_claude_slot(label: &str) {
-    let dir = slot_dir(Agent::Claude, label);
+    let Ok(_lock) = account_mutation_lock(Agent::Claude) else {
+        return;
+    };
+    let Ok(dir) = checked_slot_dir(Agent::Claude, label) else {
+        return;
+    };
     let cred_path = dir.join(cred_filename(Agent::Claude));
     let Ok(slot_bytes) = std::fs::read(&cred_path) else {
         return;
@@ -451,7 +466,9 @@ fn claude_oauth_from_bytes(bytes: &[u8]) -> Option<(String, Option<String>)> {
 /// from the fresher live login (same identity only). No network.
 pub fn claude_slot_synced_bytes(label: &str) -> Option<Vec<u8>> {
     sync_active_claude_slot(label);
-    let path = slot_dir(Agent::Claude, label).join(cred_filename(Agent::Claude));
+    let path = checked_slot_dir(Agent::Claude, label)
+        .ok()?
+        .join(cred_filename(Agent::Claude));
     std::fs::read(&path).ok()
 }
 
@@ -481,7 +498,12 @@ pub fn claude_live_credential_equals(bytes: &[u8]) -> bool {
 /// a browser re-login on its next refresh unless it gets the new one.
 /// A diverged live credential (Claude Code rotated it itself meanwhile, or the
 /// user switched accounts) is never overwritten.
-pub fn propagate_claude_slot_to_live(label: &str, expected: &[u8]) -> std::io::Result<()> {
+pub fn propagate_claude_slot_to_live(
+    label: &str,
+    expected: &[u8],
+    refreshed_access_token: &str,
+) -> std::io::Result<()> {
+    let _lock = account_mutation_lock(Agent::Claude)?;
     let current = live_credential_bytes(Agent::Claude)
         .ok_or_else(|| std::io::Error::other("no live credential"))?;
     if current != expected {
@@ -489,7 +511,13 @@ pub fn propagate_claude_slot_to_live(label: &str, expected: &[u8]) -> std::io::R
             "live credential changed since the refresh started",
         ));
     }
-    let bytes = std::fs::read(slot_dir(Agent::Claude, label).join(cred_filename(Agent::Claude)))?;
+    let bytes =
+        std::fs::read(checked_slot_dir(Agent::Claude, label)?.join(cred_filename(Agent::Claude)))?;
+    if claude_oauth_from_bytes(&bytes).is_none_or(|(token, _)| token != refreshed_access_token) {
+        return Err(std::io::Error::other(
+            "saved credential changed since the refresh completed",
+        ));
+    }
     // macOS Claude may keep the live credential in the Keychain, not the file.
     #[cfg(target_os = "macos")]
     if live_auth_path(Agent::Claude)
@@ -519,16 +547,25 @@ pub fn claude_credential_refresh_token(bytes: &[u8]) -> Option<String> {
 
 /// Merge a refreshed token set into the slot's Claude credential and persist it
 /// atomically with private permissions, preserving every other field. Returns
-/// the new `(access_token, plan)`. Only rewrites the saved slot snapshot — the
-/// live login file is Claude Code's to manage.
+/// the new `(access_token, plan)`. Rejects a slot changed since `expected` was
+/// read, so a delayed provider response cannot overwrite a replacement account
+/// or a newer token rotation. The live login is propagated separately.
 pub fn persist_claude_slot_refresh(
     label: &str,
+    expected: &[u8],
     access_token: &str,
     refresh_token: Option<&str>,
     expires_at_ms: i64,
 ) -> Result<(String, Option<String>), String> {
-    let path = slot_dir(Agent::Claude, label).join(cred_filename(Agent::Claude));
+    let _lock = account_mutation_lock(Agent::Claude)
+        .map_err(|_| "could not lock saved account".to_string())?;
+    let path = checked_slot_dir(Agent::Claude, label)
+        .map_err(|_| "invalid saved account".to_string())?
+        .join(cred_filename(Agent::Claude));
     let bytes = std::fs::read(&path).map_err(|_| "no usable token in this account".to_string())?;
+    if bytes != expected {
+        return Err("saved credential changed since the refresh started".to_string());
+    }
     let mut value: Value =
         serde_json::from_slice(&bytes).map_err(|_| "credential is not valid JSON".to_string())?;
     let oauth_key = if value.get("claudeAiOauth").is_some() {
@@ -672,9 +709,98 @@ fn accounts_root(agent: Agent) -> PathBuf {
     crate::paths::home().join("accounts").join(agent.dir())
 }
 
+/// Serialize this app's brief vault mutations across threads and processes.
+/// The persistent, empty lock file is outside slot directories; the OS releases
+/// its lock on close/crash. Never hold it while calling a provider.
+fn account_mutation_lock(agent: Agent) -> std::io::Result<std::fs::File> {
+    let root = accounts_root(agent);
+    for path in [crate::paths::home().join("accounts"), root.clone()] {
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) if is_redirected(&metadata) => {
+                return Err(std::io::Error::other("account vault is redirected"));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    crate::secure_fs::ensure_private_dir(&root)?;
+    let path = root.join(".mutation.lock");
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = match options.open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            // Do not follow a user-provided link or rewrite/harden its target.
+            let metadata = std::fs::symlink_metadata(&path)?;
+            if is_redirected(&metadata) || !metadata.is_file() {
+                return Err(std::io::Error::other("account lock is not a regular file"));
+            }
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)?
+        }
+        Err(error) => return Err(error),
+    };
+    file.lock()?;
+    Ok(file)
+}
+
 /// The directory of one saved slot (also usable as the agent's profile home).
 pub fn slot_dir(agent: Agent, label: &str) -> PathBuf {
     accounts_root(agent).join(sanitize(label))
+}
+
+fn is_redirected(metadata: &std::fs::Metadata) -> bool {
+    let symlink = metadata.file_type().is_symlink();
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        // FILE_ATTRIBUTE_REPARSE_POINT also covers directory junctions.
+        symlink || metadata.file_attributes() & 0x400 != 0
+    }
+    #[cfg(not(windows))]
+    symlink
+}
+
+/// Existing labels must name one direct child of the vault. In particular,
+/// reject reserved components instead of silently targeting another account.
+fn checked_slot_dir(agent: Agent, label: &str) -> std::io::Result<PathBuf> {
+    if label != sanitize(label) || matches!(label, "." | "..") {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid account label",
+        ));
+    }
+    #[cfg(windows)]
+    if label.ends_with('.') {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid account label",
+        ));
+    }
+    let root = accounts_root(agent);
+    let path = root.join(label);
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => {
+            if !metadata.is_dir()
+                || is_redirected(&metadata)
+                || std::fs::canonicalize(&path)?.parent()
+                    != Some(std::fs::canonicalize(&root)?.as_path())
+            {
+                return Err(std::io::Error::other("account slot is redirected"));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    Ok(path)
 }
 
 /// The `(env-var, value)` for launching the agent under a slot's profile home.
@@ -699,7 +825,7 @@ fn sanitize(label: &str) -> String {
         })
         .collect();
     let s = s.trim_matches('_').to_string();
-    if s.is_empty() {
+    if s.is_empty() || matches!(s.as_str(), "." | "..") {
         "account".to_string()
     } else {
         s
@@ -819,7 +945,8 @@ fn read_slot_record(
     live: Option<&[u8]>,
     live_key: Option<&str>,
 ) -> Option<(AccountSlot, String)> {
-    if !dir.is_dir() {
+    let metadata = std::fs::symlink_metadata(&dir).ok()?;
+    if !metadata.is_dir() || is_redirected(&metadata) {
         return None;
     }
     let cred = std::fs::read(dir.join(cred_filename(agent))).ok()?;
@@ -918,10 +1045,11 @@ pub fn save_slot(
     identity: Option<&Identity>,
     source: &str,
 ) -> std::io::Result<String> {
+    let _lock = account_mutation_lock(agent)?;
     let key = identity_key(agent, identity, cred_bytes);
     let base_label = sanitize(&label_from_identity(agent, identity));
     let label = resolve_slot_label(agent, &base_label, cred_bytes, identity, &key);
-    let dir = slot_dir(agent, &label);
+    let dir = checked_slot_dir(agent, &label)?;
     // The vault holds raw OAuth tokens: harden the tree and write the
     // credential private+atomic, matching how capsules are already written.
     crate::secure_fs::ensure_private_dir(&accounts_root(agent))?;
@@ -1095,13 +1223,14 @@ fn claude_identity_from_dir(dir: &Path) -> Option<Identity> {
 /// surgically update `~/.claude.json` `oauthAccount` so the shown account
 /// matches — the rest of that large shared config is left intact.
 pub fn switch_slot(agent: Agent, label: &str) -> std::io::Result<()> {
+    let _lock = account_mutation_lock(agent)?;
+    let dir = checked_slot_dir(agent, label)?;
     // macOS Claude keeps its token in the Keychain, not the file — a file swap
     // would not change the live login. Swap the Keychain item instead when one
     // exists (the real login); with neither a file nor an item, fail honestly.
     #[cfg(target_os = "macos")]
     if agent == Agent::Claude && live_auth_path(agent).map(|p| !p.exists()).unwrap_or(false) {
         if crate::keychain::claude_item_exists() {
-            let dir = slot_dir(agent, label);
             let bytes = std::fs::read(dir.join(cred_filename(agent)))?;
             crate::keychain::write_claude_credentials(&bytes)?;
             let _ = patch_claude_oauth_account(read_meta(&dir).and_then(|m| m.email));
@@ -1111,7 +1240,6 @@ pub fn switch_slot(agent: Agent, label: &str) -> std::io::Result<()> {
             "no live Claude credential found (no credential file and no Keychain item) — sign in with Claude Code once, then switch",
         ));
     }
-    let dir = slot_dir(agent, label);
     let bytes = std::fs::read(dir.join(cred_filename(agent)))?;
     let live = live_auth_path(agent).ok_or_else(|| std::io::Error::other("no home dir"))?;
     // Private-file write: a plain fs::write would recreate the credential with
@@ -1206,7 +1334,8 @@ fn parse_process_names(text: &str) -> Vec<String> {
 
 /// Remove a saved slot (its whole directory).
 pub fn delete_slot(agent: Agent, label: &str) -> std::io::Result<()> {
-    match std::fs::remove_dir_all(slot_dir(agent, label)) {
+    let _lock = account_mutation_lock(agent)?;
+    match std::fs::remove_dir_all(checked_slot_dir(agent, label)?) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
@@ -1486,6 +1615,7 @@ mod tests {
 
         let (token, plan) = persist_claude_slot_refresh(
             "dev@example.com",
+            &std::fs::read(dir.join(".credentials.json")).unwrap(),
             "new-access",
             Some("rt-new"),
             9_999_999_999_999,
@@ -1509,6 +1639,138 @@ mod tests {
     }
 
     #[test]
+    fn delayed_claude_refresh_preserves_a_replaced_slot() {
+        let _guard = crate::test_support::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let previous = std::env::var_os("AI_HANDOFF_HOME");
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        let original = br#"{"claudeAiOauth":{"accessToken":"old","refreshToken":"old-refresh","expiresAt":1000}}"#;
+        let label = save_slot(Agent::Claude, original, None, "test").unwrap();
+        // While the old account's provider request is pending, the same path
+        // is replaced by a different account (or a newer token rotation).
+        let replacement = br#"{"claudeAiOauth":{"accessToken":"replacement","refreshToken":"replacement-refresh","expiresAt":9000,"subscriptionType":"max"}}"#;
+        let path = slot_dir(Agent::Claude, &label).join(".credentials.json");
+        std::fs::write(&path, replacement).unwrap();
+        let result = persist_claude_slot_refresh(
+            &label,
+            original,
+            "delayed-old-access",
+            Some("delayed-old-refresh"),
+            5000,
+        );
+        let actual = std::fs::read(&path).unwrap();
+        if let Some(value) = previous {
+            std::env::set_var("AI_HANDOFF_HOME", value);
+        } else {
+            std::env::remove_var("AI_HANDOFF_HOME");
+        }
+        assert!(
+            result.is_err(),
+            "a stale response must not overwrite a changed credential"
+        );
+        assert_eq!(actual, replacement);
+    }
+
+    #[test]
+    fn delayed_claude_refresh_does_not_propagate_a_replaced_slot_to_live() {
+        let _guard = crate::test_support::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let live = tempfile::tempdir().unwrap();
+        let previous_home = std::env::var_os("AI_HANDOFF_HOME");
+        let previous_live = std::env::var_os("CLAUDE_CONFIG_DIR");
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        std::env::set_var("CLAUDE_CONFIG_DIR", live.path());
+        let original = br#"{"claudeAiOauth":{"accessToken":"old","refreshToken":"old-refresh","expiresAt":1000}}"#;
+        let label = save_slot(Agent::Claude, original, None, "test").unwrap();
+        std::fs::write(live.path().join(".credentials.json"), original).unwrap();
+        persist_claude_slot_refresh(
+            &label,
+            original,
+            "refreshed-access",
+            Some("refreshed-token"),
+            5000,
+        )
+        .unwrap();
+        let replacement = br#"{"claudeAiOauth":{"accessToken":"replacement","refreshToken":"replacement-refresh","expiresAt":9000}}"#;
+        let path = slot_dir(Agent::Claude, &label).join(".credentials.json");
+        std::fs::write(&path, replacement).unwrap();
+        let result = propagate_claude_slot_to_live(&label, original, "refreshed-access");
+        let actual_live = std::fs::read(live.path().join(".credentials.json")).unwrap();
+        let actual_slot = std::fs::read(&path).unwrap();
+        for (name, previous) in [
+            ("AI_HANDOFF_HOME", previous_home),
+            ("CLAUDE_CONFIG_DIR", previous_live),
+        ] {
+            if let Some(value) = previous {
+                std::env::set_var(name, value);
+            } else {
+                std::env::remove_var(name);
+            }
+        }
+        assert!(
+            result.is_err(),
+            "propagation must reject a replaced source slot"
+        );
+        assert_eq!(actual_live, original);
+        assert_eq!(actual_slot, replacement);
+    }
+
+    #[test]
+    fn delete_slot_rejects_parent_label_and_preserves_both_vaults() {
+        let _guard = crate::test_support::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let previous = std::env::var_os("AI_HANDOFF_HOME");
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        let claude = accounts_root(Agent::Claude).join("saved");
+        let codex = accounts_root(Agent::Codex).join("saved");
+        for dir in [&claude, &codex] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("keep.txt"), "user-owned").unwrap();
+        }
+        let results = ["..", ".", "", "../", "../saved", r"..\saved", "___"]
+            .map(|label| delete_slot(Agent::Claude, label));
+        let preserved = [claude, codex].map(|dir| std::fs::read(dir.join("keep.txt")).ok());
+        if let Some(value) = previous {
+            std::env::set_var("AI_HANDOFF_HOME", value);
+        } else {
+            std::env::remove_var("AI_HANDOFF_HOME");
+        }
+        assert!(
+            results.iter().all(Result::is_err),
+            "invalid labels must be rejected"
+        );
+        assert_eq!(
+            preserved,
+            [Some(b"user-owned".to_vec()), Some(b"user-owned".to_vec())]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn slot_mutations_reject_redirected_slot_directories() {
+        let _guard = crate::test_support::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let previous = std::env::var_os("AI_HANDOFF_HOME");
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        let root = accounts_root(Agent::Claude);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(external.path().join("keep.txt"), "user-owned").unwrap();
+        std::os::unix::fs::symlink(external.path(), root.join("redirected")).unwrap();
+        let result = delete_slot(Agent::Claude, "redirected");
+        let preserved = std::fs::read(external.path().join("keep.txt")).unwrap();
+        let link_preserved = std::fs::symlink_metadata(root.join("redirected")).is_ok();
+        if let Some(value) = previous {
+            std::env::set_var("AI_HANDOFF_HOME", value);
+        } else {
+            std::env::remove_var("AI_HANDOFF_HOME");
+        }
+        assert!(result.is_err());
+        assert_eq!(preserved, b"user-owned");
+        assert!(link_preserved);
+    }
+
+    #[test]
     fn propagate_claude_slot_to_live_updates_byte_identical_live() {
         let _guard = crate::test_support::env_lock();
         let home = tempfile::tempdir().unwrap();
@@ -1522,8 +1784,8 @@ mod tests {
         std::fs::write(live.path().join(".credentials.json"), stale).unwrap();
 
         // Refresh the slot, then propagate to the (still byte-identical) live.
-        persist_claude_slot_refresh(&label, "new-access", Some("rt-new"), 5000).unwrap();
-        propagate_claude_slot_to_live(&label, stale).expect("propagate");
+        persist_claude_slot_refresh(&label, stale, "new-access", Some("rt-new"), 5000).unwrap();
+        propagate_claude_slot_to_live(&label, stale, "new-access").expect("propagate");
 
         let live_bytes = std::fs::read(live.path().join(".credentials.json")).unwrap();
         assert_eq!(
@@ -1553,8 +1815,8 @@ mod tests {
         let diverged = br#"{"claudeAiOauth":{"accessToken":"cc-new","refreshToken":"rt-cc","expiresAt":9999}}"#;
         std::fs::write(live.path().join(".credentials.json"), diverged).unwrap();
 
-        persist_claude_slot_refresh(&label, "new-access", Some("rt-new"), 5000).unwrap();
-        propagate_claude_slot_to_live(&label, stale).expect_err("must refuse");
+        persist_claude_slot_refresh(&label, stale, "new-access", Some("rt-new"), 5000).unwrap();
+        propagate_claude_slot_to_live(&label, stale, "new-access").expect_err("must refuse");
 
         assert_eq!(
             std::fs::read(live.path().join(".credentials.json")).unwrap(),
@@ -1580,7 +1842,14 @@ mod tests {
         )
         .unwrap();
 
-        persist_claude_slot_refresh("keep@example.com", "new", None, 5000).expect("persist");
+        persist_claude_slot_refresh(
+            "keep@example.com",
+            &std::fs::read(dir.join(".credentials.json")).unwrap(),
+            "new",
+            None,
+            5000,
+        )
+        .expect("persist");
 
         let written: Value =
             serde_json::from_slice(&std::fs::read(dir.join(".credentials.json")).unwrap()).unwrap();

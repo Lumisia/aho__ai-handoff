@@ -507,9 +507,13 @@ pub struct App {
     acc_confirm_delete: bool,
     /// Per-account usage cache, keyed by `usage_key(agent, label)`.
     acc_usage: std::collections::HashMap<String, UsageState>,
-    /// Background-fetch result channel (key, usage result).
-    usage_tx: std::sync::mpsc::Sender<(String, Result<crate::account_api::UsageData, String>)>,
-    usage_rx: std::sync::mpsc::Receiver<(String, Result<crate::account_api::UsageData, String>)>,
+    /// Only the latest request for a still-current slot may update its cache.
+    acc_usage_requests: std::collections::HashMap<String, u64>,
+    next_usage_request: u64,
+    /// Background-fetch result channel (key, request generation, usage result).
+    usage_tx: std::sync::mpsc::Sender<(String, u64, Result<crate::account_api::UsageData, String>)>,
+    usage_rx:
+        std::sync::mpsc::Receiver<(String, u64, Result<crate::account_api::UsageData, String>)>,
     /// An action queued by a keypress (add / launch), started next loop.
     pending: Option<Pending>,
     /// An open login window being polled for its captured credential.
@@ -659,6 +663,8 @@ impl App {
             acc_sel: 0,
             acc_confirm_delete: false,
             acc_usage: std::collections::HashMap::new(),
+            acc_usage_requests: std::collections::HashMap::new(),
+            next_usage_request: 0,
             usage_tx,
             usage_rx,
             pending: None,
@@ -746,14 +752,7 @@ impl App {
                 self.handle_pending(pending);
             }
             self.poll_login();
-            // Apply any background per-account usage fetches that finished.
-            while let Ok((key, res)) = self.usage_rx.try_recv() {
-                let state = match res {
-                    Ok(u) => UsageState::Loaded(u),
-                    Err(e) => UsageState::Error(e),
-                };
-                self.acc_usage.insert(key, state);
-            }
+            self.poll_account_usage();
         }
         Ok(())
     }
@@ -1882,6 +1881,33 @@ impl App {
         format!("{agent:?}:{label}")
     }
 
+    fn poll_account_usage(&mut self) {
+        while let Ok((key, request, result)) = self.usage_rx.try_recv() {
+            if self.acc_usage_requests.get(&key) != Some(&request) {
+                continue;
+            }
+            self.acc_usage_requests.remove(&key);
+            let state = match result {
+                Ok(usage) => UsageState::Loaded(usage),
+                Err(error) => UsageState::Error(error),
+            };
+            self.acc_usage.insert(key, state);
+        }
+    }
+
+    fn invalidate_account_usage(&mut self) {
+        self.acc_usage.clear();
+        self.acc_usage_requests.clear();
+    }
+
+    fn begin_account_usage(&mut self, key: String) -> u64 {
+        let request = self.next_usage_request;
+        self.next_usage_request = self.next_usage_request.wrapping_add(1);
+        self.acc_usage.insert(key.clone(), UsageState::Loading);
+        self.acc_usage_requests.insert(key, request);
+        request
+    }
+
     /// Kick off a background usage fetch for the selected account. No-op if
     /// already cached unless `force`.
     fn acc_ensure_usage(&mut self, force: bool) {
@@ -1897,11 +1923,11 @@ impl App {
         if !force && self.acc_usage.contains_key(&key) {
             return;
         }
-        self.acc_usage.insert(key.clone(), UsageState::Loading);
+        let request = self.begin_account_usage(key.clone());
         let tx = self.usage_tx.clone();
         std::thread::spawn(move || {
             let res = crate::account_api::fetch_slot_usage(agent, &label);
-            let _ = tx.send((key, res));
+            let _ = tx.send((key, request, res));
         });
     }
 
@@ -2103,7 +2129,7 @@ impl App {
     /// usage cache is dropped (the set of accounts may have changed).
     fn reload_account(&mut self) {
         self.account = AccountData::load_live();
-        self.acc_usage.clear();
+        self.invalidate_account_usage();
         let n = self.acc_rows().len();
         if self.acc_sel >= n {
             self.acc_sel = n.saturating_sub(1);
@@ -3653,8 +3679,8 @@ impl App {
                     t!(
                         "account.reset_credit_item",
                         n = idx + 1,
-                        expires = format_credit_datetime(&detail.expires_at),
-                        granted = format_credit_datetime(&detail.granted_at)
+                        expires = format_credit_datetime(detail.expires_at),
+                        granted = format_credit_datetime(detail.granted_at)
                     )
                     .into_owned(),
                 ));
@@ -4059,14 +4085,14 @@ fn fmt_reset(resets_at: Option<i64>) -> String {
     t!("account.reset_suffix", when = when).into_owned()
 }
 
-fn format_credit_datetime(value: &str) -> String {
-    DateTime::parse_from_rfc3339(value)
+fn format_credit_datetime(value: Option<DateTime<chrono::FixedOffset>>) -> String {
+    value
         .map(|dt| {
             dt.with_timezone(&Local)
                 .format("%Y-%m-%d %H:%M")
                 .to_string()
         })
-        .unwrap_or_else(|_| value.to_string())
+        .unwrap_or_else(|| "—".to_string())
 }
 
 /// Run `ai-handoff autostart on|off` as a detached child (no console window),
@@ -4659,6 +4685,47 @@ mod tests {
         app.on_key(key(KeyCode::Char('r')));
         let key = App::usage_key(Agent::Codex, "dev@example.com");
         assert!(matches!(app.acc_usage.get(&key), Some(UsageState::Loading)));
+    }
+
+    #[test]
+    fn account_usage_ignores_reply_from_before_slot_replacement() {
+        let mut app = account_app();
+        let key = App::usage_key(Agent::Codex, "dev@example.com");
+        let previous = app.begin_account_usage(key.clone());
+        app.usage_tx
+            .send((
+                key.clone(),
+                previous,
+                Ok(crate::account_api::UsageData::default()),
+            ))
+            .unwrap();
+        app.invalidate_account_usage();
+        // A replacement slot reused the same label and has a new pending read.
+        app.begin_account_usage(key.clone());
+        app.poll_account_usage();
+        assert!(matches!(app.acc_usage.get(&key), Some(UsageState::Loading)));
+    }
+
+    #[test]
+    fn account_usage_keeps_newer_refresh_when_older_reply_arrives_last() {
+        let mut app = account_app();
+        let key = App::usage_key(Agent::Codex, "dev@example.com");
+        let previous = app.begin_account_usage(key.clone());
+        let current = app.begin_account_usage(key.clone());
+        let latest = crate::account_api::UsageData {
+            plan: Some("latest-plan".into()),
+            ..Default::default()
+        };
+        app.usage_tx
+            .send((key.clone(), current, Ok(latest.clone())))
+            .unwrap();
+        app.usage_tx
+            .send((key.clone(), previous, Err("stale-error".into())))
+            .unwrap();
+        app.poll_account_usage();
+        assert!(
+            matches!(app.acc_usage.get(&key), Some(UsageState::Loaded(usage)) if usage == &latest)
+        );
     }
 
     #[test]

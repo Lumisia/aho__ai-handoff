@@ -356,6 +356,7 @@ mod tests {
             }),
             reset_credits: None,
             reset_credit_details: Vec::new(),
+            claude_reset_credits: None,
         });
 
         assert_eq!(status.plan_type.as_deref(), Some("pro"));

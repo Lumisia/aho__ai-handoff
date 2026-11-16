@@ -15,7 +15,7 @@ use crate::{claude, codex};
 /// The log directories to scan.
 #[derive(Debug, Clone, Default)]
 pub struct Roots {
-    /// `~/.claude/projects` (or `None` if the home dir is unknown).
+    /// `$CLAUDE_CONFIG_DIR/projects`, or `~/.claude/projects` by default.
     pub claude_projects: Option<PathBuf>,
     /// Codex log dirs: `<CODEX_HOME>/sessions` and `<CODEX_HOME>/archived_sessions`.
     pub codex_dirs: Vec<PathBuf>,
@@ -45,10 +45,14 @@ enum ParsedFile {
     Codex(Vec<UsageEvent>),
 }
 
-/// Resolve the default roots from the user's home dir, honoring `CODEX_HOME`.
+/// Resolve the log roots from the configured agent directories or the user's home directory.
 pub fn default_roots() -> Roots {
     let home = home_dir();
-    let claude_projects = home.as_ref().map(|h| h.join(".claude").join("projects"));
+    let claude_projects = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|dir| !dir.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| home.as_ref().map(|h| h.join(".claude")))
+        .map(|dir| dir.join("projects"));
     let codex_home = std::env::var_os("CODEX_HOME")
         .map(PathBuf::from)
         .or_else(|| home.as_ref().map(|h| h.join(".codex")));
@@ -193,6 +197,41 @@ fn home_dir() -> Option<PathBuf> {
 mod tests {
     use super::*;
     use crate::model::Source;
+
+    #[test]
+    fn default_roots_find_usage_in_configured_claude_projects() {
+        let dir = tempfile::tempdir().unwrap();
+        let projects = dir.path().join("projects");
+        let project = projects.join("test-project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("session.jsonl"),
+            r#"{"timestamp":"2026-06-17T14:00:00Z","message":{"id":"m1","model":"claude-sonnet-4-6","usage":{"input_tokens":10,"output_tokens":2}}}"#,
+        )
+        .unwrap();
+
+        let previous = std::env::var_os("CLAUDE_CONFIG_DIR");
+        std::env::set_var("CLAUDE_CONFIG_DIR", dir.path());
+        let mut roots = default_roots();
+        std::env::set_var("CLAUDE_CONFIG_DIR", "");
+        let fallback = default_roots();
+        if let Some(value) = previous {
+            std::env::set_var("CLAUDE_CONFIG_DIR", value);
+        } else {
+            std::env::remove_var("CLAUDE_CONFIG_DIR");
+        }
+
+        assert_eq!(roots.claude_projects.as_deref(), Some(projects.as_path()));
+        assert_eq!(
+            fallback.claude_projects,
+            home_dir().map(|home| home.join(".claude").join("projects"))
+        );
+        roots.codex_dirs.clear();
+        let events = scan_cached(&roots, &mut ScanCache::default());
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].source, Source::Claude);
+        assert_eq!(events[0].tokens.total(), 12);
+    }
 
     #[test]
     fn scan_walks_nested_dirs_for_both_agents() {
