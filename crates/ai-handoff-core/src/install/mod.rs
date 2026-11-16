@@ -6,6 +6,7 @@ pub mod codex_hooks;
 pub mod detect;
 pub mod diff;
 pub mod duplicate;
+pub mod legacy_skills;
 pub mod managed_hook;
 pub mod plugin;
 pub mod state;
@@ -136,12 +137,32 @@ pub fn plan_install(
         });
     }
 
-    let duplicates = duplicate::detect(
+    let mut duplicates = duplicate::detect(
         codex_config_existing.as_deref(),
         codex_hooks_existing.as_deref(),
         claude_settings_existing.as_deref(),
         plugin,
     );
+
+    if agents.codex && plugin {
+        let legacy = legacy_skills::inspect(&t.codex_handoff_skills_dir);
+        legacy_skills::validate_archive_destination(&t.codex_handoff_skills_dir)?;
+        if legacy.status != "absent" {
+            let action = if legacy.status == "recognized" {
+                "It will be preserved under .agents/legacy-skill-backups outside skill discovery."
+            } else {
+                "It will be left untouched; inspect its ownership and links before moving it."
+            };
+            duplicates.push(duplicate::DuplicateFinding {
+                agent: "codex",
+                detail: format!(
+                    "Legacy Codex skills at {} ({}). {action}",
+                    legacy.path.display(),
+                    legacy.status
+                ),
+            });
+        }
+    }
 
     Ok(InstallPlan {
         file_plans,
@@ -320,6 +341,10 @@ pub fn apply_install(
         None
     };
 
+    if agents.codex && plugin {
+        legacy_skills::validate_archive_destination(&t.codex_handoff_skills_dir)?;
+    }
+
     let mut st = InstallState {
         installed_at: now.to_rfc3339(),
         ..Default::default()
@@ -365,6 +390,8 @@ pub fn apply_install(
                 path: t.codex_config.to_string_lossy().into_owned(),
                 backup: config_backup,
             });
+            // Preserve obsolete nested skills only after the replacement is registered.
+            legacy_skills::archive(&t.codex_handoff_skills_dir)?;
             st.codex.plugin = Some(record);
             record_codex_config(&mut st, &config_edit, &prior);
         }

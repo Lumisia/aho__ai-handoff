@@ -348,6 +348,20 @@ fn next_steps(
                 .to_string(),
         );
     }
+    match codex_plugin["legacy_skills"]["status"].as_str() {
+        Some("recognized") => steps.push(
+            "legacy Codex skills can appear twice; run ai-handoff install --yes to preserve \
+             the old bundle in .agents/legacy-skill-backups outside skill discovery"
+                .to_string(),
+        ),
+        Some("unsafe" | "unrecognized") => steps.push(format!(
+            "legacy Codex skill path was preserved: inspect ownership and links at {}",
+            codex_plugin["legacy_skills"]["path"]
+                .as_str()
+                .unwrap_or("unknown"),
+        )),
+        _ => {}
+    }
     if !daemon_reachable && !fix_ran {
         steps.push(
             "daemon unreachable — run `ai-handoff doctor --fix` or `ai-handoff daemon run`"
@@ -447,7 +461,7 @@ fn claude_plugin_state(rec: &Option<ai_handoff_core::install::PluginRecord>) -> 
 }
 
 fn codex_plugin_state(rec: &Option<ai_handoff_core::install::PluginRecord>) -> serde_json::Value {
-    match rec {
+    let mut report = match rec {
         Some(r) => {
             let installed = Path::new(&r.root)
                 .join(".codex-plugin")
@@ -472,13 +486,35 @@ fn codex_plugin_state(rec: &Option<ai_handoff_core::install::PluginRecord>) -> s
             "enabled": false,
             "trusted": false,
         }),
-    }
+    };
+    let user_home = rec
+        .as_ref()
+        .and_then(codex_user_home)
+        .or_else(|| directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf()));
+    report["legacy_skills"] = user_home.map_or_else(
+        || json!({ "status": "unknown" }),
+        |home| {
+            json!(ai_handoff_core::install::legacy_skills::inspect(
+                &home.join(".agents/skills")
+            ))
+        },
+    );
+    report
+}
+
+fn codex_user_home(rec: &ai_handoff_core::install::PluginRecord) -> Option<PathBuf> {
+    let marketplace = rec.marketplace_file.as_ref()?;
+    Some(
+        Path::new(marketplace)
+            .parent()?
+            .parent()?
+            .parent()?
+            .to_path_buf(),
+    )
 }
 
 fn codex_config_path(rec: &ai_handoff_core::install::PluginRecord) -> Option<PathBuf> {
-    let marketplace = rec.marketplace_file.as_ref()?;
-    let user_home = Path::new(marketplace).parent()?.parent()?.parent()?;
-    Some(user_home.join(".codex").join("config.toml"))
+    Some(codex_user_home(rec)?.join(".codex/config.toml"))
 }
 
 #[cfg(test)]
@@ -486,6 +522,44 @@ mod tests {
     use super::*;
     use crate::host_launcher::LauncherInspection;
 
+    #[test]
+    fn codex_doctor_reports_legacy_skill_bundle_without_changing_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = dir.path().join(".agents/skills/ai-handoff");
+        std::fs::create_dir_all(legacy.join(".claude-plugin")).unwrap();
+        std::fs::create_dir_all(legacy.join("skills/handoff")).unwrap();
+        std::fs::write(
+            legacy.join(".claude-plugin/plugin.json"),
+            r#"{"name":"ai-handoff","version":"2.2.4"}"#,
+        )
+        .unwrap();
+        std::fs::write(legacy.join("skills/handoff/SKILL.md"), "user changes").unwrap();
+        let record = ai_handoff_core::install::PluginRecord {
+            root: dir
+                .path()
+                .join(".agents/plugins/ai-handoff")
+                .to_string_lossy()
+                .into_owned(),
+            files: vec![],
+            marketplace_file: Some(
+                dir.path()
+                    .join(".agents/plugins/marketplace.json")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+        };
+        let report = codex_plugin_state(&Some(record));
+        assert_eq!(report["legacy_skills"]["status"], "recognized");
+        let steps = next_steps(true, false, &json!({"installed": true}), &report);
+        assert!(steps
+            .iter()
+            .any(|step| step.contains("legacy") && step.contains("ai-handoff install --yes")));
+        assert_eq!(
+            std::fs::read_to_string(legacy.join("skills/handoff/SKILL.md")).unwrap(),
+            "user changes"
+        );
+        assert!(!dir.path().join(".agents/legacy-skill-backups").exists());
+    }
     #[test]
     fn host_launcher_repair_requires_a_managed_codex_install_and_broken_registration() {
         let healthy = LauncherInspection {

@@ -49,13 +49,6 @@ const SKILLS: &[(&str, &str)] = &[
     ),
 ];
 
-const LEGACY_USER_SKILLS: &[&str] = &[
-    "handoff",
-    "handoff-config",
-    "handoff-doctor",
-    "handoff-checkpoint",
-];
-
 // ---------------------------------------------------------------------------
 // hooks/hooks.json generation
 // ---------------------------------------------------------------------------
@@ -219,29 +212,55 @@ pub fn generate_bundle(
 /// Remove old plain user skills created by previous ai-handoff plugin-mode
 /// installs. Current plugin mode exposes skills only through the plugin bundle,
 /// which keeps the UI list namespaced as `ai-handoff:<skill>`.
+/// Modified/unknown content, extra files, and links are never removed.
 pub fn remove_handoff_user_skills(skills_root: &Path) -> std::io::Result<()> {
     remove_legacy_user_skills(skills_root)
 }
 
 fn remove_legacy_user_skills(skills_root: &Path) -> std::io::Result<()> {
-    for name in LEGACY_USER_SKILLS {
+    for path in skills_root.parent().into_iter().chain([skills_root]) {
+        if !super::legacy_skills::plain_metadata(path)
+            .ok()
+            .flatten()
+            .is_some_and(|metadata| metadata.is_dir())
+        {
+            return Ok(());
+        }
+    }
+    for (name, body) in SKILLS {
         let dir = skills_root.join(name);
-        let Some(existing) = read_existing_skill(&dir)? else {
+        let Some(existing) = read_existing_skill(&dir) else {
             continue;
         };
-        if existing.contains("ai-handoff") {
-            std::fs::remove_dir_all(dir)?;
+        if existing.replace("\r\n", "\n") == body.replace("\r\n", "\n") {
+            // Remove only the verified file; never recursively delete a user dir.
+            std::fs::remove_file(dir.join("SKILL.md"))?;
+            std::fs::remove_dir(dir)?;
         }
     }
     Ok(())
 }
 
-fn read_existing_skill(target_root: &Path) -> std::io::Result<Option<String>> {
-    match std::fs::read_to_string(target_root.join("SKILL.md")) {
-        Ok(text) => Ok(Some(text)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error),
+fn read_existing_skill(target_root: &Path) -> Option<String> {
+    let directory = super::legacy_skills::plain_metadata(target_root)
+        .ok()
+        .flatten()?;
+    if !directory.is_dir() {
+        return None;
     }
+    let mut entries = std::fs::read_dir(target_root).ok()?;
+    let only_entry = entries.next()?.ok()?;
+    if only_entry.file_name() != "SKILL.md" || entries.next().is_some() {
+        return None;
+    }
+    let skill = target_root.join("SKILL.md");
+    let metadata = super::legacy_skills::plain_metadata(&skill)
+        .ok()
+        .flatten()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    std::fs::read_to_string(skill).ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -438,6 +457,57 @@ mod tests {
         assert!(!root.join("handoff-config").exists());
         assert!(root.join("handoff-doctor/SKILL.md").exists());
         assert!(root.join("other-skill/SKILL.md").exists());
+    }
+
+    #[test]
+    fn remove_user_skills_preserves_custom_instructions_mentioning_ai_handoff() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("skills");
+        let skill = root.join("handoff");
+        std::fs::create_dir_all(&skill).unwrap();
+        let custom = "---\nname: handoff\ndescription: my project workflow\n---\nUse ai-handoff doctor, then follow my custom release process.\n";
+        std::fs::write(skill.join("SKILL.md"), custom).unwrap();
+
+        remove_handoff_user_skills(&root).unwrap();
+
+        assert_eq!(read(&skill, "SKILL.md"), custom);
+    }
+
+    #[test]
+    fn remove_user_skills_preserves_extra_files_next_to_generated_instructions() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("skills");
+        let skill = root.join("handoff-config");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(
+            skill.join("SKILL.md"),
+            include_str!("../../../../skills/handoff-config/SKILL.md"),
+        )
+        .unwrap();
+        std::fs::write(skill.join("notes.txt"), "my personal settings\n").unwrap();
+
+        remove_handoff_user_skills(&root).unwrap();
+
+        assert_eq!(read(&skill, "notes.txt"), "my personal settings\n");
+        assert!(skill.join("SKILL.md").is_file());
+    }
+
+    #[test]
+    fn remove_generated_user_skill_accepts_both_platform_line_endings() {
+        for newline in ["\n", "\r\n"] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().join("skills");
+            let skill = root.join("handoff-doctor");
+            std::fs::create_dir_all(&skill).unwrap();
+            let body = include_str!("../../../../skills/handoff-doctor/SKILL.md")
+                .replace("\r\n", "\n")
+                .replace('\n', newline);
+            std::fs::write(skill.join("SKILL.md"), body).unwrap();
+
+            remove_handoff_user_skills(&root).unwrap();
+
+            assert!(!skill.exists());
+        }
     }
 
     #[test]
