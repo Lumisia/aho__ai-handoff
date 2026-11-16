@@ -1,5 +1,5 @@
 import { FolderOpen, RefreshCw } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   deleteAccountSlot,
   getAccountReport,
@@ -13,7 +13,6 @@ import type {
   AccountAgentReport,
   AccountLoginSession,
   AccountReport,
-  AccountSlotRow,
   DashboardSnapshot,
   SlotUsageReport,
 } from "../types";
@@ -21,9 +20,12 @@ import type { Translator } from "../i18n";
 import { LimitBar, ResetCreditsBlock } from "../components/AccountUsage";
 import type { AgentId } from "../components/AccountUsage";
 
-function slotSubline(slot: AccountSlotRow, t: Translator) {
-  const plan = slot.plan ? `${t("plan")}: ${slot.plan}` : `${t("plan")}: unknown`;
-  return slot.source ? `${plan} - ${slot.source}` : plan;
+function knownPlan(...values: (string | null | undefined)[]) {
+  for (const value of values) {
+    const plan = value?.trim();
+    if (plan && plan.toLowerCase() !== "unknown") return plan;
+  }
+  return null;
 }
 
 function AgentPanel({
@@ -42,16 +44,23 @@ function AgentPanel({
   const title = agent === "codex" ? "Codex" : "Claude";
   const [login, setLogin] = useState<AccountLoginSession | null>(null);
   const [message, setMessage] = useState<string | null>(null);
-  const [usage, setUsage] = useState<Record<string, SlotUsageReport>>({});
+  // A new account report invalidates cached values and in-flight slot lookups.
+  const [usageState, setUsageState] = useState<{
+    report: AccountAgentReport;
+    values: Record<string, SlotUsageReport>;
+  }>({ report: data, values: {} });
+  const usage = usageState.report === data ? usageState.values : {};
   const [usageBusy, setUsageBusy] = useState<string | null>(null);
-  const autoUsageTried = useRef<Set<string>>(new Set());
+  const usageGeneration = useRef(0);
   const activeSlot = data.slots.find((slot) => slot.active);
   const activeSlotLabel = activeSlot?.label;
-  const activeUsage = activeSlot ? usage[activeSlot.label] : null;
-  const displayFiveHour = activeUsage?.five_hour ?? data.five_hour;
-  const displayWeekly = activeUsage?.weekly ?? data.weekly;
+  const activeUsage = activeSlot ? usage[activeSlot.label] ?? data.active_usage : null;
+  const displayFiveHour = activeUsage ? activeUsage.five_hour : data.five_hour;
+  const displayWeekly = activeUsage ? activeUsage.weekly : data.weekly;
   const activeDisplay = activeSlot?.email ?? activeSlot?.label ?? data.active;
-  const activePlan = activeUsage?.plan ?? activeSlot?.plan ?? data.plan;
+  // Local samples may belong to a previous account; only provider reports are bound.
+  const reportPlan = data.usage_source === "provider_api" ? data.plan : null;
+  const activePlan = knownPlan(activeUsage?.plan, activeSlot?.plan, reportPlan);
 
   useEffect(() => {
     if (!login) return;
@@ -73,30 +82,36 @@ function AgentPanel({
   }, [agent, login, onRefresh]);
 
   useEffect(() => {
-    // Auto-fetch the active slot's own usage (both agents) so its 5h/weekly
-    // limits show on open. Uses the slot credential — the safe explicit path.
-    if (!activeSlotLabel || autoUsageTried.current.has(activeSlotLabel)) return;
-    let cancelled = false;
-    autoUsageTried.current.add(activeSlotLabel);
-    setUsageBusy(activeSlotLabel);
-    refreshAccountSlotUsage(agent, activeSlotLabel)
-      .then((result) => {
-        if (!cancelled) {
-          setUsage((current) => ({ ...current, [activeSlotLabel]: result }));
-        }
-      })
-      .catch(() => {
-        // Keep the local sample when provider usage is unavailable.
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setUsageBusy((current) => (current === activeSlotLabel ? null : current));
-        }
-      });
+    const generation = ++usageGeneration.current;
+    setUsageState({ report: data, values: {} });
+    setUsageBusy(null);
+
+    // A forced report already includes the provider's response. Otherwise,
+    // query the active saved slot using its own credential, once per report.
+    if (activeSlotLabel && data.usage_source !== "provider_api") {
+      setUsageBusy(activeSlotLabel);
+      refreshAccountSlotUsage(agent, activeSlotLabel)
+        .then((result) => {
+          if (usageGeneration.current === generation) {
+            setUsageState((current) => ({
+              report: data,
+              values: { ...current.values, [activeSlotLabel]: result },
+            }));
+          }
+        })
+        .catch(() => {
+          // Keep the local sample when provider usage is unavailable.
+        })
+        .finally(() => {
+          if (usageGeneration.current === generation) {
+            setUsageBusy((current) => (current === activeSlotLabel ? null : current));
+          }
+        });
+    }
     return () => {
-      cancelled = true;
+      ++usageGeneration.current;
     };
-  }, [agent, activeSlotLabel]);
+  }, [agent, data, activeSlotLabel]);
 
   async function addAccount() {
     try {
@@ -118,14 +133,24 @@ function AgentPanel({
   }
 
   async function refreshUsage(label: string) {
+    const generation = usageGeneration.current;
     setUsageBusy(label);
     try {
       const result = await refreshAccountSlotUsage(agent, label);
-      setUsage((current) => ({ ...current, [label]: result }));
+      if (usageGeneration.current === generation) {
+        setUsageState((current) => ({
+          report: data,
+          values: { ...current.values, [label]: result },
+        }));
+      }
     } catch (err) {
-      onError(err instanceof Error ? err.message : String(err));
+      if (usageGeneration.current === generation) {
+        onError(err instanceof Error ? err.message : String(err));
+      }
     } finally {
-      setUsageBusy(null);
+      if (usageGeneration.current === generation) {
+        setUsageBusy((current) => (current === label ? null : current));
+      }
     }
   }
 
@@ -144,7 +169,7 @@ function AgentPanel({
         <div>
           <h3>{title}</h3>
           <p>{activeDisplay ? `${t("active")}: ${activeDisplay}` : t("noActiveSlot")}</p>
-          {activeDisplay && <p>{`${t("plan")}: ${activePlan ?? "unknown"}`}</p>}
+          {activeDisplay && activePlan && <p>{`${t("plan")}: ${activePlan}`}</p>}
         </div>
         <div className="account-actions">
           <button className="ghost" onClick={addAccount} disabled={login !== null}>
@@ -157,17 +182,18 @@ function AgentPanel({
         <div className="account-limit-stack">
           <LimitBar agent={agent} label="5h" value={displayFiveHour} t={t} />
           <LimitBar agent={agent} label={t("weekly")} value={displayWeekly} t={t} />
-          <ResetCreditsBlock usage={activeUsage} t={t} />
+          <ResetCreditsBlock agent={agent} usage={activeUsage} t={t} />
         </div>
       )}
 
       {message && <div className="banner">{message}</div>}
-      {activeSlot && data.usage_source === "none" && <div className="empty">{t("noSampleHint")}</div>}
+      {activeSlot && !displayFiveHour && !displayWeekly && <div className="empty">{t("noSampleHint")}</div>}
 
       <div className="slot-list">
         {data.slots.length === 0 && <div className="empty">{t("noActiveSlot")}</div>}
         {data.slots.map((slot) => {
-          const slotUsage = usage[slot.label];
+          const slotUsage = usage[slot.label] ?? (slot.active ? data.active_usage : null);
+          const slotPlan = knownPlan(slotUsage?.plan, slot.plan, slot.active ? reportPlan : null);
           return (
             <article className={`slot-row ${slot.active ? "active" : ""}`} key={slot.label}>
               <div className="slot-main">
@@ -175,7 +201,7 @@ function AgentPanel({
                   <strong>{slot.email ?? slot.label}</strong>
                   {slot.active && <span>{t("active")}</span>}
                 </div>
-                <small>{slotSubline(slot, t)}</small>
+                {slotPlan && <small>{`${t("plan")}: ${slotPlan}`}</small>}
               </div>
               <div className="account-actions slot-actions">
                 <button className="ghost" disabled={usageBusy === slot.label} onClick={() => refreshUsage(slot.label)}>
@@ -190,14 +216,9 @@ function AgentPanel({
               </div>
               {slotUsage && (
                 <div className="slot-usage">
-                  <div className="slot-usage-meta">
-                    <span>
-                      {t("plan")}: {slotUsage.plan ?? slot.plan ?? "unknown"}
-                    </span>
-                  </div>
                   <LimitBar agent={agent} label="5h" value={slotUsage.five_hour} t={t} />
                   <LimitBar agent={agent} label={t("weekly")} value={slotUsage.weekly} t={t} />
-                  <ResetCreditsBlock usage={slotUsage} t={t} />
+                  <ResetCreditsBlock agent={agent} usage={slotUsage} t={t} />
                 </div>
               )}
             </article>
@@ -212,22 +233,33 @@ export default function Account({ snapshot: _snapshot, t }: { snapshot: Dashboar
   const [report, setReport] = useState<AccountReport | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const reportGeneration = useRef(0);
 
   useEffect(() => {
     void loadAccounts(false);
+    return () => { ++reportGeneration.current; };
   }, []);
 
   async function loadAccounts(force: boolean) {
+    const generation = ++reportGeneration.current;
     setLoading(true);
     setError(null);
     try {
-      setReport(await getAccountReport({ force }));
+      const next = await getAccountReport({ force });
+      if (reportGeneration.current === generation) setReport(next);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      if (reportGeneration.current === generation) setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setLoading(false);
+      if (reportGeneration.current === generation) setLoading(false);
     }
   }
+
+  const acceptAccountReport = useCallback((next: AccountReport) => {
+    ++reportGeneration.current;
+    setReport(next);
+    setLoading(false);
+    setError(null);
+  }, []);
 
   async function openFolder() {
     try {
@@ -239,8 +271,8 @@ export default function Account({ snapshot: _snapshot, t }: { snapshot: Dashboar
 
   return (
     <div className="view account-view">
-      <div className="account-page-head">
-        <h3>{t("accounts")}</h3>
+      <header className="account-page-head">
+        <h2>{t("accounts")}</h2>
         <div className="account-page-actions">
           <button className="ghost icon-text-button" onClick={() => void openFolder()}>
             <FolderOpen size={15} aria-hidden="true" />
@@ -251,14 +283,14 @@ export default function Account({ snapshot: _snapshot, t }: { snapshot: Dashboar
             {loading ? t("loadingAccounts") : t("refresh")}
           </button>
         </div>
-      </div>
+      </header>
 
       {error && <section className="banner error">{error}</section>}
       {loading && !report && <section className="loading-screen">{t("loadingAccounts")}</section>}
       {report && (
         <div className="account-grid">
-          <AgentPanel agent="codex" data={report.codex} onRefresh={setReport} onError={setError} t={t} />
-          <AgentPanel agent="claude" data={report.claude} onRefresh={setReport} onError={setError} t={t} />
+          <AgentPanel agent="codex" data={report.codex} onRefresh={acceptAccountReport} onError={setError} t={t} />
+          <AgentPanel agent="claude" data={report.claude} onRefresh={acceptAccountReport} onError={setError} t={t} />
         </div>
       )}
     </div>

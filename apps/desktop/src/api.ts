@@ -5,6 +5,7 @@ import type {
   AccountLoginSession,
   AccountOpResult,
   CapsuleList,
+  CapsuleProjectInfo,
   ConfigRow,
   DashboardSnapshot,
   IntegrationReport,
@@ -58,19 +59,20 @@ function invalidateDashboardCache() {
 export function getDashboardSnapshot(options: { force?: boolean } = {}): Promise<DashboardSnapshot> {
   if (!options.force && dashboardSnapshotCache) return Promise.resolve(dashboardSnapshotCache);
   if (dashboardSnapshotPromise) return dashboardSnapshotPromise;
-  dashboardSnapshotPromise = withTimeout(
+  const pending = withTimeout(
     invoke<DashboardSnapshot>("get_dashboard_snapshot"),
     "Dashboard refresh",
     DASHBOARD_TIMEOUT_MS,
   )
     .then((snapshot) => {
-      dashboardSnapshotCache = snapshot;
+      if (dashboardSnapshotPromise === pending) dashboardSnapshotCache = snapshot;
       return snapshot;
     })
     .finally(() => {
-      dashboardSnapshotPromise = null;
+      if (dashboardSnapshotPromise === pending) dashboardSnapshotPromise = null;
     });
-  return dashboardSnapshotPromise;
+  dashboardSnapshotPromise = pending;
+  return pending;
 }
 
 export function listCapsules(): Promise<CapsuleList> {
@@ -119,18 +121,23 @@ export function getUsageReport(
 
 function cacheAccountReport(report: AccountReport) {
   accountReportCache = report;
+  accountReportPromise = null;
   return report;
 }
 
 export function getAccountReport(options: { force?: boolean } = {}): Promise<AccountReport> {
   if (!options.force && accountReportCache) return Promise.resolve(accountReportCache);
   if (!options.force && accountReportPromise) return accountReportPromise;
-  accountReportPromise = invoke<AccountReport>("get_account_report", { force: options.force ?? false })
-    .then(cacheAccountReport)
+  const pending = invoke<AccountReport>("get_account_report", { force: options.force ?? false })
+    .then((report) => {
+      if (accountReportPromise === pending) accountReportCache = report;
+      return report;
+    })
     .finally(() => {
-      accountReportPromise = null;
+      if (accountReportPromise === pending) accountReportPromise = null;
     });
-  return accountReportPromise;
+  accountReportPromise = pending;
+  return pending;
 }
 
 export function startAccountLogin(agent: "codex" | "claude"): Promise<AccountLoginSession> {
@@ -240,28 +247,57 @@ export function resetConfigValue(key: string): Promise<ConfigRow[]> {
 
 export function toggleCapsuleState(path: string): Promise<string> {
   return invoke<string>("toggle_capsule_state", { path }).then((state) => {
-    dashboardSnapshotCache = null;
+    invalidateCapsuleSnapshot();
     return state;
   });
 }
 
 export function setCapsuleState(path: string, state: string): Promise<string> {
   return invoke<string>("set_capsule_state", { path, state }).then((nextState) => {
-    dashboardSnapshotCache = null;
+    invalidateCapsuleSnapshot();
     return nextState;
   });
 }
 
 export function setCapsuleField(path: string, field: string, value: string): Promise<void> {
-  return invoke<void>("set_capsule_field", { path, field, value }).then(() => {
-    dashboardSnapshotCache = null;
-  });
+  return invoke<void>("set_capsule_field", { path, field, value }).then(invalidateCapsuleSnapshot);
+}
+
+export function readCapsuleEditor(path: string, originalContent: string): Promise<string> {
+  return invoke("read_capsule_editor", { path, originalContent });
+}
+
+export function saveCapsule(
+  path: string,
+  content: string,
+  originalContent: string,
+  route?: { source?: "codex" | "claude-code"; target?: "codex" | "claude-code" },
+): Promise<void> {
+  return invoke<void>("save_capsule", {
+    path, content, originalContent, sourceAgent: route?.source, targetAgent: route?.target,
+  }).then(invalidateCapsuleSnapshot);
+}
+
+function invalidateCapsuleSnapshot() {
+  dashboardSnapshotCache = null;
+  dashboardSnapshotPromise = null;
+  integrationReportCache = null;
 }
 
 export function deleteCapsule(path: string): Promise<void> {
-  return invoke<void>("delete_capsule", { path }).then(() => {
-    dashboardSnapshotCache = null;
-  });
+  return invoke<void>("delete_capsule", { path }).then(invalidateCapsuleSnapshot);
+}
+
+export function getCapsuleProject(projectId: string): Promise<CapsuleProjectInfo> {
+  return invoke("get_capsule_project", { projectId });
+}
+
+export function deleteCapsuleProject(projectId: string, expectedRevision: string): Promise<void> {
+  return invoke<void>("delete_capsule_project", { projectId, expectedRevision }).then(invalidateCapsuleSnapshot);
+}
+
+export function openCapsuleProject(projectId: string): Promise<MenuCommandResult> {
+  return invoke("open_capsule_project", { projectId });
 }
 
 export function openCapsuleFolder(path: string): Promise<MenuCommandResult> {

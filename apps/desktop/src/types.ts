@@ -45,6 +45,12 @@ export interface CapsuleList {
   skipped: number;
 }
 
+export interface CapsuleProjectInfo {
+  path: string;
+  capsule_count: number;
+  revision: string;
+}
+
 export interface ReadTextResult {
   path: string;
   text: string;
@@ -130,6 +136,7 @@ export interface AccountAgentReport {
   five_hour?: AccountWindow | null;
   weekly?: AccountWindow | null;
   usage_source: "provider_api" | "local_sample" | "none";
+  active_usage?: SlotUsageReport | null;
   slots: AccountSlotRow[];
 }
 
@@ -168,8 +175,15 @@ export interface AccountOpResult {
 }
 
 export interface ResetCreditRow {
-  granted_at: string;
-  expires_at: string;
+  kind: "full" | "other";
+  expires_at: string | null;
+}
+
+export interface ClaudeResetCredit {
+  remaining: number;
+  starts_at?: number | null;
+  expires_at?: number | null;
+  kind: "full" | "weekly" | "session" | "scoped" | "other";
 }
 
 export interface SlotUsageReport {
@@ -178,6 +192,7 @@ export interface SlotUsageReport {
   weekly?: AccountWindow | null;
   reset_credits?: number | null;
   reset_credit_details: ResetCreditRow[];
+  claude_reset_credits?: ClaudeResetCredit[] | null;
 }
 
 export interface ThemeCatalogEntry {

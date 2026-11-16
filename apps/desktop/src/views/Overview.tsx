@@ -38,12 +38,11 @@ function resetText(value: AccountWindow | null | undefined) {
   return clockText(value?.resets_at);
 }
 
-/// Projected exhaust time, shown only when the window runs out BEFORE it
-/// resets — the case worth acting on. Otherwise the reset line is the story.
-function exhaustText(value: AccountWindow | null | undefined) {
+function forecastText(value: AccountWindow | null | undefined, t: Translator) {
   if (!value?.projected_exhaust_at || !value.resets_at) return null;
-  if (value.projected_exhaust_at >= value.resets_at) return null;
-  return clockText(value.projected_exhaust_at);
+  return value.projected_exhaust_at >= value.resets_at
+    ? { text: t("lastsUntilReset"), runsOut: false }
+    : { text: `${t("runsOutAt")} ~${clockText(value.projected_exhaust_at)}`, runsOut: true };
 }
 
 function LimitBar({
@@ -59,7 +58,7 @@ function LimitBar({
 }) {
   const used = value ? Math.max(0, Math.min(100, value.used_percent)) : 0;
   const reset = resetText(value);
-  const exhaust = exhaustText(value);
+  const forecast = forecastText(value, t);
   const rate = value?.burn_rate_per_hour;
   return (
     <div className={`limit-row ${agent}`}>
@@ -74,9 +73,9 @@ function LimitBar({
             {t("resetsAt")} {reset}
           </small>
         )}
-        {exhaust && (
-          <small className="limit-exhaust" title={rate ? `≈ ${rate.toFixed(1)}%/h` : undefined}>
-            {t("runsOutAt")} ~{exhaust}
+        {forecast && (
+          <small className={forecast.runsOut ? "limit-exhaust" : "limit-exhaust safe"} title={rate ? `≈ ${rate.toFixed(1)}%/h` : undefined}>
+            {forecast.text}
           </small>
         )}
       </span>

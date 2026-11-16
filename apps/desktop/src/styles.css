@@ -992,23 +992,16 @@ button.table-row.active code {
 }
 
 .setting-popover {
-  position: absolute;
-  right: 0;
+  position: fixed;
   z-index: 120;
-  width: min(300px, 70vw);
+  width: min(300px, calc(100vw - 16px));
+  overflow: auto;
+  overscroll-behavior: contain;
   border: 1px solid var(--border-color);
   border-radius: 10px;
   background: var(--panel-bg-color);
   box-shadow: 0 18px 38px rgba(31, 36, 43, 0.22);
   padding: 8px;
-}
-
-.setting-popover.below {
-  top: calc(100% + 6px);
-}
-
-.setting-popover.above {
-  bottom: calc(100% + 6px);
 }
 
 .option-list {
@@ -1785,7 +1778,7 @@ button.table-row.active code {
   min-height: 34px;
 }
 
-.account-page-head h3 {
+.account-page-head h2 {
   margin: 0;
   color: var(--text-color);
   font-size: 18px;
@@ -1910,6 +1903,14 @@ button.table-row.active code {
   font-weight: 650;
 }
 
+.reset-credit-block.codex .reset-credit-title {
+  color: var(--agent-codex-color);
+}
+
+.reset-credit-block.claude .reset-credit-title {
+  color: var(--agent-claude-color);
+}
+
 .slot-list {
   display: grid;
   gap: 8px;
@@ -1986,18 +1987,11 @@ button.table-row.active code {
   grid-template-columns: minmax(42px, 54px) minmax(116px, 1fr) minmax(126px, max-content);
 }
 
-.slot-usage-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 7px 12px;
-}
-
 .credit-list {
   display: grid;
   gap: 3px;
 }
 
-.slot-usage-meta span,
 .credit-list small {
   color: var(--muted-color);
   font-size: 12px;
@@ -2214,7 +2208,6 @@ body {
 
 .app.gui-dark .titlebar-icon-button,
 .app.gui-dark .window-control,
-.app.gui-dark .tool-button,
 .app.gui-dark .nav svg,
 .app.gui-dark .menu-item svg,
 .app.gui-dark .category svg,
@@ -2229,8 +2222,7 @@ body {
 }
 
 .app.gui-dark .titlebar-icon-button svg,
-.app.gui-dark .window-control svg,
-.app.gui-dark .tool-button svg {
+.app.gui-dark .window-control svg {
   color: var(--icon-color);
   stroke: var(--icon-color);
 }
@@ -2439,35 +2431,8 @@ body {
 }
 
 .sidebar-top {
-  display: grid;
-  gap: 8px;
-  /* Never let the flex column squeeze the search + nav when the window is short
-     or the capsule list is long — keeps the nav tabs a constant size. The
-     capsule list below scrolls instead (it has its own overflow). */
+  /* Keep the navigation visible when the capsule list scrolls. */
   flex: 0 0 auto;
-}
-
-.sidebar-tools {
-  display: flex;
-  justify-content: flex-start;
-  min-height: 30px;
-}
-
-.tool-button {
-  display: inline-grid;
-  place-items: center;
-  width: 30px;
-  height: 30px;
-  border: 0;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--icon-color);
-  cursor: pointer;
-}
-
-.tool-button:hover {
-  background: var(--soft-bg-color);
-  color: var(--text-color);
 }
 
 .codex-light nav {
@@ -2857,6 +2822,48 @@ body {
 .capsule-title-stack p {
   margin: 0;
   color: var(--muted-color);
+}
+
+.capsule-route-editor {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.capsule-agent-select {
+  position: relative;
+}
+
+.capsule-route-editor .agent-logo.codex {
+  color: var(--agent-codex-color);
+}
+
+.capsule-route-editor .agent-logo.claude {
+  color: var(--agent-claude-color);
+}
+
+.capsule-raw-editor {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  height: 420px;
+  min-height: 140px;
+  resize: vertical;
+  border: 1px solid var(--border-strong-color);
+  border-radius: 6px;
+  background: var(--code-bg-color);
+  color: var(--text-color);
+  font-family: "JetBrains Mono", Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 12px;
+  tab-size: 2;
+}
+
+.capsule-raw-editor:focus-visible {
+  outline: 2px solid var(--focus-border-color);
+  outline-offset: 1px;
 }
 
 .capsule-status-wrap,
@@ -3528,6 +3535,21 @@ body {
   gap: 8px;
 }
 
+.project-delete-dialog {
+  color: var(--text-color);
+}
+
+.project-delete-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.65);
+}
+
+.project-delete-dialog .project-delete-name {
+  margin-bottom: 8px;
+  color: var(--text-color);
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
 /* --- Theme settings panel ------------------------------------------------ */
 .theme-panel {
   display: grid;
@@ -3693,7 +3715,11 @@ body {
 .limit-exhaust {
   color: var(--warning-color);
   font-size: 11px;
-  white-space: nowrap;
+  white-space: normal;
+}
+
+.limit-exhaust.safe {
+  color: var(--muted-color);
 }
 
 /* Sidebar capsule search + state filter. */

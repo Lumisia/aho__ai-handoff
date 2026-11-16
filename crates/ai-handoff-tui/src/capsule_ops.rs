@@ -8,6 +8,7 @@ use std::path::Path;
 use ai_handoff_core::{
     capsule::{Capsule, ConsumptionState},
     capsule_codec::{self, CapsuleCodecError},
+    capsule_lock::CapsuleLock,
     config::CapsuleFormat,
 };
 
@@ -50,6 +51,7 @@ fn format_for_path(path: &Path) -> CapsuleFormat {
 
 /// Cycle through the supported manual states. Returns the new snake_case state.
 pub fn toggle_state(path: &Path) -> Result<String, CapsuleOpError> {
+    let _lock = CapsuleLock::acquire(path).map_err(CapsuleOpError::Io)?;
     let mut capsule = load(path)?;
     let new = capsule.consumption.state.next();
     capsule.consumption.state = new;
@@ -111,6 +113,7 @@ pub fn field_text(capsule: &Capsule, field: CapField) -> String {
 /// Apply edited `text` to `field` and write the capsule back. List fields are
 /// split on `|`; an empty next-prompt clears it to `null`.
 pub fn set_field(path: &Path, field: CapField, text: &str) -> Result<(), CapsuleOpError> {
+    let _lock = CapsuleLock::acquire(path).map_err(CapsuleOpError::Io)?;
     let mut capsule = load(path)?;
     match field {
         CapField::Goal => capsule.summary.goal = text.to_string(),
@@ -138,6 +141,7 @@ fn split_list(text: &str) -> Vec<String> {
 
 /// Delete the capsule file.
 pub fn delete(path: &Path) -> Result<(), CapsuleOpError> {
+    let _lock = CapsuleLock::acquire(path).map_err(CapsuleOpError::Io)?;
     std::fs::remove_file(path).map_err(CapsuleOpError::Io)
 }
 
@@ -256,6 +260,30 @@ mod tests {
         let path = write_sample(dir.path());
         delete(&path).unwrap();
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn capsule_mutations_do_not_bypass_another_writers_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_sample(dir.path());
+        let original = std::fs::read(&path).unwrap();
+        let lock = path.with_extension("lock");
+        std::fs::write(&lock, "held by another writer").unwrap();
+
+        for result in [
+            toggle_state(&path).map(|_| ()),
+            set_field(&path, CapField::Goal, "overwritten goal"),
+            delete(&path),
+        ] {
+            assert!(
+                matches!(result, Err(CapsuleOpError::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock)
+            );
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert_eq!(
+            std::fs::read_to_string(lock).unwrap(),
+            "held by another writer"
+        );
     }
 
     #[test]

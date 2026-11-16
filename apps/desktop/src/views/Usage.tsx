@@ -1,29 +1,20 @@
-import ClaudeIcon from "@lobehub/icons/es/Claude";
-import OpenAIIcon from "@lobehub/icons/es/OpenAI";
+import { ClaudeIcon, OpenAIIcon } from "../components/BrandIcons";
 import { useEffect, useMemo, useState } from "react";
 import { getUsageReport } from "../api";
 import TokenUsageChart, {
   agentForKey,
+  buildDayStacks,
   formatCost,
   formatTokens,
   periodDays,
   rowsForUsageMode,
+  UsageBar,
   type UsageBreakdownMode,
   type UsageChartView,
   type UsagePeriod,
 } from "../components/TokenUsageChart";
 import type { UsageGroup, UsageReport } from "../types";
 import type { Translator } from "../i18n";
-
-function UsageBar({ group, max }: { group: UsageGroup; max: number }) {
-  const pct = max > 0 ? Math.max(2, Math.round((group.tokens.total / max) * 100)) : 0;
-  const agent = agentForKey(group.key);
-  return (
-    <div className={`usage-bar ${agent}`}>
-      <span style={{ width: `${pct}%` }} />
-    </div>
-  );
-}
 
 function ModelIcon({ name }: { name: string }) {
   const agent = agentForKey(name);
@@ -87,6 +78,10 @@ export default function Usage({ t }: { t: Translator }) {
     return [...base].sort((a, b) => b.tokens.total - a.tokens.total || a.key.localeCompare(b.key));
   }, [mode, report]);
   const max = useMemo(() => Math.max(0, ...rows.map((row) => row.tokens.total)), [rows]);
+  const segmentsByDay = useMemo(() => {
+    if (!report || mode !== "day") return null;
+    return new Map(buildDayStacks(report).map((stack) => [stack.day, stack.segments]));
+  }, [mode, report]);
 
   if (error) {
     return <section className="banner error">{t("failedUsage")}: {error}</section>;
@@ -150,7 +145,7 @@ export default function Usage({ t }: { t: Translator }) {
                 <span>{formatCost(row.cost_usd)}</span>
                 <span>{row.events}</span>
               </div>
-              <UsageBar group={row} max={max} />
+              <UsageBar group={row} max={max} segments={segmentsByDay?.get(row.key)} />
             </div>
           ))}
         </div>

@@ -15,14 +15,12 @@
   PanelLeftClose,
   PanelLeftOpen,
   RefreshCw,
-  Search,
   Settings,
   Square,
   Trash2,
   X,
 } from "lucide-react";
-import ClaudeIcon from "@lobehub/icons/es/Claude";
-import OpenAIIcon from "@lobehub/icons/es/OpenAI";
+import { ClaudeIcon, OpenAIIcon } from "./components/BrandIcons";
 import * as Menubar from "@radix-ui/react-menubar";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -34,11 +32,13 @@ import {
   ensureDaemonRunning,
   getAccountReport,
   getAppVersion,
+  getCapsuleProject,
   getDashboardSnapshot,
   getLimitAlerts,
   getTheme,
   openCapsuleExternal,
   openCapsuleFolder,
+  openCapsuleProject,
   openLogsFolder,
   openProjectGithub,
   pollAccountLogin,
@@ -51,6 +51,7 @@ import {
 } from "./api";
 import { createTranslator, normalizeLanguage } from "./i18n";
 import { LimitBar, ResetCreditsBlock } from "./components/AccountUsage";
+import ProjectDeleteDialog from "./components/ProjectDeleteDialog";
 import type { CSSProperties, MouseEvent, PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import type {
   AccountLoginSession,
@@ -86,10 +87,20 @@ interface CapsuleAgentNode {
   count: number;
 }
 
+type CapsuleProject = Pick<CapsuleProjectNode, "project_id" | "project_label">;
+type CapsuleMenuTarget = { kind: "capsule"; item: CapsuleSummary } | { kind: "project"; project: CapsuleProject };
+
 interface CapsuleContextMenuState {
   x: number;
   y: number;
-  item: CapsuleSummary;
+  target: CapsuleMenuTarget;
+}
+
+interface CapsuleMenuAction {
+  label: string;
+  icon: typeof Trash2;
+  run: () => void;
+  danger?: boolean;
 }
 
 const navTabs: Array<{ id: Exclude<Tab, "capsules" | "settings">; labelKey: string; icon: typeof LayoutDashboard }> = [
@@ -394,7 +405,7 @@ function LimitSwitchAccountCard({
         <div className="limit-switch-bars">
           <LimitBar agent={agent} label="5h" value={usage?.five_hour} t={t} compact />
           <LimitBar agent={agent} label={t("weekly")} value={usage?.weekly} t={t} compact />
-          <ResetCreditsBlock usage={usage} t={t} />
+          <ResetCreditsBlock agent={agent} usage={usage} t={t} />
         </div>
       )}
     </article>
@@ -552,28 +563,13 @@ function SettingsModal({
 
 function CapsuleContextMenu({
   state,
-  t,
   onClose,
-  onDelete,
-  onCopyPath,
-  onOpenFolder,
-  onOpenWith,
+  actions,
 }: {
-  state: CapsuleContextMenuState | null;
-  t: Translator;
+  state: CapsuleContextMenuState;
   onClose: () => void;
-  onDelete: (item: CapsuleSummary) => void;
-  onCopyPath: (item: CapsuleSummary) => void;
-  onOpenFolder: (item: CapsuleSummary) => void;
-  onOpenWith: (item: CapsuleSummary) => void;
+  actions: CapsuleMenuAction[];
 }) {
-  if (!state) return null;
-  const actions = [
-    { label: t("deleteCapsule"), icon: Trash2, run: onDelete, danger: true },
-    { label: t("copyPath"), icon: Copy, run: onCopyPath },
-    { label: t("openFolder"), icon: FolderOpen, run: onOpenFolder },
-    { label: t("openWith"), icon: ExternalLink, run: onOpenWith },
-  ];
   return (
     <div className="context-scrim" onMouseDown={onClose}>
       <section
@@ -588,8 +584,8 @@ function CapsuleContextMenu({
               key={action.label}
               className={action.danger ? "context-item danger-item" : "context-item"}
               onClick={() => {
-                action.run(state.item);
                 onClose();
+                action.run();
               }}
             >
               <Icon size={15} />
@@ -735,6 +731,7 @@ function CapsuleNavigator({
   onToggleProject,
   onSelectCapsule,
   onCapsuleContextMenu,
+  onProjectContextMenu,
   t,
 }: {
   items: CapsuleSummary[];
@@ -749,6 +746,7 @@ function CapsuleNavigator({
   onToggleProject: (key: string) => void;
   onSelectCapsule: (path: string) => void;
   onCapsuleContextMenu: (event: MouseEvent, item: CapsuleSummary) => void;
+  onProjectContextMenu: (event: MouseEvent, project: CapsuleProjectNode) => void;
   t: Translator;
 }) {
   const filterActive = query.trim() !== "" || stateFilter !== "all";
@@ -810,6 +808,7 @@ function CapsuleNavigator({
                 <button
                   className={open ? "side-project-button open" : "side-project-button"}
                   onClick={() => onToggleProject(key)}
+                  onContextMenu={(event) => onProjectContextMenu(event, project)}
                   title={project.project_id}
                 >
                   <span className="project-title">
@@ -859,6 +858,7 @@ export default function App() {
   const [sidebarResizing, setSidebarResizing] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [capsuleMenu, setCapsuleMenu] = useState<CapsuleContextMenuState | null>(null);
+  const [projectToDelete, setProjectToDelete] = useState<CapsuleProject | null>(null);
   const [titleStatus, setTitleStatus] = useState<string | null>(null);
   const [titlebarLogin, setTitlebarLogin] = useState<AccountLoginSession | null>(null);
   const [limitAlert, setLimitAlert] = useState<LimitAlert | null>(null);
@@ -890,7 +890,7 @@ export default function App() {
   }
 
   async function refresh(options: { force?: boolean } = {}) {
-    if (refreshing) return;
+    if (refreshing && !options.force) return;
     const seq = refreshSeq.current + 1;
     refreshSeq.current = seq;
     setRefreshing(true);
@@ -903,9 +903,8 @@ export default function App() {
       if (seq !== refreshSeq.current) return;
       setSnapshot(nextSnapshot);
       setTheme(nextTheme);
-      if (!selectedCapsulePath && nextSnapshot.capsules.items[0]) {
-        setSelectedCapsulePath(nextSnapshot.capsules.items[0].path);
-      }
+      setSelectedCapsulePath((current) => nextSnapshot.capsules.items.some((item) => item.path === current)
+        ? current : nextSnapshot.capsules.items[0]?.path ?? null);
     } catch (err) {
       if (seq !== refreshSeq.current) return;
       setError(err instanceof Error ? err.message : String(err));
@@ -1158,14 +1157,56 @@ export default function App() {
     void runTitlebarAction(async () => runAppUpdate());
   }
 
-  function handleCapsuleContextMenu(event: MouseEvent, item: CapsuleSummary) {
+  function showCapsuleContextMenu(event: MouseEvent, target: CapsuleMenuTarget) {
     event.preventDefault();
-    setSelectedCapsulePath(item.path);
     setCapsuleMenu({
-      x: Math.min(event.clientX, window.innerWidth - 240),
-      y: Math.min(event.clientY, window.innerHeight - 230),
-      item,
+      x: Math.max(8, Math.min(event.clientX, window.innerWidth - 240)),
+      y: Math.max(8, Math.min(event.clientY, window.innerHeight - (target.kind === "capsule" ? 190 : 148))),
+      target,
     });
+  }
+
+  function handleCapsuleContextMenu(event: MouseEvent, item: CapsuleSummary) {
+    setSelectedCapsulePath(item.path);
+    showCapsuleContextMenu(event, { kind: "capsule", item });
+  }
+
+  function handleProjectContextMenu(event: MouseEvent, project: CapsuleProjectNode) {
+    event.preventDefault();
+    const { project_id, project_label } = project;
+    // The sidebar label comes from capsule data. The parent folder must agree before deleting it.
+    if (snapshot?.capsules.items.some((item) => item.project_id === project_id
+      && item.path.split(/[\\/]/).slice(-2, -1)[0] !== project_id)) {
+      reportMenuError(t("capsuleProjectMismatch"));
+      return;
+    }
+    showCapsuleContextMenu(event, { kind: "project", project: { project_id, project_label } });
+  }
+
+  function capsuleMenuActions(target: CapsuleMenuTarget): CapsuleMenuAction[] {
+    if (target.kind === "project") {
+      const project = target.project;
+      return [
+        { label: t("deleteProject"), icon: Trash2, danger: true, run: () => setProjectToDelete(project) },
+        { label: t("copyPath"), icon: Copy, run: () => {
+          void runTitlebarAction(async () => {
+            const info = await getCapsuleProject(project.project_id);
+            await navigator.clipboard.writeText(info.path);
+            return { message: t("pathCopied") };
+          });
+        } },
+        { label: t("openFolder"), icon: FolderOpen, run: () => {
+          void runTitlebarAction(async () => openCapsuleProject(project.project_id));
+        } },
+      ];
+    }
+    const item = target.item;
+    return [
+      { label: t("deleteCapsule"), icon: Trash2, danger: true, run: () => deleteCapsuleFromMenu(item) },
+      { label: t("copyPath"), icon: Copy, run: () => copyCapsulePath(item) },
+      { label: t("openFolder"), icon: FolderOpen, run: () => openCapsuleFolderFromMenu(item) },
+      { label: t("openWith"), icon: ExternalLink, run: () => openCapsuleWithFromMenu(item) },
+    ];
   }
 
   function deleteCapsuleFromMenu(item: CapsuleSummary) {
@@ -1247,11 +1288,6 @@ export default function App() {
       />
       <aside className="sidebar">
         <div className="sidebar-top">
-          <div className="sidebar-tools">
-            <button className="tool-button" title={t("searchSettings")}>
-              <Search size={17} />
-            </button>
-          </div>
           <nav aria-label={t("navigation")}>
             {navTabs.map((tab) => {
               const Icon = tab.icon;
@@ -1282,6 +1318,7 @@ export default function App() {
             onToggleAgent={toggleAgent}
             onToggleProject={toggleProject}
             onCapsuleContextMenu={handleCapsuleContextMenu}
+            onProjectContextMenu={handleProjectContextMenu}
             onSelectCapsule={(path) => {
               setSelectedCapsulePath(path);
               setActive("capsules");
@@ -1307,12 +1344,14 @@ export default function App() {
         />
       </aside>
       <main>
-        <header className="content-header">
-          <div>
-            <h2>{pageTitle}</h2>
-          </div>
-          {snapshot && active === "overview" && <OverviewHeaderStats snapshot={snapshot} t={t} />}
-        </header>
+        {active !== "account" && (
+          <header className="content-header">
+            <div>
+              <h2>{pageTitle}</h2>
+            </div>
+            {snapshot && active === "overview" && <OverviewHeaderStats snapshot={snapshot} t={t} />}
+          </header>
+        )}
         {error && (
           <section className="banner error">
             {t("failedDashboard")}: {error}
@@ -1345,15 +1384,27 @@ export default function App() {
         onThemeChanged={() => refresh({ force: true })}
         t={t}
       />
-      <CapsuleContextMenu
-        state={capsuleMenu}
-        t={t}
-        onClose={() => setCapsuleMenu(null)}
-        onDelete={deleteCapsuleFromMenu}
-        onCopyPath={copyCapsulePath}
-        onOpenFolder={openCapsuleFolderFromMenu}
-        onOpenWith={openCapsuleWithFromMenu}
-      />
+      {capsuleMenu && (
+        <CapsuleContextMenu
+          state={capsuleMenu}
+          actions={capsuleMenuActions(capsuleMenu.target)}
+          onClose={() => setCapsuleMenu(null)}
+        />
+      )}
+      {projectToDelete && (
+        <ProjectDeleteDialog
+          key={projectToDelete.project_id}
+          projectId={projectToDelete.project_id}
+          projectLabel={projectToDelete.project_label}
+          onClose={() => setProjectToDelete(null)}
+          onDeleted={() => {
+            setProjectToDelete(null);
+            reportMenuMessage(t("projectDeleted"));
+            void refresh({ force: true });
+          }}
+          t={t}
+        />
+      )}
       <LimitSwitchModal
         alert={limitAlert}
         t={t}

@@ -1,5 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod capsule_editor;
+mod capsule_projects;
+
 use std::{
     ffi::OsStr,
     path::{Path, PathBuf},
@@ -108,6 +111,7 @@ struct AccountAgentReport {
     five_hour: Option<AccountWindow>,
     weekly: Option<AccountWindow>,
     usage_source: String,
+    active_usage: Option<SlotUsageReport>,
     slots: Vec<AccountSlotRow>,
 }
 
@@ -164,12 +168,18 @@ struct SlotUsageReport {
     weekly: Option<AccountWindow>,
     reset_credits: Option<i64>,
     reset_credit_details: Vec<ResetCreditRow>,
+    claude_reset_credits: Option<Vec<ai_handoff_tui::account_api::ClaudeResetCredit>>,
+}
+
+struct ResolvedAccountUsage {
+    slot: AccountSlotRow,
+    usage: ai_handoff_tui::account_api::UsageData,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 struct ResetCreditRow {
-    granted_at: String,
-    expires_at: String,
+    kind: ai_handoff_tui::account_api::CodexResetKind,
+    expires_at: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -300,7 +310,8 @@ async fn list_capsules() -> Result<CapsuleList, String> {
 #[tauri::command]
 async fn read_capsule(path: String) -> Result<ReadTextResult, String> {
     blocking_command("read_capsule", move || {
-        Ok(dashboard::read_capsule(&PathBuf::from(path), TEXT_LIMIT))
+        let path = capsule_editor::stored_capsule_path(Path::new(&path))?;
+        Ok(dashboard::read_capsule(&path, TEXT_LIMIT))
     })
     .await
 }
@@ -445,7 +456,8 @@ async fn reset_config_value(key: String) -> Result<Vec<ConfigRow>, String> {
 #[tauri::command]
 async fn toggle_capsule_state(path: String) -> Result<String, String> {
     blocking_command("toggle_capsule_state", move || {
-        toggle_capsule_state_at(&PathBuf::from(path))
+        let path = capsule_editor::stored_capsule_path(Path::new(&path))?;
+        toggle_capsule_state_at(&path)
     })
     .await
 }
@@ -453,7 +465,8 @@ async fn toggle_capsule_state(path: String) -> Result<String, String> {
 #[tauri::command]
 async fn set_capsule_state(path: String, state: String) -> Result<String, String> {
     blocking_command("set_capsule_state", move || {
-        set_capsule_state_at(&PathBuf::from(path), &state)
+        let path = capsule_editor::stored_capsule_path(Path::new(&path))?;
+        set_capsule_state_at(&path, &state)
     })
     .await
 }
@@ -461,7 +474,8 @@ async fn set_capsule_state(path: String, state: String) -> Result<String, String
 #[tauri::command]
 async fn set_capsule_field(path: String, field: String, value: String) -> Result<(), String> {
     blocking_command("set_capsule_field", move || {
-        set_capsule_field_at(&PathBuf::from(path), &field, &value)
+        let path = capsule_editor::stored_capsule_path(Path::new(&path))?;
+        set_capsule_field_at(&path, &field, &value)
     })
     .await
 }
@@ -469,7 +483,8 @@ async fn set_capsule_field(path: String, field: String, value: String) -> Result
 #[tauri::command]
 async fn delete_capsule(path: String) -> Result<(), String> {
     blocking_command("delete_capsule", move || {
-        std::fs::remove_file(PathBuf::from(path)).map_err(|error| error.to_string())
+        let path = capsule_editor::stored_capsule_path(Path::new(&path))?;
+        delete_capsule_at(&path)
     })
     .await
 }
@@ -477,7 +492,7 @@ async fn delete_capsule(path: String) -> Result<(), String> {
 #[tauri::command]
 async fn open_capsule_folder(path: String) -> Result<MenuCommandResult, String> {
     blocking_command("open_capsule_folder", move || {
-        let capsule_path = PathBuf::from(path);
+        let capsule_path = capsule_editor::stored_capsule_path(Path::new(&path))?;
         let folder = capsule_path
             .parent()
             .ok_or_else(|| "capsule path has no parent folder".to_string())?;
@@ -492,7 +507,8 @@ async fn open_capsule_folder(path: String) -> Result<MenuCommandResult, String> 
 #[tauri::command]
 async fn open_capsule_external(path: String) -> Result<MenuCommandResult, String> {
     blocking_command("open_capsule_external", move || {
-        open_file_with_picker(&PathBuf::from(path))?;
+        let path = capsule_editor::stored_capsule_path(Path::new(&path))?;
+        open_file_with_picker(&path)?;
         Ok(MenuCommandResult {
             message: "opened capsule with external app picker".into(),
         })
@@ -859,12 +875,14 @@ fn description_for_key(key: &str) -> &'static str {
 }
 
 fn toggle_capsule_state_at(path: &Path) -> Result<String, String> {
+    let _lock = capsule_editor::CapsuleEditLock::acquire(path)?;
     let mut capsule = read_capsule_typed(path)?;
     let new = capsule.consumption.state.next();
     save_capsule_state(path, &mut capsule, new)
 }
 
 fn set_capsule_state_at(path: &Path, state: &str) -> Result<String, String> {
+    let _lock = capsule_editor::CapsuleEditLock::acquire(path)?;
     let mut capsule = read_capsule_typed(path)?;
     let new = parse_consumption_state(state)?;
     save_capsule_state(path, &mut capsule, new)
@@ -901,6 +919,7 @@ fn parse_consumption_state(state: &str) -> Result<ConsumptionState, String> {
 }
 
 fn set_capsule_field_at(path: &Path, field: &str, value: &str) -> Result<(), String> {
+    let _lock = capsule_editor::CapsuleEditLock::acquire(path)?;
     let mut capsule = read_capsule_typed(path)?;
     match field {
         "goal" => capsule.summary.goal = value.to_string(),
@@ -917,6 +936,11 @@ fn set_capsule_field_at(path: &Path, field: &str, value: &str) -> Result<(), Str
         _ => return Err(format!("unknown capsule field: {field}")),
     }
     write_capsule_typed(path, &capsule)
+}
+
+fn delete_capsule_at(path: &Path) -> Result<(), String> {
+    let _lock = capsule_editor::CapsuleEditLock::acquire(path)?;
+    std::fs::remove_file(path).map_err(|error| error.to_string())
 }
 
 fn read_capsule_typed(path: &Path) -> Result<Capsule, String> {
@@ -1070,26 +1094,26 @@ fn tokens_to_usage(tokens: Tokens) -> UsageTokens {
 }
 
 fn account_report(force: bool) -> AccountReport {
-    let (codex_status, codex_source) =
+    let (codex_status, codex_source, codex_usage) =
         agent_status_resolved(Agent::Codex, account::display_status(Agent::Codex), force);
-    let (claude_status, claude_source) =
+    let (claude_status, claude_source, claude_usage) =
         agent_status_resolved(Agent::Claude, account::display_status(Agent::Claude), force);
     AccountReport {
-        codex: account_agent_report(Agent::Codex, codex_status, codex_source),
-        claude: account_agent_report(Agent::Claude, claude_status, claude_source),
+        codex: account_agent_report(Agent::Codex, codex_status, codex_source, codex_usage),
+        claude: account_agent_report(Agent::Claude, claude_status, claude_source, claude_usage),
     }
 }
 
 /// Which saved slot an explicit user refresh may query. `None` means local-only:
 /// no provider call, and no live credential is sent to a network endpoint.
-fn remote_refresh_slot(agent: Agent, force: bool) -> Option<String> {
+fn remote_refresh_slot(agent: Agent, force: bool) -> Option<AccountSlotRow> {
     if !force {
         return None;
     }
     account::list_slots(agent)
         .into_iter()
         .find(|slot| slot.active)
-        .map(|slot| slot.meta.label)
+        .map(slot_row)
 }
 
 /// Default is local-only (statusline samples / rollout logs). Only a
@@ -1099,26 +1123,35 @@ fn agent_status_resolved(
     agent: Agent,
     local: Option<account::AccountStatus>,
     force: bool,
-) -> (Option<account::AccountStatus>, &'static str) {
-    if let Some(label) = remote_refresh_slot(agent, force) {
-        if let Ok(usage) = ai_handoff_tui::account_api::fetch_slot_usage(agent, &label) {
+) -> (
+    Option<account::AccountStatus>,
+    &'static str,
+    Option<ResolvedAccountUsage>,
+) {
+    if let Some(slot) = remote_refresh_slot(agent, force) {
+        if let Ok(usage) = ai_handoff_tui::account_api::fetch_slot_usage(agent, &slot.label) {
             let status = account::AccountStatus {
-                plan_type: usage
-                    .plan
-                    .clone()
-                    .or_else(|| local.as_ref().and_then(|s| s.plan_type.clone())),
-                five_hour: usage.five_hour,
-                weekly: usage.weekly,
+                plan_type: usage.plan.clone().or_else(|| slot.plan.clone()),
+                five_hour: usage.five_hour.clone(),
+                weekly: usage.weekly.clone(),
                 captured_at: Some(chrono::Utc::now().timestamp_millis()),
             };
-            return (Some(status), "provider_api");
+            return (
+                Some(status),
+                "provider_api",
+                Some(ResolvedAccountUsage { slot, usage }),
+            );
         }
     }
     let has_window = local
         .as_ref()
         .map(|status| status.five_hour.is_some() || status.weekly.is_some())
         .unwrap_or(false);
-    (local, if has_window { "local_sample" } else { "none" })
+    (
+        local,
+        if has_window { "local_sample" } else { "none" },
+        None,
+    )
 }
 
 fn slot_row(slot: account::AccountSlot) -> AccountSlotRow {
@@ -1138,15 +1171,32 @@ fn account_agent_report(
     agent: Agent,
     status: Option<account::AccountStatus>,
     usage_source: &'static str,
+    active_usage: Option<ResolvedAccountUsage>,
 ) -> AccountAgentReport {
     let slots = account::list_slots(agent)
         .into_iter()
         .map(slot_row)
         .collect::<Vec<_>>();
-    let active = slots
-        .iter()
-        .find(|slot| slot.active)
-        .map(|slot| slot.label.clone());
+    account_agent_report_from_slots(agent, status, usage_source, active_usage, slots)
+}
+
+fn account_agent_report_from_slots(
+    agent: Agent,
+    status: Option<account::AccountStatus>,
+    usage_source: &'static str,
+    active_usage: Option<ResolvedAccountUsage>,
+    slots: Vec<AccountSlotRow>,
+) -> AccountAgentReport {
+    let active_slot = slots.iter().find(|slot| slot.active);
+    // A provider request may finish after the user switches or replaces a slot.
+    // Its windows and credits belong only to the captured account snapshot.
+    let active_usage = active_usage.filter(|usage| active_slot == Some(&usage.slot));
+    let (status, usage_source) = if usage_source == "provider_api" && active_usage.is_none() {
+        (None, "none")
+    } else {
+        (status, usage_source)
+    };
+    let active = active_slot.map(|slot| slot.label.clone());
     let plan = status.as_ref().and_then(|status| status.plan_type.clone());
 
     AccountAgentReport {
@@ -1167,6 +1217,7 @@ fn account_agent_report(
             .and_then(|status| status.weekly.as_ref())
             .map(account_window),
         usage_source: usage_source.to_string(),
+        active_usage: active_usage.map(|usage| slot_usage_report_from_data(usage.usage)),
         slots,
     }
 }
@@ -1234,10 +1285,13 @@ fn slot_usage_report_from_data(usage: ai_handoff_tui::account_api::UsageData) ->
             .reset_credit_details
             .into_iter()
             .map(|credit| ResetCreditRow {
-                granted_at: credit.granted_at,
-                expires_at: credit.expires_at,
+                kind: credit.kind,
+                expires_at: credit
+                    .expires_at
+                    .map(|date| date.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)),
             })
             .collect(),
+        claude_reset_credits: usage.claude_reset_credits,
     }
 }
 
@@ -1376,10 +1430,12 @@ fn limit_alerts() -> Vec<LimitAlert> {
         }
         let active = active.expect("cheap_ok requires an active slot");
 
-        // Authoritative, account-scoped usage for the ACTIVE account.
-        let Ok(active_usage) =
-            ai_handoff_tui::account_api::fetch_slot_usage(agent, &active.meta.label)
-        else {
+        // Background checks need windows only, without optional reset inventory.
+        let Ok(active_usage) = ai_handoff_tui::account_api::fetch_slot_usage_with(
+            agent,
+            &active.meta.label,
+            ai_handoff_tui::account_api::FetchTimeouts::default(),
+        ) else {
             continue; // fail-closed: cannot confirm the active account is over
         };
         let five_used = active_usage.five_hour.as_ref().map(|w| w.used_percent);
@@ -2442,7 +2498,12 @@ fn main() {
             toggle_capsule_state,
             set_capsule_state,
             set_capsule_field,
+            capsule_editor::read_capsule_editor,
+            capsule_editor::save_capsule,
             delete_capsule,
+            capsule_projects::get_capsule_project,
+            capsule_projects::delete_capsule_project,
+            capsule_projects::open_capsule_project,
             open_capsule_folder,
             open_capsule_external,
             run_doctor,
@@ -2752,6 +2813,23 @@ mod tests {
     }
 
     #[test]
+    fn capsule_mutations_respect_editor_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cap_1.json");
+        let original = serde_json::to_vec_pretty(&sample_capsule()).unwrap();
+        std::fs::write(&path, &original).unwrap();
+        let lock = capsule_editor::CapsuleEditLock::acquire(&path).unwrap();
+
+        assert!(set_capsule_state_at(&path, "consumed").is_err());
+        assert!(toggle_capsule_state_at(&path).is_err());
+        assert!(set_capsule_field_at(&path, "goal", "overwritten").is_err());
+        assert!(delete_capsule_at(&path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        drop(lock);
+        assert_eq!(set_capsule_state_at(&path, "consumed").unwrap(), "consumed");
+    }
+
+    #[test]
     fn capsule_commands_edit_state_and_fields() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cap_1.json");
@@ -2961,7 +3039,9 @@ mod tests {
 
         assert_eq!(remote_refresh_slot(Agent::Claude, false), None);
         assert_eq!(
-            remote_refresh_slot(Agent::Claude, true).as_deref(),
+            remote_refresh_slot(Agent::Claude, true)
+                .map(|slot| slot.label)
+                .as_deref(),
             Some("dev@example.com")
         );
 
@@ -3024,8 +3104,181 @@ mod tests {
     }
 
     #[test]
+    fn slot_usage_report_serializes_claude_credit_kind_and_optional_dates() {
+        use ai_handoff_tui::account_api::{ClaudeResetCredit, ClaudeResetKind, UsageData};
+
+        let report = slot_usage_report_from_data(UsageData {
+            reset_credits: Some(3),
+            claude_reset_credits: Some(vec![
+                ClaudeResetCredit {
+                    remaining: 2,
+                    starts_at: Some(1_800_000_000),
+                    expires_at: Some(1_800_086_400),
+                    kind: ClaudeResetKind::Full,
+                },
+                ClaudeResetCredit {
+                    remaining: 1,
+                    starts_at: None,
+                    expires_at: None,
+                    kind: ClaudeResetKind::Session,
+                },
+            ]),
+            ..UsageData::default()
+        });
+
+        let value = serde_json::to_value(report).unwrap();
+        assert_eq!(value["reset_credits"], 3);
+        assert_eq!(value["reset_credit_details"], serde_json::json!([]));
+        assert_eq!(
+            value["claude_reset_credits"],
+            serde_json::json!([
+                { "remaining": 2, "starts_at": 1_800_000_000, "expires_at": 1_800_086_400, "kind": "full" },
+                { "remaining": 1, "starts_at": null, "expires_at": null, "kind": "session" }
+            ])
+        );
+    }
+
+    fn account_slot_for_usage_test() -> AccountSlotRow {
+        AccountSlotRow {
+            label: "alpha".into(),
+            email: Some("alpha@example.test".into()),
+            plan: Some("max".into()),
+            account_id: Some("account-alpha".into()),
+            source: Some("test".into()),
+            created_at: None,
+            active: true,
+            path: "C:/test/accounts/claude/alpha".into(),
+        }
+    }
+
+    fn provider_status_for_usage_test() -> account::AccountStatus {
+        account::AccountStatus {
+            plan_type: Some("max".into()),
+            five_hour: Some(RateWindow {
+                used_percent: 75.0,
+                window_minutes: 300,
+                resets_at: None,
+            }),
+            weekly: None,
+            captured_at: None,
+        }
+    }
+
+    #[test]
+    fn account_agent_report_discards_provider_usage_without_current_active_slot() {
+        let report = account_agent_report_from_slots(
+            Agent::Claude,
+            Some(provider_status_for_usage_test()),
+            "provider_api",
+            Some(ResolvedAccountUsage {
+                slot: account_slot_for_usage_test(),
+                usage: ai_handoff_tui::account_api::UsageData::default(),
+            }),
+            vec![],
+        );
+
+        assert_eq!(report.usage_source, "none");
+        assert!(report.active_usage.is_none());
+        assert!(report.plan.is_none());
+        assert!(report.five_hour.is_none());
+        assert!(report.weekly.is_none());
+    }
+
+    #[test]
+    fn account_agent_report_discards_provider_usage_after_account_identity_changes() {
+        let original = account_slot_for_usage_test();
+        let mut switched = original.clone();
+        switched.label = "beta".into();
+        switched.path = "C:/test/accounts/claude/beta".into();
+        let mut replaced_account_id = original.clone();
+        replaced_account_id.account_id = Some("replacement-account".into());
+        let mut replaced_email = original.clone();
+        replaced_email.email = Some("replacement@example.test".into());
+
+        for (case, current) in [
+            ("switched active slot", switched),
+            ("same label, changed account id", replaced_account_id),
+            ("same label, changed email", replaced_email),
+        ] {
+            let report = account_agent_report_from_slots(
+                Agent::Claude,
+                Some(provider_status_for_usage_test()),
+                "provider_api",
+                Some(ResolvedAccountUsage {
+                    slot: original.clone(),
+                    usage: ai_handoff_tui::account_api::UsageData {
+                        reset_credits: Some(2),
+                        ..Default::default()
+                    },
+                }),
+                vec![current.clone()],
+            );
+
+            assert_eq!(
+                report.active.as_deref(),
+                Some(current.label.as_str()),
+                "{case}"
+            );
+            assert_eq!(report.usage_source, "none", "{case}");
+            assert!(report.active_usage.is_none(), "{case}");
+            assert!(report.plan.is_none(), "{case}");
+            assert!(report.five_hour.is_none(), "{case}");
+            assert!(report.weekly.is_none(), "{case}");
+        }
+    }
+
+    #[test]
+    fn account_agent_report_preserves_active_usage_without_private_credit_fields() {
+        use ai_handoff_tui::account_api::{ClaudeResetCredit, ClaudeResetKind, UsageData};
+
+        let slot = account_slot_for_usage_test();
+        let report = account_agent_report_from_slots(
+            Agent::Claude,
+            Some(provider_status_for_usage_test()),
+            "provider_api",
+            Some(ResolvedAccountUsage {
+                slot: slot.clone(),
+                usage: UsageData {
+                    plan: Some("max".into()),
+                    reset_credits: Some(2),
+                    claude_reset_credits: Some(vec![ClaudeResetCredit {
+                        remaining: 2,
+                        starts_at: None,
+                        expires_at: Some(1_800_086_400),
+                        kind: ClaudeResetKind::Weekly,
+                    }]),
+                    ..UsageData::default()
+                },
+            }),
+            vec![slot],
+        );
+
+        assert_eq!(report.usage_source, "provider_api");
+        assert_eq!(report.active.as_deref(), Some("alpha"));
+        assert_eq!(report.plan.as_deref(), Some("max"));
+        assert_eq!(report.five_hour.as_ref().unwrap().remaining_percent, 25.0);
+
+        let value = serde_json::to_value(report).unwrap();
+        assert_eq!(
+            value["active_usage"],
+            serde_json::json!({
+                "plan": "max",
+                "five_hour": null,
+                "weekly": null,
+                "reset_credits": 2,
+                "reset_credit_details": [],
+                "claude_reset_credits": [
+                    { "remaining": 2, "starts_at": null, "expires_at": 1_800_086_400, "kind": "weekly" }
+                ]
+            })
+        );
+    }
+
+    #[test]
     fn slot_usage_report_maps_windows_and_reset_credits() {
-        let usage = ai_handoff_tui::account_api::UsageData {
+        use ai_handoff_tui::account_api::{CodexResetKind, ResetCredit, UsageData};
+
+        let usage = UsageData {
             plan: Some("team".into()),
             five_hour: Some(RateWindow {
                 used_percent: 25.0,
@@ -3038,10 +3291,15 @@ mod tests {
                 resets_at: Some(2),
             }),
             reset_credits: Some(2),
-            reset_credit_details: vec![ai_handoff_tui::account_api::ResetCredit {
-                granted_at: "2026-06-01T00:00:00Z".into(),
-                expires_at: "2026-07-01T00:00:00Z".into(),
-            }],
+            reset_credit_details: vec![
+                ResetCredit {
+                    granted_at: Some("2026-06-01T00:00:00Z".parse().unwrap()),
+                    expires_at: Some("2026-07-01T00:00:00Z".parse().unwrap()),
+                    kind: CodexResetKind::Full,
+                },
+                ResetCredit::default(),
+            ],
+            claude_reset_credits: None,
         };
 
         let report = slot_usage_report_from_data(usage);
@@ -3051,8 +3309,11 @@ mod tests {
         assert_eq!(report.weekly.unwrap().window_minutes, 10080);
         assert_eq!(report.reset_credits, Some(2));
         assert_eq!(
-            report.reset_credit_details[0].expires_at,
-            "2026-07-01T00:00:00Z"
+            serde_json::to_value(&report.reset_credit_details).unwrap(),
+            serde_json::json!([
+                { "kind": "full", "expires_at": "2026-07-01T00:00:00Z" },
+                { "kind": "other", "expires_at": null },
+            ])
         );
     }
 
@@ -3217,6 +3478,7 @@ mod tests {
                 five_hour: None,
                 weekly: None,
                 usage_source: "none".into(),
+                active_usage: None,
                 slots: vec![AccountSlotRow {
                     label: "work".into(),
                     email: None,
@@ -3236,6 +3498,7 @@ mod tests {
                 five_hour: None,
                 weekly: None,
                 usage_source: "none".into(),
+                active_usage: None,
                 slots: vec![],
             },
         }

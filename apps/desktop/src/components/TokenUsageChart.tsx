@@ -109,7 +109,7 @@ function compareByTokens(view: UsageChartView) {
   };
 }
 
-function buildDayStacks(report: UsageReport): DayStack[] {
+export function buildDayStacks(report: UsageReport): DayStack[] {
   const byDay = new Map(report.by_day.map((group) => [group.key, group]));
   const byDaySource = new Map<string, ChartSegment[]>();
   for (const item of report.by_day_source) {
@@ -139,6 +139,39 @@ function buildDayStacks(report: UsageReport): DayStack[] {
     })
     // Daily view is a timeline: always chronological, never ranked by tokens.
     .sort((a, b) => a.day.localeCompare(b.day));
+}
+
+export function UsageBar({ group, max, segments }: { group: UsageGroup; max: number; segments?: ChartSegment[] }) {
+  if (segments?.length && max > 0) {
+    const details = segments.map((segment) => {
+      const name = segment.agent === "codex" ? "GPT/Codex" : segment.agent === "claude" ? "Claude" : segment.key;
+      return `${name}: ${formatTokens(segment.tokens)}`;
+    });
+    const label = [group.key, ...details].join(" · ");
+    return (
+      <div className="usage-bar" style={{ display: "flex" }} role="img" aria-label={label} title={label}>
+        {segments.map((segment) => (
+          <span
+            key={segment.key}
+            style={{
+              width: `${(segment.tokens / max) * 100}%`,
+              background: colorForAgent(segment.agent),
+              borderRadius: 0,
+            }}
+          />
+        ))}
+      </div>
+    );
+  }
+  if (segments && group.tokens.total === 0) return <div className="usage-bar" />;
+
+  const pct = max > 0 ? Math.max(2, Math.round((group.tokens.total / max) * 100)) : 0;
+  const agent = agentForKey(group.key);
+  return (
+    <div className={`usage-bar ${agent}`}>
+      <span style={{ width: `${pct}%` }} />
+    </div>
+  );
 }
 
 function buildRankBars(report: UsageReport, mode: UsageBreakdownMode, view: UsageChartView): RankBar[] {

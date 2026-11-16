@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { HexColorPicker } from "react-colorful";
 import {
   Bot,
@@ -180,8 +180,9 @@ function SettingValueEditor({
   onCommit: (row: ConfigRow, value: string) => Promise<void>;
 }) {
   const [draft, setDraft] = useState(row.value);
-  const [placement, setPlacement] = useState<"above" | "below">("below");
+  const [position, setPosition] = useState<{ left: number; top: number; maxHeight: number } | null>(null);
   const buttonRef = useRef<HTMLButtonElement | null>(null);
+  const popoverRef = useRef<HTMLDivElement | null>(null);
   const options = optionsFor(row);
   const isColor = row.kind === "color";
   const isNumber =
@@ -194,13 +195,52 @@ function SettingValueEditor({
     setDraft(row.value);
   }, [row.key, row.value]);
 
-  function toggleOpen() {
-    const rect = buttonRef.current?.getBoundingClientRect();
-    if (rect) {
-      setPlacement(window.innerHeight - rect.bottom < 300 ? "above" : "below");
+  useLayoutEffect(() => {
+    if (!open) return;
+
+    function updatePosition() {
+      const anchor = buttonRef.current?.getBoundingClientRect();
+      const popover = popoverRef.current;
+      if (!anchor || !popover) return;
+      const margin = 8;
+      const gap = 6;
+      const maxHeight = Math.max(0, window.innerHeight - margin * 2);
+      const width = Math.min(popover.getBoundingClientRect().width, Math.max(0, window.innerWidth - margin * 2));
+      const height = Math.min(popover.scrollHeight + popover.offsetHeight - popover.clientHeight, maxHeight);
+      const below = anchor.bottom + gap;
+      const preferredTop = below + height <= window.innerHeight - margin ? below : anchor.top - height - gap;
+      setPosition({
+        left: Math.max(margin, Math.min(anchor.right - width, window.innerWidth - width - margin)),
+        top: Math.max(margin, Math.min(preferredTop, window.innerHeight - height - margin)),
+        maxHeight,
+      });
     }
-    onToggle();
-  }
+
+    function dismissOutside(event: PointerEvent) {
+      const target = event.target as Node | null;
+      if (!popoverRef.current?.contains(target) && !buttonRef.current?.contains(target)) onClose();
+    }
+
+    function dismissOnEscape(event: KeyboardEvent) {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      onClose();
+      buttonRef.current?.focus();
+    }
+
+    updatePosition();
+    window.addEventListener("resize", updatePosition);
+    window.addEventListener("scroll", updatePosition, true);
+    window.addEventListener("pointerdown", dismissOutside, true);
+    window.addEventListener("keydown", dismissOnEscape, true);
+    return () => {
+      window.removeEventListener("resize", updatePosition);
+      window.removeEventListener("scroll", updatePosition, true);
+      window.removeEventListener("pointerdown", dismissOutside, true);
+      window.removeEventListener("keydown", dismissOnEscape, true);
+    };
+  }, [open, onClose]);
 
   async function commit(value: string) {
     await onCommit(row, value);
@@ -209,11 +249,11 @@ function SettingValueEditor({
 
   return (
     <div className="setting-value-cell">
-      <button ref={buttonRef} className="setting-value-button" disabled={busy} onClick={toggleOpen}>
+      <button ref={buttonRef} className="setting-value-button" disabled={busy} onClick={onToggle} aria-expanded={open}>
         <code>{displaySettingValue(row)}</code>
       </button>
       {open && (
-        <div className={`setting-popover ${placement}`}>
+        <div ref={popoverRef} className="setting-popover" style={{ ...position, visibility: position ? "visible" : "hidden" }}>
           {options && (
             <div className="option-list" aria-label={t("chooseValue")}>
               {options.map((option) => (
