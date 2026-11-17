@@ -1,163 +1,196 @@
+<div align="center">
+
 <img width="1008" height="508" alt="Main_Image" src="https://github.com/user-attachments/assets/a9c741a2-0e24-403f-9f19-d3f6f6a2b86c" />
 
 # AI Handoff
 
-[English](../README.md) | [한국어](README.ko.md) | **日本語**
+**Claude Code と Codex、同じ説明を繰り返さずに次の作業へ。**
 
-AI Handoff は Claude Code と Codex の間で作業を引き継ぐローカルファーストのツールです。
+目標・完了したこと・残りの作業をローカルのカプセルにまとめ、別のエージェントが作業を続けられるようにします。
 
-片方のエージェントが使用量上限に近づくと、現在の目標、ブランチ、変更ファイル、メモ、残作業をローカルのカプセルとして保存します。もう片方のエージェントはそのカプセルを読み、同じ文脈から作業を続けられます。
+[한국어](../README.md) | [English](README.en.md) | **日本語**
 
-すべての動作はローカルファイルを優先する設計です。カプセルと hook メッセージはユーザーのコンピューターに残ります。
+[![Release](https://img.shields.io/github/v/release/Lumisia/aho__ai-handoff?style=flat-square)](https://github.com/Lumisia/aho__ai-handoff/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-2563eb?style=flat-square)](../LICENSE)
+![Rust](https://img.shields.io/badge/Rust-1.89%2B-dea584?style=flat-square&logo=rust&logoColor=white)
+![Tauri](https://img.shields.io/badge/Tauri-2-24c8db?style=flat-square&logo=tauri&logoColor=white)
+![React](https://img.shields.io/badge/React-18-149eca?style=flat-square&logo=react&logoColor=white)
 
-## 目次
+[インストール](#インストール) · [使い方](#使い方) · [システム構成](#システム構成) · [AI Handoff 詳細ガイド](advanced/README.ja.md)
 
-- [要件](#要件)
-- [Quick Start](#quick-start)
-- [主なコマンド](#主なコマンド)
-- [ローカルファイル](#ローカルファイル)
-- [使用量の数字](#使用量の数字)
-- [プライバシーと安全性](#プライバシーと安全性)
-- [詳しいドキュメント](#詳しいドキュメント)
+</div>
 
-## 要件
+---
 
-必要なもの:
+## こんな問題を解決します
 
-- Claude Code または Codex
-- macOS、Linux、Windows、WSL のいずれか
-- インストール方法のいずれか: Homebrew、`curl`、PowerShell、Git Bash、WSL
+使用量の上限に近づいたり、作業に使うツールを変えたりすると、次のエージェントに目標と進捗を説明し直す必要があります。AI Handoff は、この情報を**カプセルという引き継ぎメモ**として残します。次のエージェントは同じプロジェクトでカプセルを受け取り、完了したことと次にやることを確認できます。
 
-リリースビルドを使う通常ユーザーには Node.js や Rust は不要です。
+初期設定では、5時間の使用量が80%に達すると、チェックポイントを作成するか確認します。保存するかどうかや自動作成の方法は設定で変更でき、いつでも手動で保存できます。
 
-## Quick Start
+## 主な機能
 
-### Homebrew CLI
+| ハッシュタグ | 機能 | 使う場所 |
+|---|---|---|
+| `#作業の引き継ぎ` | 目標・完了したこと・残りの作業・注意事項を保存し、次のエージェントが作業を継続 | エージェントのチャットにある保存・受け取り用スキル |
+| `#カプセル管理` | プロジェクト別の引き継ぎ記録を探し、内容を確認・編集 | GUI のカプセルツリー / TUI のカプセル画面 |
+| `#使用量の確認` | ローカルログに基づくトークン数・費用の推定値を期間やプロジェクト別に確認 | GUI・TUI の使用量画面 |
+| `#アカウント管理` | 保存したアカウントの切り替えと、提供元の上限情報の取得 | GUI・TUI のアカウント画面 |
+| `#連携の診断` | フック・デーモン・インストール状態を診断し、修復方法を案内 | GUI・TUI の連携画面 |
 
-```sh
-brew install Lumisia/ai-handoff/ai-handoff
-ai-handoff install --yes
+GUI はマウスで使うデスクトップアプリ、TUI はターミナル内でキーボードを使って操作する画面です。どちらも同じローカル設定とカプセルを使います。
+
+## 画面
+
+以下は、**実際の GUI・TUI に架空のデータを入れて描画した例**です。プロジェクト・パス・使用量は説明用であり、実際のユーザーアカウントや作業記録は使用していません。画像をクリックすると拡大できます。
+
+| GUI · 全体の状態 | GUI · 引き継ぎメモ |
+|:---:|:---:|
+| [![GUI の概要画面](assets/readme/gui-overview.png)](assets/readme/gui-overview.png) | [![GUI のカプセル画面](assets/readme/gui-capsules.png)](assets/readme/gui-capsules.png) |
+| 概要画面でエージェントの状態と使用量の推定値をまとめて確認できます。 | 左側のプロジェクトツリーでカプセルを選び、目標と残りの作業を読みます。 |
+
+| TUI · 全体の状態 | TUI · 引き継ぎメモ |
+|:---:|:---:|
+| [![TUI の概要画面](assets/readme/tui-overview.png)](assets/readme/tui-overview.png) | [![TUI のカプセル画面](assets/readme/tui-capsules.png)](assets/readme/tui-capsules.png) |
+| 連携状態、待機カプセル、架空のアカウント上限サンプルを確認できます。 | プロジェクト別カプセルの目標・完了・残りの作業と、画面下部のキー案内を確認できます。 |
+
+## データの取り扱い方針
+
+- **カプセルとフックのメッセージは、ローカルファイルに保存して受け渡します。** 使用量やアカウントの確認では提供元の API に接続する場合があり、インストール・更新では GitHub に接続します。
+- **保存と引き継ぎの受け取りを分けています。** セッション開始時の通知やプレビューでは、カプセルを消費しません。`handoff` スキルで受け取ったときに、使用済みとして記録します。
+- **推定値と提供元の上限情報を区別します。** ローカルログから計算したトークン数・費用は、正式な請求額や残りの利用可能量ではありません。アカウント画面で取得する上限情報とは情報源が異なります。
+- **引き継ぎメモに秘密情報を入れないでください。** パスワード・API キー・認証トークン・会話ログの原文は含めないでください。自動マスキングがすべての秘密情報を検出できる保証はありません。
+
+## 保存するデータ
+
+| データ | 用途 | 保存場所 |
+|---|---|---|
+| カプセル | 目標、完了・残りの作業、リスク、次の作業指示、Git の状態 | ローカルの `store/` |
+| 共通設定 | 言語、テーマ、使用量のしきい値、カプセルの作成方法 | ローカルの `config.toml` |
+| フックのリクエスト・レスポンス | エージェントのイベントとデーモンの間でメッセージを受け渡す | ローカルの `ipc/` |
+| 使用量の推定 | Claude Code・Codex のローカルログを読み込んで集計 | 各ツールのローカルログ |
+
+OS ごとのパスとアカウントの保存領域については、[AI Handoff 詳細ガイド](advanced/README.ja.md)で説明しています。
+
+## 技術スタック
+
+| 領域 | 使用技術 |
+|---|---|
+| CLI・共通ロジック・デーモン | Rust |
+| ターミナル画面 | Ratatui, Crossterm |
+| デスクトップ画面 | Tauri 2, React 18, TypeScript, Vite |
+| カプセル・設定・通信 | JSON / Markdown, TOML, ローカルファイル IPC |
+| 検証・リリース | Cargo test, Node.js test runner, GitHub Actions |
+
+## システム構成
+
+[![Claude Code と Codex のフックが、ローカルファイル IPC とデーモンを通じてカプセルの保存領域につながるシステム構成](assets/readme/architecture.ja.svg)](assets/readme/architecture.ja.svg)
+
+フックはエージェントの作業イベントを受け渡す仕組みで、デーモンはリクエストを処理するローカルのバックグラウンドプログラムです。共通の Rust ロジックは別のサーバーではなくライブラリで、デーモンと CLI・TUI・GUI が利用します。図の点線は、提供元の API と GitHub への通信を表します。
+
+### カプセルで作業を引き継ぐ流れ
+
+[![現在のエージェントが引き継ぎメモを作成してローカルに保存し、次のエージェントが明示的に受け取って作業を続ける流れ](assets/readme/handoff-flow.ja.svg)](assets/readme/handoff-flow.ja.svg)
+
+しきい値の自動検出では、現在のエージェントに**引き継ぎメモの作成を依頼**します。会話全体をそのままコピーする仕組みではありません。受け取るエージェントは、カプセルを読んだ後に実際のブランチと変更ファイルも確認し直す必要があります。2つの図は、現在のソース構成に合わせて Codex が作成した SVG です。
+
+## プロジェクト構成
+
+```text
+ai-handoff/
+├── crates/
+│   ├── ai-handoff-cli/       コマンドとフックのエントリーポイント
+│   ├── ai-handoff-core/      共通設定・カプセル・インストール・アカウントのロジック
+│   ├── ai-handoff-daemon/    イベント処理とカプセルの保存
+│   ├── ai-handoff-ipc/       ローカルファイル通信
+│   ├── ai-handoff-tui/       ターミナル画面
+│   └── ai-handoff-usage/     使用量ログの解析
+├── apps/desktop/             デスクトップアプリ
+├── skills/                   エージェント用の引き継ぎコマンド
+└── docs/                     多言語ガイドと詳細ドキュメント
 ```
 
-### Homebrew デスクトップアプリ
+## インストール
 
-デスクトップダッシュボードも使いたい場合に使います。
+先に Claude Code または Codex をインストールし、**一度起動して初期設定フォルダーを作成してから** AI Handoff をインストールしてください。AI Handoff のリリース版のインストールに Node.js や Rust は必要ありません。
 
-```sh
-brew install --cask Lumisia/ai-handoff/ai-handoff
-ai-handoff install --yes
-```
+### [公式リリースからダウンロード](https://github.com/Lumisia/aho__ai-handoff/releases)
 
-### Windows (PowerShell)
+リリースの **Assets** を展開し、OS と CPU に合うファイルを選んでください。
 
-デフォルトの `latest` は GitHub の "Latest" バッジではなく、最も大きい stable `vX.Y.Z` GitHub Release を選びます。
+| 環境 | ダウンロードするファイル | 含まれる画面 |
+|---|---|---|
+| Windows x64 · 推奨 | `ai-handoff-gui-windows-x86_64-setup.exe` | GUI + CLI/TUI |
+| Windows ARM64 · 推奨 | `ai-handoff-gui-windows-aarch64-setup.exe` | GUI + CLI/TUI |
+| macOS · Apple Silicon | `ai-handoff-cli-darwin-aarch64.tar.gz` | CLI/TUI |
+| macOS · Intel | `ai-handoff-cli-darwin-x86_64.tar.gz` | CLI/TUI |
+| Linux x64 | `ai-handoff-cli-linux-x86_64.tar.gz` | CLI/TUI |
+| Linux ARM64 | `ai-handoff-cli-linux-aarch64.tar.gz` | CLI/TUI |
 
-PowerShell で実行します。CLI をダウンロードしてユーザー PATH に追加し、インストーラーを実行します。
+**Windows:** ダウンロードした `-setup.exe` を実行します。CLI/TUI も一緒にインストールされます。インストール後、スタートメニューで **aho** または **AI Handoff** を検索して GUI を開きます。
 
-**GUI + TUI** — デスクトップアプリと CLI/TUI をまとめてインストールします:
+**macOS・Linux:** アーカイブを展開し、CLI とホストのファイルを同じフォルダーに置きます。PATH の設定とエージェント連携の登録は、[CLI の手動インストールガイド](advanced/README.ja.md#インストールオプション)に従って完了してください。WSL では Linux 用のファイルを選び、Windows GUI は Windows 側でインストールします。
 
-```powershell
-Set-ExecutionPolicy Bypass -Scope Process -Force; & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Lumisia/aho__ai-handoff/master/scripts/install.ps1))) -Yes -WithGui
-```
+Windows インストーラーは現在未署名のため、SmartScreen の警告が表示される場合があります。SHA-256 の確認方法、Windows の CLI/TUI 専用ファイル、インストールスクリプト、バージョン指定については、[インストールオプション](advanced/README.ja.md#インストールオプション)を参照してください。
 
-**TUI** — CLI/TUI のみをインストールします:
-
-```powershell
-Set-ExecutionPolicy Bypass -Scope Process -Force; & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Lumisia/aho__ai-handoff/master/scripts/install.ps1))) -Yes
-```
-
-追加オプションを渡す場合（片方のエージェントのみ、バージョン固定）は、同じ scriptblock 形式を使います。
-
-```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Lumisia/aho__ai-handoff/master/scripts/install.ps1))) -Yes -Only codex
-```
-
-再現可能なインストールが必要な場合はリリースを固定します:
-
-```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Lumisia/aho__ai-handoff/master/scripts/install.ps1))) -Yes -Version v2.2.8
-```
-
-### Shell Installer
-
-デフォルトの `latest` は GitHub の "Latest" バッジではなく、最も大きい stable `vX.Y.Z` GitHub Release を選びます。
-
-macOS、Linux、WSL、Git Bash で使います。
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/Lumisia/aho__ai-handoff/master/scripts/install.sh | sh -s -- --yes
-```
-
-インストール後:
+### インストール後に一度だけ
 
 1. Claude Code と Codex を再起動します。
-2. Codex で `/hooks` を開きます。
-3. AI Handoff hooks を trust します。
-4. インストール状態を確認します。
+2. Codex の `/hooks` 画面で AI Handoff のフックを信頼する設定にします。
+3. ターミナルで次のコマンドを実行し、インストール状態を確認します。
 
 ```sh
 ai-handoff doctor
 ```
 
-## 主なコマンド
+## 使い方
 
-| コマンド | 役割 | 使うタイミング |
-|---|---|---|
-| `handoff` | 現在のプロジェクトで待機中の handoff カプセルを取得し、消費済みにします。 | 別のエージェントが残した作業を続けるとき |
-| `handoff config` | AI Handoff の共有設定を表示または変更します。 | threshold、mode、language、display 設定を変更したいとき |
-| `handoff doctor` | インストール状態、hook、daemon、IPC、カプセル状態を確認します。 | hook 失敗、Codex hook エラー、インストール異常が見えるとき |
-| `handoff checkpoint` | 現在の作業を handoff カプセルとして保存します。 | 今すぐ別のエージェントへ作業を渡したいとき |
+### 別のエージェントに作業を引き継ぐ
 
-ターミナルでも同じ操作を実行できます。
+1. **現在のエージェントのチャット**のスキル一覧から、AI Handoff の **`handoff-checkpoint`（保存）**を選び、目標・進捗・残りの作業を保存します。
+2. **次のエージェントで同じプロジェクトフォルダー**を開きます。
+3. そのエージェントのチャットで AI Handoff の **`handoff`（受け取り）**を選び、続きの作業を依頼します。
+
+プラグインのスキル一覧には `ai-handoff:handoff-checkpoint`、`ai-handoff:handoff` と表示されます。ターミナルのコマンドとは区別して使ってください。スキルが見つからない場合やオプションが必要な場合は、[コマンドリファレンス](advanced/README.ja.md#コマンドリファレンス)を確認してください。
+
+### GUI · マウスで使う
+
+スタートメニューからアプリを開き、左側のメニューを選びます。アプリの初期言語は英語です。右上の**歯車アイコン → Language**で、韓国語・英語・日本語を選べます。
+
+| やりたいこと | クリックする場所 |
+|---|---|
+| 全体の状態を確認 | **概要 / Overview** |
+| 保存した引き継ぎメモを読む | 左側のカプセルツリーで **エージェント → プロジェクト → カプセル** |
+| トークン数・費用の推定値を確認 | **使用量 / Usage** |
+| アカウントの追加・切り替え・上限情報の取得 | **アカウント / Account** |
+| インストールやフックの問題を確認 | **連携 / Integration → 診断を実行** |
+| 言語・テーマ・作成基準を変更 | 右上の**歯車アイコン** |
+
+### TUI · ターミナルで使う
+
+ターミナルで `aho` または `ai-handoff` を実行すると TUI が開きます。`aho` は Windows のインストールで用意される短縮コマンドです。他の環境では `ai-handoff` を使ってください。
 
 ```sh
-ai-handoff handoff --agent <codex|claude-code>
-ai-handoff checkpoint --message "work snapshot"
-ai-handoff doctor
-ai-handoff config list
+ai-handoff
 ```
 
-詳しいコマンド説明: [Advanced Guide](advanced/README.ja.md)
-
-## ローカルファイル
-
-AI Handoff はローカルホームフォルダーを 1 つ作成します。
-
-- Windows: `%USERPROFILE%\.ai-handoff`
-- macOS: `~/Library/Application Support/ai-handoff`
-- Linux: `${XDG_STATE_HOME:-~/.local/state}/ai-handoff`
-
-初心者が知るべき項目は 3 つです。
-
-| 項目 | 意味 |
+| 手順 | 操作 |
 |---|---|
-| `config.toml` | Claude Code と Codex が共有する設定です。 |
-| `store/` | ローカルカプセルと handoff 履歴です。 |
-| `ipc/` | hook と daemon が使うローカルメッセージキューです。 |
+| 1. 画面を選ぶ | `1`–`6` または `Tab` で、概要・カプセル・使用量・アカウント・連携・設定を選択 |
+| 2. 内容を見る | `Enter` または `↓` で内容に入り、画面下のキー案内に従って操作 |
+| 3. 戻る・終了する | `q` または `Esc` でタブ選択に戻る。タブ選択の状態で2回押すと終了 |
 
-プロジェクト全体とランタイムのファイル構成: [Advanced Guide](advanced/README.ja.md#ファイル構成)
+Windows のスタートメニューにある **aho** のショートカットは GUI アプリを開きます。
 
-## 使用量の数字
+## AI Handoff 詳細ガイド
 
-`ai-handoff usage` はローカルの Claude Code/Codex ログを読みます。
+基本操作の後に必要になる説明は、以下のドキュメントにまとめています。
 
-token と cost はローカルログに基づく推定値です。公式の請求、quota、provider 側の使用量レポートではありません。
+- [すべてのコマンド・オプション・設定](advanced/README.ja.md#コマンドリファレンス)
+- [インストールオプション・更新・アンインストール](advanced/README.ja.md#インストールオプション)
+- [開発環境・ソースビルド・テスト](advanced/README.ja.md#開発)
+- [トラブルシューティング](advanced/README.ja.md#トラブルシューティング)
 
-## プライバシーと安全性
-
-| トピック | AI Handoff の動作 |
-|---|---|
-| ローカルファースト設計 | カプセル、設定、IPC メッセージ、使用量推定はユーザーのコンピューターに残ります。 |
-| Hook データ | hook はローカルイベントデータをローカル IPC に送ります。作業フォルダーをアップロードしません。 |
-| アカウント credential | アカウント credential と OAuth token は hook で使われず、カプセルや hook output に書いてはいけません。 |
-| アカウント操作 | アカウント切り替えはエージェントスキルではなく、ローカル CLI/TUI/GUI で行います。 |
-
-## 詳しいドキュメント
-
-- [Advanced Guide](advanced/README.ja.md)
-- [English](../README.md)
-- [Korean](README.ko.md)
-
-## License
+## ライセンス
 
 [MIT](../LICENSE)
