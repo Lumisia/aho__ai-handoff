@@ -167,6 +167,14 @@ fn run_io_with_format(
         })
         .map(|value| normalize_agent(&value))
         .unwrap_or_else(|| "codex".to_string());
+    let session_id = if agent == "codex" && options.episode.as_deref() == Some("current") {
+        std::env::var("CODEX_THREAD_ID")
+            .ok()
+            .map(|id| id.trim().to_owned())
+            .filter(|id| !id.is_empty())
+    } else {
+        None
+    };
 
     let mut raw_hook_input = input_json;
     attach_episode_id(&mut raw_hook_input, options.episode.as_deref());
@@ -189,7 +197,7 @@ fn run_io_with_format(
         event: "checkpoint".to_string(),
         received_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
         cwd: cwd.clone(),
-        session_id: None,
+        session_id,
         turn_id: None,
         raw_hook_input,
         client: ClientInfo {

@@ -76,6 +76,8 @@ struct EpisodeFile {
     version: u32,
     #[serde(default)]
     episodes: BTreeMap<String, Episode>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    question_guides: BTreeMap<String, i64>,
 }
 
 impl Default for EpisodeFile {
@@ -83,6 +85,7 @@ impl Default for EpisodeFile {
         Self {
             version: STORE_VERSION,
             episodes: BTreeMap::new(),
+            question_guides: BTreeMap::new(),
         }
     }
 }
@@ -97,6 +100,47 @@ impl EpisodeStore {
 
     pub fn path(&self) -> PathBuf {
         self.home.join("store").join(STORE_FILE)
+    }
+
+    /// Preserve the guide across a daemon restart between prompt and Stop.
+    pub(crate) fn prepare_question_guide(
+        &self,
+        key: &str,
+        now_ms: i64,
+        refresh: bool,
+    ) -> anyhow::Result<bool> {
+        let _guard = self
+            .gate
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let path = self.path();
+        let mut data = read_file(&path)?;
+        if !refresh
+            && data
+                .question_guides
+                .get(key)
+                .is_some_and(|until| *until > now_ms)
+        {
+            return Ok(false);
+        }
+        data.question_guides.retain(|_, until| *until > now_ms);
+        data.question_guides.insert(
+            key.to_owned(),
+            now_ms.saturating_add(crate::trigger_mark::FIVE_HOUR_WINDOW_MS),
+        );
+        write_file(&path, &data)?;
+        Ok(true)
+    }
+
+    pub(crate) fn has_question_guide(&self, key: &str, now_ms: i64) -> anyhow::Result<bool> {
+        let _guard = self
+            .gate
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        Ok(read_file(&self.path())?
+            .question_guides
+            .get(key)
+            .is_some_and(|until| *until > now_ms))
     }
 
     pub fn begin_or_load(&self, key: EpisodeKey, now_ms: i64) -> anyhow::Result<Episode> {

@@ -50,7 +50,7 @@ pub enum Commands {
         /// open capsule that any agent may pick up.
         #[arg(long)]
         target: Option<String>,
-        /// Checkpoint episode being committed after a five-hour prompt.
+        /// Checkpoint episode ID, or "current" in the active Codex thread.
         #[arg(long)]
         episode: Option<String>,
         /// Read the JSON or Markdown capsule body from this file instead of

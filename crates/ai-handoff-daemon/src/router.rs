@@ -161,27 +161,53 @@ impl Handler for Router {
 
         match event {
             HookEventKind::SessionStart | HookEventKind::UserPromptSubmit => {
+                let mut context = Vec::new();
+                if let (AgentKind::Codex, Some(session_id)) =
+                    (&normalized.agent, normalized.session_id.as_deref())
+                {
+                    let cfg = config::load();
+                    let trigger = config::resolve(&cfg, &project_id);
+                    if trigger.enabled && trigger.mode == TriggerMode::Ask {
+                        // Stop reasons appear in the user's chat. Prepare the
+                        // question workflow through a developer context hook.
+                        let key =
+                            codex_question_guide_key(&project_id, session_id, cfg.capsule.language);
+                        let prepared = self.checkpoint_episodes.prepare_question_guide(
+                            &key,
+                            Utc::now().timestamp_millis(),
+                            event == HookEventKind::SessionStart,
+                        );
+                        match prepared {
+                            Ok(true) => context.push(codex_question_setup(cfg.capsule.language)),
+                            Ok(false) => {}
+                            Err(error) => crate::log_daemon(&format!(
+                                "checkpoint guide persistence failed: {error}"
+                            )),
+                        }
+                    }
+                }
                 // A pending capsule is only announced, never consumed here —
                 // consumption is explicit via `ai-handoff handoff` (/handoff).
+                let mut pending_notice = false;
                 if let Some(capsule) = pending_for(&project_id, normalized.agent.as_canonical_str())
                     .into_iter()
                     .find(|capsule| !same_session(capsule, &normalized.session_id))
                 {
                     let mark = session_mark_key("notice", &req.agent, &normalized, &project_id);
                     if !self.mark_seen(&mark) {
-                        return Self::ok(
-                            req,
-                            json!({
-                                "hookSpecificOutput": {
-                                    "hookEventName": hook_event_name(event),
-                                    "additionalContext": render_pending_notice(&capsule),
-                                }
-                            }),
-                            json!({ "pending_notice": true }),
-                        );
+                        context.push(render_pending_notice(&capsule));
+                        pending_notice = true;
                     }
                 }
-                Self::ok(req, json!({}), json!({}))
+                if context.is_empty() {
+                    Self::ok(req, json!({}), json!({}))
+                } else {
+                    Self::ok(
+                        req,
+                        hook_context(event, &context.join("\n\n")),
+                        json!({ "pending_notice": pending_notice }),
+                    )
+                }
             }
             HookEventKind::PostToolUse => {
                 let (stdout, diagnostics) =
@@ -574,15 +600,39 @@ impl Router {
                         trigger_expires_at_ms = Some(episode.key.reset_at_ms);
                         checkpoint_episode_id = Some(episode.episode_id.clone());
                         fired = true;
-                        let context = render_trigger_context_with_episode(
-                            TriggerAction::Ask,
-                            used.unwrap_or_default(),
-                            resolved.threshold,
-                            &req.agent,
-                            cfg.capsule.language,
-                            Some(&episode.episode_id),
-                        );
-                        trigger_hook_output(event, TriggerAction::Ask, &context)
+                        let has_guide = normalized.agent == AgentKind::Codex
+                            && event == HookEventKind::Stop
+                            && normalized.session_id.as_deref().is_some_and(|session_id| {
+                                let key = codex_question_guide_key(
+                                    project_id,
+                                    session_id,
+                                    cfg.capsule.language,
+                                );
+                                self.checkpoint_episodes
+                                    .has_question_guide(&key, now_ms)
+                                    .unwrap_or(false)
+                            });
+                        if has_guide {
+                            hook_context(event, &trigger_question_feedback(cfg.capsule.language))
+                        } else {
+                            let context = render_trigger_context_with_episode(
+                                TriggerAction::Ask,
+                                used.unwrap_or_default(),
+                                resolved.threshold,
+                                &req.agent,
+                                cfg.capsule.language,
+                                Some(&episode.episode_id),
+                            );
+                            let mut output =
+                                trigger_hook_output(event, TriggerAction::Ask, &context);
+                            if normalized.agent == AgentKind::Codex
+                                && event == HookEventKind::PostToolUse
+                            {
+                                output["reason"] =
+                                    json!(trigger_question_feedback(cfg.capsule.language));
+                            }
+                            output
+                        }
                     }
                     Err(error) => {
                         checkpoint_episode_error = Some(error.to_string());
@@ -731,14 +781,26 @@ fn handle_checkpoint(req: &ai_handoff_ipc::protocol::Request, episodes: &Episode
     // unknown ids pass through instead of being coerced to codex.
     let agent = canonical_agent_id(&req.agent).unwrap_or_else(|| "codex".to_string());
     let now = Utc::now();
-    let episode_id = raw
+    let episode_selector = raw
         .get("_ai_handoff_episode_id")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|id| !id.is_empty());
     let mut source_session = req.session_id.clone();
-    if let Some(episode_id) = episode_id {
-        let episode = match episodes.get(episode_id) {
+    let mut episode_id = None;
+    if let Some(selector) = episode_selector {
+        let lookup = if selector == "current" {
+            let Some(session_id) = source_session
+                .as_deref()
+                .filter(|id| agent == "codex" && !id.is_empty())
+            else {
+                return degraded(&req.request_id, "checkpoint_session_unavailable");
+            };
+            episodes.find_active(&agent, &project_id, session_id, now.timestamp_millis())
+        } else {
+            episodes.get(selector)
+        };
+        let episode = match lookup {
             Ok(Some(episode)) => episode,
             Ok(None) => return degraded(&req.request_id, "checkpoint_episode_not_found"),
             Err(error) => {
@@ -746,6 +808,7 @@ fn handle_checkpoint(req: &ai_handoff_ipc::protocol::Request, episodes: &Episode
                 return degraded(&req.request_id, "daemon_error");
             }
         };
+        let resolved_id = episode.episode_id.as_str();
         if episode.key.project_id != project_id
             || episode.key.agent != agent
             || source_session
@@ -760,7 +823,7 @@ fn handle_checkpoint(req: &ai_handoff_ipc::protocol::Request, episodes: &Episode
                 json!({
                     "saved": true, "capsule_id": episode.capsule_id, "episode_reused": true
                 }),
-                json!({ "checkpoint_episode_id": episode_id }),
+                json!({ "checkpoint_episode_id": resolved_id }),
             );
         }
         if episode.key.reset_at_ms <= now.timestamp_millis() {
@@ -774,9 +837,11 @@ fn handle_checkpoint(req: &ai_handoff_ipc::protocol::Request, episodes: &Episode
             // Some hosts deliver UI answers only to the agent. Its explicitly
             // requested checkpoint then carries the original episode ID.
             EpisodeState::AwaitingDecision => {
-                if let Err(error) =
-                    episodes.record_decision(episode_id, UserDecision::Save, now.timestamp_millis())
-                {
+                if let Err(error) = episodes.record_decision(
+                    resolved_id,
+                    UserDecision::Save,
+                    now.timestamp_millis(),
+                ) {
                     crate::log_daemon(&format!("checkpoint decision persistence failed: {error}"));
                     return degraded(&req.request_id, "checkpoint_episode_not_pending");
                 }
@@ -785,6 +850,7 @@ fn handle_checkpoint(req: &ai_handoff_ipc::protocol::Request, episodes: &Episode
             _ => return degraded(&req.request_id, "checkpoint_episode_not_pending"),
         }
         source_session = Some(episode.key.session_id);
+        episode_id = Some(episode.episode_id);
     }
     let message = raw
         .get("message")
@@ -812,7 +878,7 @@ fn handle_checkpoint(req: &ai_handoff_ipc::protocol::Request, episodes: &Episode
         .unwrap_or_else(|| save_capsule(&capsule));
     match save_result {
         Ok(path) => {
-            if let Some(episode_id) = episode_id {
+            if let Some(episode_id) = episode_id.as_deref() {
                 if let Err(error) =
                     episodes.commit_capsule(episode_id, &capsule.capsule_id, now.timestamp_millis())
                 {
@@ -1159,43 +1225,76 @@ fn render_trigger_context_with_episode(
     episode_id: Option<&str>,
 ) -> String {
     let agent = agent_cli_name(agent);
-    let copy = trigger_prompt_copy(language);
-    let header = format!(
-        "[ai-handoff] Five-hour usage {used_percent:.0}% reached the configured threshold {threshold:.0}%."
-    );
     let episode_step = episode_id
-        .map(|episode_id| {
-            format!(" Append `--episode {episode_id}` to the returned checkpoint command.")
-        })
+        .map(|id| format!(" Append `--episode {id}` to its command."))
         .unwrap_or_default();
-    let checkpoint_steps = format!(
-        "First run:\n  ai-handoff checkpoint guidance --agent {agent} --json\nUse the returned input_format, language, limits, input_template, and command to write and save a checkpoint of the CURRENT work.{episode_step} After the checkpoint succeeds, resume the interrupted work exactly where it stopped."
-    );
+    let guidance = format!("ai-handoff checkpoint guidance --agent {agent} --json");
     match action {
         TriggerAction::Create => format!(
-            "{header}\nCreate a handoff capsule NOW without asking the user. {checkpoint_steps}"
+            "[ai-handoff] Five-hour usage {used_percent:.0}% reached the configured threshold {threshold:.0}%.\nCreate a handoff capsule NOW without asking the user. Run `{guidance}`. Use its input_format, language, limits, input_template, and command.{episode_step} Then resume the interrupted work."
         ),
-        _ => render_trigger_question_context(agent, &header, &checkpoint_steps, copy, episode_id),
+        _ => render_trigger_question_context(
+            agent,
+            trigger_prompt_copy(language),
+            episode_id,
+            &guidance,
+            &episode_step,
+        ),
     }
 }
 
 /// Agent-specific question instructions for ask mode.
 fn render_trigger_question_context(
     agent: &str,
-    header: &str,
-    checkpoint_steps: &str,
     copy: TriggerPromptCopy,
     episode_id: Option<&str>,
+    guidance: &str,
+    episode_step: &str,
 ) -> String {
     let tool = if agent == "claude-code" {
-        "Use AskUserQuestion when available.".to_owned()
+        "AskUserQuestion".to_owned()
     } else {
         let id = episode_id.unwrap_or("handoff_capsule").replace('-', "_");
-        format!("Use request_user_input when available in this mode, or request_user_input_async if provided. For a tool with question IDs use {id}. For an async question wait for the actual reply before saving.")
+        format!("request_user_input_async or request_user_input (question id: {id})")
     };
+    let TriggerPromptCopy {
+        question,
+        yes,
+        no,
+        other,
+    } = copy;
     format!(
-        "{header}\n{tool} Ask this single question exactly once: \"{}\"\nSupply the two choices '{}' ({}) and '{}' ({}). Use the client's built-in free-text choice for '{}' ({}). Only add that third option yourself if the client does not supply it. If no question tool is available, present the same three choices once in chat.\nSave only on an explicit affirmative reply or a custom instruction requesting a save: {checkpoint_steps} On a negative reply, cancellation or no reply, do not save. Use any free text already entered. If the user chooses Other without entering text, ask only for their instruction. Do not repeat the save question. Resume the interrupted work after handling the answer.",
-        copy.question, copy.yes, copy.yes_desc, copy.no, copy.no_desc, copy.other, copy.other_desc,
+        "[ai-handoff] Ask once with {tool}: \"{question}\"\nUse exact labels [\"{yes}\", \"{no}\"] and the app's \"{other}\" free-text control. Keep labels plain. If there is no question tool, show the three choices once in chat.\nWait for the reply. For \"{yes}\" or a written request to save, follow `{guidance}`.{episode_step} Then resume the interrupted work."
+    )
+}
+
+fn trigger_question_feedback(language: config::Language) -> String {
+    let TriggerPromptCopy {
+        question,
+        yes,
+        no,
+        other,
+    } = trigger_prompt_copy(language);
+    format!("**{question}**\n\n{yes} / {no} / {other}")
+}
+
+fn codex_question_guide_key(
+    project_id: &str,
+    session_id: &str,
+    language: config::Language,
+) -> String {
+    format!("{project_id}:{}:{session_id}", config::lang_str(language))
+}
+
+fn codex_question_setup(language: config::Language) -> String {
+    let TriggerPromptCopy {
+        question,
+        yes,
+        no,
+        other,
+    } = trigger_prompt_copy(language);
+    format!(
+        "When AI Handoff's Stop hook displays \"{question}\", show one request_user_input_async question (or request_user_input) with exact labels [\"{yes}\", \"{no}\"] and the app's \"{other}\" free-text control. Keep labels plain and wait for the actual reply. If no picker is available, accept a reply in chat. Save only on \"{yes}\" or a written save request: run `ai-handoff checkpoint guidance --agent codex --json` and append `--episode current` to its save command. Resume the interrupted work. Only act on a hook prompt."
     )
 }
 
@@ -1205,39 +1304,27 @@ struct TriggerPromptCopy {
     yes: &'static str,
     no: &'static str,
     other: &'static str,
-    yes_desc: &'static str,
-    no_desc: &'static str,
-    other_desc: &'static str,
 }
 
 fn trigger_prompt_copy(language: config::Language) -> TriggerPromptCopy {
     match language {
         config::Language::Ko => TriggerPromptCopy {
             question: "5시간 한도 임계치에 도달했습니다. 캡슐을 저장하시겠습니까?",
-            yes: "예",
+            yes: "네",
             no: "아니오",
             other: "기타",
-            yes_desc: "캡슐 JSON을 작성하고 checkpoint를 실행한 뒤 원래 작업을 계속합니다.",
-            no_desc: "캡슐을 만들지 않고 원래 작업을 계속합니다.",
-            other_desc: "사용자의 추가 지시에 따라 캡슐 생성 여부를 정한 뒤 원래 작업을 계속합니다.",
         },
         config::Language::Ja => TriggerPromptCopy {
             question: "5時間制限のしきい値に達しました。カプセルを保存しますか？",
             yes: "はい",
             no: "いいえ",
             other: "その他",
-            yes_desc: "カプセルJSONを作成してcheckpointを実行し、元の作業を続けます。",
-            no_desc: "カプセルを作成せず、元の作業を続けます。",
-            other_desc: "ユーザーの追加指示に従ってカプセル作成の有無を決め、元の作業を続けます。",
         },
         config::Language::En => TriggerPromptCopy {
             question: "The five-hour usage threshold was reached. Save a handoff capsule?",
             yes: "Yes",
             no: "No",
             other: "Other",
-            yes_desc: "write the capsule JSON, run checkpoint, then continue the original work.",
-            no_desc: "continue the original work without creating a capsule.",
-            other_desc: "ask for the user's custom instruction, then create or skip the capsule accordingly.",
         },
     }
 }
@@ -2649,7 +2736,7 @@ mod tests {
             .unwrap()
             .contains("five-hour usage threshold"));
         assert!(context.contains("AskUserQuestion"));
-        assert!(context.contains("예"));
+        assert!(context.contains(r#"["네", "아니오"]"#));
         assert!(context.contains("아니오"));
         assert!(context.contains("기타"));
         assert!(context.contains("ai-handoff checkpoint guidance --agent claude-code --json"));
@@ -2827,10 +2914,12 @@ mod tests {
         assert_eq!(resp.diagnostics["used_percent"], 29.0);
         assert_eq!(resp.diagnostics["usage_source"], "session-rollout");
         assert_eq!(resp.hook_stdout["decision"], "block");
-        assert!(resp.hook_stdout["hookSpecificOutput"]["additionalContext"]
+        let context = resp.hook_stdout["hookSpecificOutput"]["additionalContext"]
             .as_str()
-            .unwrap()
-            .contains("예"));
+            .unwrap();
+        assert!(context.contains(r#"["네", "아니오"]"#));
+        assert!(context.contains(r#"the app's "기타" free-text control"#));
+        assert!(!context.contains("캡슐 JSON을 작성하고 checkpoint를 실행"));
 
         std::env::remove_var("CODEX_HOME");
         std::env::remove_var("AI_HANDOFF_HOME");
@@ -3313,7 +3402,8 @@ mod tests {
                         cwd.path(),
                         json!({"session_id":sid, "prompt":"예"}),
                     );
-                    assert_eq!(restarted.handle(&unrelated).hook_stdout, json!({}));
+                    let response = restarted.handle(&unrelated);
+                    assert!(response.diagnostics["checkpoint_episode_state"].is_null());
                     assert_eq!(
                         restarted
                             .checkpoint_episodes
@@ -3354,8 +3444,20 @@ mod tests {
         save.session_id = None; // normal CLI checkpoint does not receive host callbacks
         assert_ne!(router.handle(&save).status, Status::Ok);
         save.agent = "codex".into();
-        let saved = router.handle(&save);
+        let mut current = save.clone();
+        current.raw_hook_input["_ai_handoff_episode_id"] = json!("current");
+        assert_ne!(router.handle(&current).status, Status::Ok);
+        current.session_id = Some("unrelated-session".into());
+        assert_ne!(router.handle(&current).status, Status::Ok);
+        assert!(list_pending(&project).is_empty());
+
+        current.session_id = Some("s1".into());
+        let saved = router.handle(&current);
         assert_eq!(saved.hook_stdout["saved"], true);
+        assert_eq!(
+            saved.hook_stdout["checkpoint_episode_id"],
+            episode.episode_id
+        );
         let retry = Router::new().handle(&save);
         assert_eq!(
             retry.hook_stdout["capsule_id"],
@@ -3363,6 +3465,59 @@ mod tests {
         );
         assert_eq!(retry.hook_stdout["episode_reused"], true);
         assert_eq!(list_pending(&project).len(), 1);
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn codex_stop_feedback_contains_only_the_question_and_choices() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[triggers.five_hour]\nmode = \"ask\"\n[capsule]\nlanguage = \"ko\"\n",
+        )
+        .unwrap();
+        let router = Router::new();
+        let start = router.handle(&request(
+            "start",
+            "session-start",
+            "codex",
+            cwd.path(),
+            json!({}),
+        ));
+        let first = Router::new().handle(&request(
+            "first",
+            "stop",
+            "codex",
+            cwd.path(),
+            json!({"rate_limits":{"primary":{"used_percent":80}}}),
+        ));
+        assert_eq!(
+            first.hook_stdout,
+            json!({
+                "decision": "block",
+                "reason": "**5시간 한도 임계치에 도달했습니다. 캡슐을 저장하시겠습니까?**\n\n네 / 아니오 / 기타",
+            })
+        );
+        let setup = start.hook_stdout["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(setup.contains("request_user_input_async"));
+        assert!(setup.contains("--episode current"));
+        assert_eq!(
+            router
+                .handle(&request(
+                    "again",
+                    "stop",
+                    "codex",
+                    cwd.path(),
+                    json!({"rate_limits":{"primary":{"used_percent":80}}})
+                ))
+                .hook_stdout,
+            json!({})
+        );
         std::env::remove_var("AI_HANDOFF_HOME");
     }
 
@@ -3654,7 +3809,11 @@ mod tests {
             cwd.path(),
             json!({ "cwd": cwd.path().to_string_lossy(), "session_id": "s1" }),
         ));
-        assert_eq!(second.hook_stdout, json!({}));
+        assert!(second.diagnostics["checkpoint_episode_state"].is_null());
+        assert!(!second
+            .hook_stdout
+            .to_string()
+            .contains("saved successfully"));
         std::env::remove_var("AI_HANDOFF_HOME");
     }
 
