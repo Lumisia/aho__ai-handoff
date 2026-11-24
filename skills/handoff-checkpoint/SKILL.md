@@ -28,8 +28,9 @@ This command is executed by the current agent, not by the user.
    preserve the returned headings and use bullets or numbered items. For JSON,
    preserve the English field names shown by the template.
 5. Run the returned `command`. For a save requested by a threshold prompt,
-   append the `--episode <id>` supplied by that prompt. Append `--target <agent>`
-   only when the user explicitly names a consumer.
+   append the episode argument from the hook instructions, using `--episode
+   current` when directed by Codex. Append `--target <agent>` only when the
+   user explicitly names a consumer.
 6. Report the saved capsule id or path briefly.
 
 Use `--file` rather than piping stdin. This is reliable in PowerShell and POSIX
@@ -42,7 +43,7 @@ In ask mode, use the question tool named by the current hook when it is
 available, or show the same choices once in chat. Wait for the actual answer.
 The hook tracks when this session becomes eligible for another question.
 
-- **Yes / 예 / はい** — Save the capsule and resume the interrupted work.
+- **Yes / 네 / はい** — Save the capsule and resume the interrupted work.
 - **No / 아니오 / いいえ** — Skip the capsule and resume.
 - **Other / 기타 / その他** — Follow the user's free-text instruction. Save only if requested.
 - In automatic mode, save the capsule and resume the interrupted work.

@@ -158,7 +158,7 @@ Short forms such as `/handoff checkpoint` are not universal executable chat comm
 | `--file <path>` | Read a UTF-8 JSON or Markdown draft from a file. Recommended across PowerShell and POSIX shells. Otherwise read stdin until EOF. |
 | `--format <md\|json>` | Override the configured format, especially for `guidance`. Conflicting positional format and flag are an error. |
 | `--json` | Compact JSON for `guidance` only; guidance without it is pretty-printed JSON. |
-| `--episode <id>` | Commit the checkpoint episode supplied by a threshold prompt. Use the returned ID; ordinary manual checkpoints do not need it. |
+| `--episode <id\|current>` | Link the save to the episode named by a threshold prompt. When the Codex hook specifies `current`, use the active episode for that thread. Manual checkpoints can omit this option. |
 
 Ask for guidance first, then write the returned template in the requested language and save it with the returned command. Example:
 
@@ -231,6 +231,8 @@ ai-handoff doctor --json
 Five-hour trigger modes are `off`, `ask`, and `auto`; default is enabled at 80% in `ask` mode. `ask` requests a choice, `auto` requests a checkpoint without asking, and `off` disables the trigger. Both saving paths resume the interrupted task afterward. A threshold request still relies on the agent writing and saving a useful draft; it is not a conversation backup or automatic agent switch.
 
 In an interactive CLI or local desktop session with hooks enabled, `ask` offers **Yes / No / Other** once per session and five-hour window. Other accepts your own instruction. If the client has no question picker, the agent asks in chat. After any answer or dismissal, the next prompt becomes eligible only when the provider’s reset has passed and usage again meets the threshold. When the reset time is unknown, AI Handoff uses five hours from the first question.
+
+When Codex receives the save instructions at session start or prompt submission, the threshold feedback displays only the question and choices. Sessions that run only the `Stop` hook also receive the save instructions in that feedback.
 
 Other CLI settings cover `daemon.idle_timeout_seconds`, `autostart.enabled`, `statusline.show`, UI `language`, capsule format and item limits, burn-rate settings, and terminal `theme.*` colors. Use `config list` for the exact supported keys. GUI-specific settings are edited in desktop Settings. Use `autostart on/off` to apply an actual logon entry; changing the boolean alone is not the same operation.
 
