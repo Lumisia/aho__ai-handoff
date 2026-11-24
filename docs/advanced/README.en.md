@@ -230,6 +230,8 @@ ai-handoff doctor --json
 
 Five-hour trigger modes are `off`, `ask`, and `auto`; default is enabled at 80% in `ask` mode. `ask` requests a choice, `auto` requests a checkpoint without asking, and `off` disables the trigger. Both saving paths resume the interrupted task afterward. A threshold request still relies on the agent writing and saving a useful draft; it is not a conversation backup or automatic agent switch.
 
+In an interactive CLI or local desktop session with hooks enabled, `ask` offers **Yes / No / Other** once per session and five-hour window. Other accepts your own instruction. If the client has no question picker, the agent asks in chat. After any answer or dismissal, the next prompt becomes eligible only when the provider’s reset has passed and usage again meets the threshold. When the reset time is unknown, AI Handoff uses five hours from the first question.
+
 Other CLI settings cover `daemon.idle_timeout_seconds`, `autostart.enabled`, `statusline.show`, UI `language`, capsule format and item limits, burn-rate settings, and terminal `theme.*` colors. Use `config list` for the exact supported keys. GUI-specific settings are edited in desktop Settings. Use `autostart on/off` to apply an actual logon entry; changing the boolean alone is not the same operation.
 
 ### Accounts and usage
