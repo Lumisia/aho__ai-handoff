@@ -30,29 +30,48 @@ fn parse_used_percent_line(line: &str) -> Option<f64> {
 
 pub fn codex_trigger_usage_from_jsonl(path: &Path, now_ms: i64) -> Option<TriggerUsage> {
     let text = std::fs::read_to_string(path).ok()?;
-    text.lines()
+    let latest = text
+        .lines()
         .rev()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .find_map(|line| parse_codex_trigger_usage_line(line, now_ms))
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|value| {
+            value
+                .pointer("/payload/rate_limits/primary/used_percent")
+                .is_some()
+        })?;
+    let captured_at = latest
+        .get("timestamp")
+        .and_then(absolute_epoch_ms)
+        .or_else(|| {
+            let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+            Some(chrono::DateTime::<chrono::Utc>::from(modified).timestamp_millis())
+        })?
+        .min(now_ms);
+    let window = latest.pointer("/payload/rate_limits/primary")?;
+    trigger_window_usage(
+        window,
+        window.get("used_percent")?.as_f64()?,
+        captured_at,
+        now_ms,
+    )
 }
 
-fn parse_codex_trigger_usage_line(line: &str, now_ms: i64) -> Option<TriggerUsage> {
-    let value: Value = serde_json::from_str(line).ok()?;
-    trigger_usage_from_rate_limits(value.get("payload")?.get("rate_limits")?, now_ms)
-}
-
-/// Parse a `rate_limits` object (`primary.used_percent` + reset hints) into a
-/// [`TriggerUsage`]. Shared by the rollout-line parser and the raw hook input.
-fn trigger_usage_from_rate_limits(rate_limits: &Value, now_ms: i64) -> Option<TriggerUsage> {
-    let primary = rate_limits.get("primary")?;
-    let used_percent = primary.get("used_percent")?.as_f64()?;
+fn trigger_window_usage(
+    window: &Value,
+    used_percent: f64,
+    captured_at: i64,
+    now_ms: i64,
+) -> Option<TriggerUsage> {
     if !used_percent.is_finite() || !(0.0..=100.0).contains(&used_percent) {
         return None;
     }
-    Some(TriggerUsage {
+    let resets_at_ms = reset_at_ms(window, captured_at);
+    // Even without a reported reset, a five-hour-old observation cannot
+    // establish that the current window is over its threshold.
+    let expires = resets_at_ms.unwrap_or_else(|| captured_at.saturating_add(5 * 60 * 60 * 1000));
+    (expires > now_ms).then_some(TriggerUsage {
         used_percent,
-        resets_at_ms: reset_at_ms(primary, now_ms),
+        resets_at_ms,
     })
 }
 
@@ -63,7 +82,13 @@ pub fn codex_trigger_usage_from_raw(raw: &Value, now_ms: i64) -> Option<TriggerU
         .get("payload")
         .and_then(|payload| payload.get("rate_limits"))
         .or_else(|| raw.get("rate_limits"))?;
-    trigger_usage_from_rate_limits(rate_limits, now_ms)
+    let window = rate_limits.get("primary")?;
+    trigger_window_usage(
+        window,
+        window.get("used_percent")?.as_f64()?,
+        now_ms,
+        now_ms,
+    )
 }
 
 /// `rate_limits` carried directly by a Claude hook/statusline-shaped payload.
@@ -80,13 +105,7 @@ pub fn claude_trigger_usage_from_raw(raw: &Value, now_ms: i64) -> Option<Trigger
         .get("used_percentage")
         .or_else(|| window.get("used_percent"))?
         .as_f64()?;
-    if !used_percent.is_finite() || !(0.0..=100.0).contains(&used_percent) {
-        return None;
-    }
-    Some(TriggerUsage {
-        used_percent,
-        resets_at_ms: reset_at_ms(window, now_ms),
-    })
+    trigger_window_usage(window, used_percent, now_ms, now_ms)
 }
 
 /// The Codex rollout roots: `<CODEX_HOME>/sessions` and
@@ -280,14 +299,14 @@ fn reset_at_ms(window: &Value, now_ms: i64) -> Option<i64> {
         "reset_at_millis",
     ] {
         if let Some(ms) = window.get(key).and_then(numeric_value) {
-            return future_epoch_ms(ms.round() as i64, now_ms);
+            return Some(ms.round() as i64);
         }
     }
 
     for key in ["resets_at", "reset_at"] {
         if let Some(value) = window.get(key) {
             if let Some(ms) = absolute_epoch_ms(value) {
-                return future_epoch_ms(ms, now_ms);
+                return Some(ms);
             }
         }
     }
@@ -336,10 +355,6 @@ fn absolute_epoch_ms(value: &Value) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(text)
         .ok()
         .map(|dt| dt.timestamp_millis())
-}
-
-fn future_epoch_ms(ms: i64, now_ms: i64) -> Option<i64> {
-    (ms > now_ms).then_some(ms)
 }
 
 // ---------------------------------------------------------------------------
@@ -639,6 +654,29 @@ mod tests {
         let sample = codex_trigger_usage_from_jsonl(&p, 1_750_000_000_000).unwrap();
         assert_eq!(sample.used_percent, 60.0);
         assert_eq!(sample.resets_at_ms, Some(1_750_001_800_000));
+    }
+
+    #[test]
+    fn reset_boundary_rejects_old_threshold_samples() {
+        let now = 1_750_000_000_000_i64;
+        let codex =
+            serde_json::json!({"rate_limits":{"primary":{"used_percent":90,"resets_at_ms":now}}});
+        let claude = serde_json::json!({"rate_limits":{"five_hour":{"used_percentage":90,"resets_at_ms":now}}});
+        assert!(codex_trigger_usage_from_raw(&codex, now).is_none());
+        assert!(claude_trigger_usage_from_raw(&claude, now).is_none());
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let older = rate_limits_line(80.0);
+        let latest = serde_json::json!({"timestamp":now-60_000,"payload":{
+            "rate_limits":{"primary":{"used_percent":90,"resets_in_seconds":60}}
+        }});
+        std::fs::write(file.path(), format!("{older}{latest}\n")).unwrap();
+        assert_eq!(
+            codex_trigger_usage_from_jsonl(file.path(), now - 1)
+                .unwrap()
+                .resets_at_ms,
+            Some(now)
+        );
+        assert!(codex_trigger_usage_from_jsonl(file.path(), now).is_none());
     }
 
     #[test]

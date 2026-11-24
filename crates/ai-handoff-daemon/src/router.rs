@@ -1,5 +1,5 @@
 use crate::{
-    checkpoint_episode::{EpisodeKey, EpisodeState, EpisodeStore, UserDecision},
+    checkpoint_episode::{EpisodeState, EpisodeStore, UserDecision},
     dedupe::{dedupe_key, Deduper},
     store::{
         find_pending, list_pending, mark_consumed, pending_for, save_capsule,
@@ -59,7 +59,6 @@ struct ProviderUsageEntry {
 /// the next hook event refetches. Five-hour limits move slowly, so a few
 /// minutes keeps the trigger responsive without per-tool network calls.
 const PROVIDER_USAGE_TTL_MS: i64 = 3 * 60 * 1000;
-const QUESTION_LEASE_MS: i64 = 30_000;
 
 impl Router {
     pub fn new() -> Self {
@@ -284,6 +283,11 @@ impl Router {
             }
         };
 
+        let resolved = config::resolve(&config::load(), project_id);
+        if !resolved.enabled || resolved.mode != TriggerMode::Ask {
+            return None;
+        }
+
         if matches!(
             episode.state,
             EpisodeState::CapsuleCommitted | EpisodeState::Skipped
@@ -362,7 +366,27 @@ impl Router {
             ));
         }
 
-        let decision = decision_from_event(normalized, event)?;
+        let decision = match episode.state {
+            EpisodeState::AwaitingDecision => {
+                // A native question or the agent may own the answer (including
+                // plain-chat fallback). A later, unrelated "yes" is not consent.
+                let answer = native_capsule_decision(normalized, event, &episode.episode_id)?;
+                if answer == UserDecision::Other {
+                    return None; // The host already has the user's free text.
+                }
+                answer
+            }
+            EpisodeState::AskIssued => {
+                if normalized.agent == AgentKind::Codex && event == HookEventKind::UserPromptSubmit
+                {
+                    // Older Codex prompts requested a plain-chat reply.
+                    parse_user_decision(&user_prompt_text(&normalized.raw)?)?
+                } else {
+                    native_capsule_decision(normalized, event, &episode.episode_id)?
+                }
+            }
+            _ => return None,
+        };
         let updated =
             match self
                 .checkpoint_episodes
@@ -481,20 +505,37 @@ impl Router {
             TriggerMode::Off
         };
 
-        // Local samples are the only usage the trigger normally sees, but they
-        // can be missing (Claude Code's statusline never records a five-hour
-        // sample) or below threshold while the account is actually over. When
-        // that leaves us unable to confirm an overage, consult the ACTIVE
-        // account's real usage from the provider API — hook-time only (never
-        // while idle), TTL-cached, short timeout, fail-open.
+        // A local threshold reading can return within the hook's IPC budget
+        // even when the provider is slow. Use cached reset data if available.
         let mut usage = usage;
         let mut usage_source = usage_source;
-        if should_consult_provider(mode, usage.map(|s| s.used_percent), resolved.threshold) {
-            if let Some(provider) = self.provider_trigger_usage(&normalized.agent, now_ms) {
-                if usage.is_none_or(|local| provider.used_percent > local.used_percent) {
+        let needs_provider = should_consult_provider(mode, usage, resolved.threshold);
+        let wants_cached_reset =
+            mode == TriggerMode::Ask && usage.is_some_and(|sample| sample.resets_at_ms.is_none());
+        if needs_provider || wants_cached_reset {
+            let request_path =
+                ai_handoff_core::paths::requests_dir().join(format!("{}.json", req.request_id));
+            let track_delivery = needs_provider && request_path.is_file();
+            let provider = self.provider_trigger_usage(&normalized.agent, now_ms, needs_provider);
+            // The IPC client removes its request on timeout. Keep the
+            // cached reading for a subsequent hook without using up this offer.
+            if track_delivery && !request_path.is_file() {
+                return (json!({}), json!({ "trigger_reason": "hook-timeout" }));
+            }
+            if let Some(provider) = provider {
+                let unanchored_history = usage_source != Some("raw-rate-limits")
+                    && usage.is_some_and(|local| local.resets_at_ms.is_none())
+                    && provider.resets_at_ms.is_some();
+                if unanchored_history
+                    || usage.is_none_or(|local| provider.used_percent > local.used_percent)
+                {
                     usage_source = Some("provider-api");
                 }
-                usage = Some(pick_higher_usage(usage, provider));
+                usage = Some(if unanchored_history {
+                    provider
+                } else {
+                    pick_higher_usage(usage, provider)
+                });
             }
         }
 
@@ -515,40 +556,22 @@ impl Router {
         let stdout = match outcome.action {
             TriggerAction::None => json!({}),
             TriggerAction::Ask => {
-                let reset_at_ms = usage
-                    .and_then(|sample| sample.resets_at_ms)
-                    .filter(|reset| *reset > now_ms)
-                    .unwrap_or_else(|| now_ms.saturating_add(trigger_mark::FIVE_HOUR_WINDOW_MS));
-                trigger_expires_at_ms = Some(reset_at_ms);
-                let episode_result = self
-                    .checkpoint_episodes
-                    .begin_or_load_active(
-                        EpisodeKey {
-                            agent: normalized.agent.as_canonical_str().to_string(),
-                            project_id: project_id.to_string(),
-                            session_id: normalized
-                                .session_id
-                                .clone()
-                                .unwrap_or_else(|| project_id.to_string()),
-                            reset_at_ms,
-                        },
-                        now_ms,
-                    )
-                    .and_then(|episode| {
-                        let leased = self.checkpoint_episodes.lease_question(
-                            &episode.episode_id,
-                            now_ms,
-                            QUESTION_LEASE_MS,
-                        )?;
-                        Ok((episode, leased))
-                    });
+                let episode_result = self.checkpoint_episodes.offer_question(
+                    normalized.agent.as_canonical_str(),
+                    project_id,
+                    normalized.session_id.as_deref().unwrap_or(project_id),
+                    usage.and_then(|sample| sample.resets_at_ms),
+                    now_ms,
+                );
                 match episode_result {
                     Ok((episode, false)) => {
+                        trigger_expires_at_ms = Some(episode.key.reset_at_ms);
                         checkpoint_episode_id = Some(episode.episode_id);
                         suppressed = true;
                         json!({})
                     }
                     Ok((episode, true)) => {
+                        trigger_expires_at_ms = Some(episode.key.reset_at_ms);
                         checkpoint_episode_id = Some(episode.episode_id.clone());
                         fired = true;
                         let context = render_trigger_context_with_episode(
@@ -566,10 +589,7 @@ impl Router {
                         crate::log_daemon(&format!(
                             "checkpoint episode trigger persistence failed: {error}"
                         ));
-                        json!({
-                            "decision": "block",
-                            "reason": "AI Handoff could not persist the checkpoint question state. Run `ai-handoff doctor` before continuing.",
-                        })
+                        json!({})
                     }
                 }
             }
@@ -616,7 +636,12 @@ impl Router {
     /// burst of hook events costs at most one network round-trip per window.
     /// Caches misses too, so a failed or below-threshold read does not refetch
     /// on the next tool use.
-    fn provider_trigger_usage(&self, agent: &AgentKind, now_ms: i64) -> Option<TriggerUsage> {
+    fn provider_trigger_usage(
+        &self,
+        agent: &AgentKind,
+        now_ms: i64,
+        allow_fetch: bool,
+    ) -> Option<TriggerUsage> {
         let (acct, key) = match agent {
             AgentKind::Codex => (account::Agent::Codex, "codex"),
             AgentKind::ClaudeCode => (account::Agent::Claude, "claude"),
@@ -628,12 +653,21 @@ impl Router {
                 .unwrap_or_else(|poison| poison.into_inner());
             if let Some(entry) = cache.get(key) {
                 if now_ms - entry.fetched_at_ms <= PROVIDER_USAGE_TTL_MS {
-                    return entry.usage;
+                    if entry
+                        .usage
+                        .is_none_or(|usage| usage.resets_at_ms.is_none_or(|reset| reset > now_ms))
+                    {
+                        return entry.usage;
+                    }
                 }
             }
         }
+        if !allow_fetch {
+            return None;
+        }
         // Fetch outside the lock (network I/O).
-        let usage = fetch_provider_trigger_usage(acct);
+        let usage = fetch_provider_trigger_usage(acct)
+            .filter(|s| s.resets_at_ms.is_none_or(|reset| reset > now_ms));
         let mut cache = self
             .provider_usage
             .lock()
@@ -649,18 +683,9 @@ impl Router {
     }
 }
 
-/// Whether to spend a provider fetch: only when the trigger is active and the
-/// local sample cannot already confirm an overage (missing, or below the
-/// threshold). If the local sample already meets the threshold we fire without
-/// any network call.
-fn should_consult_provider(mode: TriggerMode, local_used: Option<f64>, threshold: f64) -> bool {
-    if matches!(mode, TriggerMode::Off) {
-        return false;
-    }
-    match local_used {
-        Some(used) => used < threshold,
-        None => true,
-    }
+/// Keep the synchronous lookup on the fallback path for missing or low usage.
+fn should_consult_provider(mode: TriggerMode, local: Option<TriggerUsage>, threshold: f64) -> bool {
+    mode != TriggerMode::Off && local.is_none_or(|sample| sample.used_percent < threshold)
 }
 
 /// Keep whichever reading reports higher usage (usage only grows within a
@@ -668,7 +693,10 @@ fn should_consult_provider(mode: TriggerMode, local_used: Option<f64>, threshold
 /// provider when there is no local sample.
 fn pick_higher_usage(local: Option<TriggerUsage>, provider: TriggerUsage) -> TriggerUsage {
     match local {
-        Some(local) if local.used_percent >= provider.used_percent => local,
+        Some(local) if local.used_percent >= provider.used_percent => TriggerUsage {
+            resets_at_ms: local.resets_at_ms.or(provider.resets_at_ms),
+            ..local
+        },
         _ => provider,
     }
 }
@@ -708,27 +736,55 @@ fn handle_checkpoint(req: &ai_handoff_ipc::protocol::Request, episodes: &Episode
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|id| !id.is_empty());
+    let mut source_session = req.session_id.clone();
     if let Some(episode_id) = episode_id {
-        match episodes.get(episode_id) {
-            Ok(Some(episode)) if episode.capsule_id.is_some() => {
-                return Router::ok(
-                    req,
-                    json!({
-                        "saved": true,
-                        "capsule_id": episode.capsule_id,
-                        "episode_reused": true,
-                    }),
-                    json!({ "checkpoint_episode_id": episode_id }),
-                );
-            }
-            Ok(Some(episode)) if episode.state == EpisodeState::CapsulePending => {}
-            Ok(Some(_)) => return degraded(&req.request_id, "checkpoint_episode_not_pending"),
+        let episode = match episodes.get(episode_id) {
+            Ok(Some(episode)) => episode,
             Ok(None) => return degraded(&req.request_id, "checkpoint_episode_not_found"),
             Err(error) => {
                 crate::log_daemon(&format!("checkpoint episode lookup failed: {error}"));
                 return degraded(&req.request_id, "daemon_error");
             }
+        };
+        if episode.key.project_id != project_id
+            || episode.key.agent != agent
+            || source_session
+                .as_ref()
+                .is_some_and(|id| id != &episode.key.session_id)
+        {
+            return degraded(&req.request_id, "checkpoint_episode_scope_mismatch");
         }
+        if episode.capsule_id.is_some() {
+            return Router::ok(
+                req,
+                json!({
+                    "saved": true, "capsule_id": episode.capsule_id, "episode_reused": true
+                }),
+                json!({ "checkpoint_episode_id": episode_id }),
+            );
+        }
+        if episode.key.reset_at_ms <= now.timestamp_millis() {
+            return degraded(&req.request_id, "checkpoint_episode_expired");
+        }
+        let trigger = config::resolve(&config::load(), &project_id);
+        if !trigger.enabled || trigger.mode == TriggerMode::Off {
+            return degraded(&req.request_id, "checkpoint_trigger_disabled");
+        }
+        match episode.state {
+            // Some hosts deliver UI answers only to the agent. Its explicitly
+            // requested checkpoint then carries the original episode ID.
+            EpisodeState::AwaitingDecision => {
+                if let Err(error) =
+                    episodes.record_decision(episode_id, UserDecision::Save, now.timestamp_millis())
+                {
+                    crate::log_daemon(&format!("checkpoint decision persistence failed: {error}"));
+                    return degraded(&req.request_id, "checkpoint_episode_not_pending");
+                }
+            }
+            EpisodeState::CapsulePending => {}
+            _ => return degraded(&req.request_id, "checkpoint_episode_not_pending"),
+        }
+        source_session = Some(episode.key.session_id);
     }
     let message = raw
         .get("message")
@@ -746,7 +802,7 @@ fn handle_checkpoint(req: &ai_handoff_ipc::protocol::Request, episodes: &Episode
             obj.insert("goal".to_string(), json!(message));
         }
     }
-    let mut capsule = build_capsule(&payload, &project_id, &cwd, req.session_id.clone(), &agent);
+    let mut capsule = build_capsule(&payload, &project_id, &cwd, source_session, &agent);
     capsule.capsule_id = new_capsule_id(now);
     capsule.created_at = now.to_rfc3339_opts(SecondsFormat::Secs, true);
 
@@ -1103,8 +1159,7 @@ fn render_trigger_context_with_episode(
     episode_id: Option<&str>,
 ) -> String {
     let agent = agent_cli_name(agent);
-    let mut copy = trigger_prompt_copy(language);
-    copy.other_desc = "ask for one additional instruction, save the capsule with it, then continue the original work.";
+    let copy = trigger_prompt_copy(language);
     let header = format!(
         "[ai-handoff] Five-hour usage {used_percent:.0}% reached the configured threshold {threshold:.0}%."
     );
@@ -1120,7 +1175,7 @@ fn render_trigger_context_with_episode(
         TriggerAction::Create => format!(
             "{header}\nCreate a handoff capsule NOW without asking the user. {checkpoint_steps}"
         ),
-        _ => render_trigger_question_context(agent, &header, &checkpoint_steps, copy),
+        _ => render_trigger_question_context(agent, &header, &checkpoint_steps, copy, episode_id),
     }
 }
 
@@ -1130,38 +1185,18 @@ fn render_trigger_question_context(
     header: &str,
     checkpoint_steps: &str,
     copy: TriggerPromptCopy,
+    episode_id: Option<&str>,
 ) -> String {
-    if agent == "claude-code" {
-        format!(
-            "{header}\nUse AskUserQuestion now. Question: \"{}\"\nOptions:\n- {}: {}\n- {}: {}\n- {}: {}\nIf the user selects {}, ask one follow-up chat question for their free-text instruction, then save the capsule with that instruction.\nFor {} or {}: {checkpoint_steps}\nFor {}: resume the interrupted work without creating a capsule.\nAfter the selected path finishes, resume the interrupted work exactly where it stopped.",
-            copy.question,
-            copy.yes,
-            copy.yes_desc,
-            copy.no,
-            copy.no_desc,
-            copy.other,
-            copy.other_desc,
-            copy.other,
-            copy.yes,
-            copy.other,
-            copy.no,
-        )
+    let tool = if agent == "claude-code" {
+        "Use AskUserQuestion when available.".to_owned()
     } else {
-        format!(
-            "{header}\nAsk the user in plain chat and wait for the answer: \"{}\"\nOptions:\n- {}: {}\n- {}: {}\n- {}: {}\nIf the user chooses {}, ask one follow-up chat question for their free-text instruction, then save the capsule with that instruction.\nFor {} or {}: {checkpoint_steps}\nFor {}: resume the interrupted work without creating a capsule.\nAfter the selected path finishes, resume the interrupted work exactly where it stopped.",
-            copy.question,
-            copy.yes,
-            copy.yes_desc,
-            copy.no,
-            copy.no_desc,
-            copy.other,
-            copy.other_desc,
-            copy.other,
-            copy.yes,
-            copy.other,
-            copy.no,
-        )
-    }
+        let id = episode_id.unwrap_or("handoff_capsule").replace('-', "_");
+        format!("Use request_user_input when available in this mode, or request_user_input_async if provided. For a tool with question IDs use {id}. For an async question wait for the actual reply before saving.")
+    };
+    format!(
+        "{header}\n{tool} Ask this single question exactly once: \"{}\"\nSupply the two choices '{}' ({}) and '{}' ({}). Use the client's built-in free-text choice for '{}' ({}). Only add that third option yourself if the client does not supply it. If no question tool is available, present the same three choices once in chat.\nSave only on an explicit affirmative reply or a custom instruction requesting a save: {checkpoint_steps} On a negative reply, cancellation or no reply, do not save. Use any free text already entered. If the user chooses Other without entering text, ask only for their instruction. Do not repeat the save question. Resume the interrupted work after handling the answer.",
+        copy.question, copy.yes, copy.yes_desc, copy.no, copy.no_desc, copy.other, copy.other_desc,
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -1179,7 +1214,7 @@ fn trigger_prompt_copy(language: config::Language) -> TriggerPromptCopy {
     match language {
         config::Language::Ko => TriggerPromptCopy {
             question: "5시간 한도 임계치에 도달했습니다. 캡슐을 저장하시겠습니까?",
-            yes: "네",
+            yes: "예",
             no: "아니오",
             other: "기타",
             yes_desc: "캡슐 JSON을 작성하고 checkpoint를 실행한 뒤 원래 작업을 계속합니다.",
@@ -1279,33 +1314,47 @@ fn user_prompt_text(raw: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
-fn decision_from_event(
-    normalized: &ai_handoff_core::hook_event::NormalizedHookEvent,
+/// Read only the answer to our own question. Both tools can return the
+/// question and every option alongside the answer, or serve unrelated prompts.
+fn native_capsule_decision(
+    hook: &ai_handoff_core::hook_event::NormalizedHookEvent,
     event: HookEventKind,
+    episode_id: &str,
 ) -> Option<UserDecision> {
-    match event {
-        HookEventKind::UserPromptSubmit => {
-            user_prompt_text(&normalized.raw).and_then(|text| parse_user_decision(&text))
-        }
-        HookEventKind::PostToolUse
-            if normalized
-                .tool_name
-                .as_deref()
-                .is_some_and(|name| name.eq_ignore_ascii_case("AskUserQuestion")) =>
-        {
-            decision_from_value(&normalized.tool_response)
-        }
-        _ => None,
+    if event != HookEventKind::PostToolUse {
+        return None;
     }
-}
-
-fn decision_from_value(value: &Value) -> Option<UserDecision> {
-    match value {
-        Value::String(text) => parse_user_decision(text),
-        Value::Array(values) => values.iter().find_map(decision_from_value),
-        Value::Object(values) => values.values().find_map(decision_from_value),
-        _ => None,
-    }
+    let response = &hook.tool_response;
+    let decoded;
+    let response = if let Some(text) = response.as_str() {
+        decoded = serde_json::from_str::<Value>(text).ok()?;
+        &decoded
+    } else {
+        response
+    };
+    let answers = response.get("answers")?;
+    let answer = match (&hook.agent, hook.tool_name.as_deref()?) {
+        (AgentKind::ClaudeCode, "AskUserQuestion") => [
+            config::Language::Ko,
+            config::Language::En,
+            config::Language::Ja,
+        ]
+        .into_iter()
+        .find_map(|lang| answers.get(trigger_prompt_copy(lang).question))?
+        .as_str()?,
+        (AgentKind::Codex, "request_user_input" | "functions.request_user_input") => {
+            let values = answers
+                .get(episode_id.replace('-', "_"))?
+                .get("answers")?
+                .as_array()?;
+            if values.len() != 1 {
+                return None;
+            }
+            values[0].as_str()?
+        }
+        _ => return None,
+    };
+    parse_user_decision(answer)
 }
 
 fn parse_user_decision(text: &str) -> Option<UserDecision> {
@@ -1442,21 +1491,7 @@ fn workspace_drift_note(capsule: &Capsule, cwd: &std::path::Path) -> Option<Stri
 }
 
 fn extract_capsule_payload(raw: &Value) -> Option<Value> {
-    let text = [
-        "last_assistant_message",
-        "final_answer",
-        "message",
-        "content",
-    ]
-    .iter()
-    .find_map(|key| raw.get(*key).and_then(Value::as_str))?;
-    let marker = "```ai-handoff-capsule";
-    let start = text.find(marker)? + marker.len();
-    let after_marker = &text[start..];
-    let content_start = after_marker.find('\n').map(|idx| idx + 1).unwrap_or(0);
-    let content = &after_marker[content_start..];
-    let end = content.find("```")?;
-    serde_json::from_str(content[..end].trim()).ok()
+    serde_json::from_str(crate::dedupe::fenced_capsule_text(raw)?).ok()
 }
 
 fn build_capsule(
@@ -1649,14 +1684,35 @@ mod provider_fallback_tests {
         // No local sample → consult.
         assert!(should_consult_provider(TriggerMode::Ask, None, 10.0));
         // Local below threshold → consult (it might be a stale/other-account low).
-        assert!(should_consult_provider(TriggerMode::Ask, Some(5.0), 10.0));
+        assert!(should_consult_provider(
+            TriggerMode::Ask,
+            Some(usage(5.0)),
+            10.0
+        ));
         // Local already over threshold → fire without a network call.
         assert!(!should_consult_provider(
             TriggerMode::Auto,
-            Some(40.0),
+            Some(usage(40.0)),
             10.0
         ));
-        assert!(!should_consult_provider(TriggerMode::Ask, Some(10.0), 10.0));
+        assert!(!should_consult_provider(
+            TriggerMode::Ask,
+            Some(usage(10.0)),
+            10.0
+        ));
+        let anchored = TriggerUsage {
+            used_percent: 10.0,
+            resets_at_ms: Some(1000),
+        };
+        assert!(!should_consult_provider(
+            TriggerMode::Ask,
+            Some(anchored),
+            10.0
+        ));
+        assert_eq!(
+            pick_higher_usage(Some(usage(80.0)), anchored).resets_at_ms,
+            Some(1000)
+        );
     }
 
     #[test]
@@ -1714,6 +1770,29 @@ mod tests {
                 platform: "windows".into(),
             },
         }
+    }
+
+    fn write_legacy_ask(store: &EpisodeStore, episode_id: &str) {
+        let path = store.path();
+        let mut file: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let record = &mut file["episodes"][episode_id];
+        record["state"] = json!("ask_issued");
+        record["question_lease_until_ms"] = json!(1);
+        std::fs::write(path, serde_json::to_vec(&file).unwrap()).unwrap();
+        let key = store.get(episode_id).unwrap().unwrap().key;
+        let (_, issued) = store
+            .offer_question(
+                &key.agent,
+                &key.project_id,
+                &key.session_id,
+                Some(key.reset_at_ms),
+                Utc::now().timestamp_millis(),
+            )
+            .unwrap();
+        assert!(
+            !issued,
+            "a question from a pre-upgrade daemon is still spent"
+        );
     }
 
     fn pending_capsule(project_id: &str) -> Capsule {
@@ -2570,7 +2649,7 @@ mod tests {
             .unwrap()
             .contains("five-hour usage threshold"));
         assert!(context.contains("AskUserQuestion"));
-        assert!(context.contains("네"));
+        assert!(context.contains("예"));
         assert!(context.contains("아니오"));
         assert!(context.contains("기타"));
         assert!(context.contains("ai-handoff checkpoint guidance --agent claude-code --json"));
@@ -2665,7 +2744,8 @@ mod tests {
         let context = first.hook_stdout["hookSpecificOutput"]["additionalContext"]
             .as_str()
             .expect("codex context");
-        assert!(context.contains("Ask the user in plain chat"));
+        assert!(context.contains("request_user_input"));
+        assert!(context.contains("request_user_input_async"));
         assert!(!context.contains("AskUserQuestion"));
         assert_eq!(first.diagnostics["trigger_fired"], true);
 
@@ -2750,7 +2830,7 @@ mod tests {
         assert!(resp.hook_stdout["hookSpecificOutput"]["additionalContext"]
             .as_str()
             .unwrap()
-            .contains("네"));
+            .contains("예"));
 
         std::env::remove_var("CODEX_HOME");
         std::env::remove_var("AI_HANDOFF_HOME");
@@ -3164,6 +3244,169 @@ mod tests {
     }
 
     #[test]
+    fn native_question_answers_and_unrelated_chat_stay_scoped_to_the_offer() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        let project = fingerprint(cwd.path());
+        let window = Utc::now().timestamp_millis() + 60_000;
+        let question = trigger_prompt_copy(config::Language::Ko).question;
+        for agent in ["claude-code", "codex"] {
+            for (answer, expected_state) in [
+                ("예", EpisodeState::CapsulePending),
+                ("아니오", EpisodeState::ResumeIssued),
+                (
+                    "지금은 보류하고 테스트를 계속해",
+                    EpisodeState::AwaitingDecision,
+                ),
+            ] {
+                let router = Router::new();
+                let sid = format!("{agent}-{answer}");
+                let mut input = json!({"session_id": sid, "tool_use_id": "first-tool", "rate_limits": {
+                    "five_hour":{"used_percentage":80,"resets_at_ms":window},
+                    "primary":{"used_percent":80,"resets_at_ms":window}
+                }});
+                let first = request(
+                    "same-turn",
+                    "post-tool-use",
+                    agent,
+                    cwd.path(),
+                    input.clone(),
+                );
+                let offered = router.handle(&first);
+                assert_eq!(offered.diagnostics["trigger_fired"], true);
+                let id = offered.diagnostics["checkpoint_episode_id"]
+                    .as_str()
+                    .unwrap();
+                input["tool_use_id"] = json!("question-tool");
+                if agent == "codex" {
+                    input["tool_name"] = json!("request_user_input");
+                    input["tool_response"] =
+                        json!({"answers":{(id.replace('-', "_")):{"answers":[answer]}}});
+                } else {
+                    input["tool_name"] = json!("AskUserQuestion");
+                    input["tool_response"] = json!({
+                        "questions":[{"question":question,"options":[{"label":"예"},{"label":"아니오"}]}],
+                        "answers":{(question):answer}
+                    });
+                }
+                let answered = request(
+                    "same-turn",
+                    "post-tool-use",
+                    agent,
+                    cwd.path(),
+                    input.clone(),
+                );
+                router.handle(&answered);
+                let state = router.checkpoint_episodes.get(id).unwrap().unwrap().state;
+                assert_eq!(state, expected_state, "{agent} {answer}");
+                let restarted = Router::new();
+                let stop = request("next-turn", "stop", agent, cwd.path(), input.clone());
+                assert_eq!(restarted.handle(&stop).hook_stdout, json!({}));
+                assert!(list_pending(&project).is_empty());
+                if expected_state == EpisodeState::AwaitingDecision {
+                    let unrelated = request(
+                        "unrelated",
+                        "user-prompt",
+                        agent,
+                        cwd.path(),
+                        json!({"session_id":sid, "prompt":"예"}),
+                    );
+                    assert_eq!(restarted.handle(&unrelated).hook_stdout, json!({}));
+                    assert_eq!(
+                        restarted
+                            .checkpoint_episodes
+                            .get(id)
+                            .unwrap()
+                            .unwrap()
+                            .state,
+                        expected_state
+                    );
+                }
+            }
+        }
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn explicit_checkpoint_handles_a_host_only_answer_and_retries_once() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        let router = Router::new();
+        let project = fingerprint(cwd.path());
+        let (episode, _) = router
+            .checkpoint_episodes
+            .offer_question("codex", &project, "s1", None, Utc::now().timestamp_millis())
+            .unwrap();
+        let mut save = request(
+            "save",
+            "checkpoint",
+            "claude-code",
+            cwd.path(),
+            json!({
+                "goal":"document a synthetic task", "_ai_handoff_episode_id":episode.episode_id
+            }),
+        );
+        save.kind = "checkpoint".into();
+        save.session_id = None; // normal CLI checkpoint does not receive host callbacks
+        assert_ne!(router.handle(&save).status, Status::Ok);
+        save.agent = "codex".into();
+        let saved = router.handle(&save);
+        assert_eq!(saved.hook_stdout["saved"], true);
+        let retry = Router::new().handle(&save);
+        assert_eq!(
+            retry.hook_stdout["capsule_id"],
+            saved.hook_stdout["capsule_id"]
+        );
+        assert_eq!(retry.hook_stdout["episode_reused"], true);
+        assert_eq!(list_pending(&project).len(), 1);
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
+    fn stop_respects_off_ask_and_auto_for_both_agents() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        std::env::set_var("AI_HANDOFF_HOME", home.path());
+        for agent in ["claude-code", "codex"] {
+            for mode in ["off", "ask", "auto"] {
+                std::fs::write(
+                    home.path().join("config.toml"),
+                    format!("[triggers.five_hour]\nmode = \"{mode}\"\n"),
+                )
+                .unwrap();
+                let req = request(
+                    "stop",
+                    "stop",
+                    agent,
+                    cwd.path(),
+                    json!({
+                        "session_id":format!("{agent}-{mode}"),
+                        "rate_limits":{"five_hour":{"used_percentage":80},"primary":{"used_percent":80}}
+                    }),
+                );
+                let response = Router::new().handle(&req);
+                if mode == "off" {
+                    assert_eq!(response.hook_stdout, json!({}));
+                } else {
+                    let context = response.hook_stdout["reason"].as_str().unwrap();
+                    assert_eq!(context.contains("without asking"), mode == "auto");
+                    assert_eq!(
+                        context.contains("AskUserQuestion")
+                            || context.contains("request_user_input"),
+                        mode == "ask"
+                    );
+                }
+            }
+        }
+        std::env::remove_var("AI_HANDOFF_HOME");
+    }
+
+    #[test]
     fn codex_yes_answer_moves_episode_to_capsule_pending() {
         let _guard = env_lock();
         let home = tempfile::tempdir().unwrap();
@@ -3182,9 +3425,7 @@ mod tests {
                 Utc::now().timestamp_millis(),
             )
             .unwrap();
-        store
-            .lease_question(&episode.episode_id, Utc::now().timestamp_millis(), 30_000)
-            .unwrap();
+        write_legacy_ask(&store, &episode.episode_id);
 
         let response = Router::new().handle(&request(
             "answer-yes",
@@ -3225,9 +3466,7 @@ mod tests {
                 now,
             )
             .unwrap();
-        store
-            .lease_question(&episode.episode_id, now, 30_000)
-            .unwrap();
+        write_legacy_ask(&store, &episode.episode_id);
 
         let response = Router::new().handle(&request(
             "claude-answer-yes",
@@ -3238,7 +3477,7 @@ mod tests {
                 "cwd": cwd.path().to_string_lossy(),
                 "session_id": "claude-session",
                 "tool_name": "AskUserQuestion",
-                "tool_response": { "answers": { "checkpoint": "Yes" } }
+                "tool_response": { "answers": { (trigger_prompt_copy(config::Language::En).question): "Yes" } }
             }),
         ));
 
@@ -3274,9 +3513,7 @@ mod tests {
                 now,
             )
             .unwrap();
-        store
-            .lease_question(&skipped.episode_id, now, 30_000)
-            .unwrap();
+        write_legacy_ask(&store, &skipped.episode_id);
         let mut no = request(
             "answer-no",
             "user-prompt",
@@ -3308,9 +3545,7 @@ mod tests {
                 now,
             )
             .unwrap();
-        store
-            .lease_question(&other.episode_id, now, 30_000)
-            .unwrap();
+        write_legacy_ask(&store, &other.episode_id);
         let mut other_answer = request(
             "answer-other",
             "user-prompt",

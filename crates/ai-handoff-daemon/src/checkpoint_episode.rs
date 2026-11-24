@@ -20,7 +20,9 @@ pub struct EpisodeKey {
 #[serde(rename_all = "snake_case")]
 pub enum EpisodeState {
     Detected,
+    // Older releases reissued AskIssued after a 30-second lease.
     AskIssued,
+    // The host owns the question and may deliver the reply in a later turn.
     AwaitingDecision,
     AwaitingCustomInput,
     CapsulePending,
@@ -46,7 +48,7 @@ pub struct Episode {
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
     #[serde(default)]
-    pub question_lease_until_ms: Option<i64>,
+    pub reset_estimated: bool,
     #[serde(default)]
     pub decision: Option<UserDecision>,
     #[serde(default)]
@@ -109,7 +111,7 @@ impl EpisodeStore {
                     state: EpisodeState::Detected,
                     created_at_ms: now_ms,
                     updated_at_ms: now_ms,
-                    question_lease_until_ms: None,
+                    reset_estimated: false,
                     decision: None,
                     custom_instruction: None,
                     capsule_id: None,
@@ -118,41 +120,81 @@ impl EpisodeStore {
         })
     }
 
-    /// Reuse the active trigger episode for the same session before creating
-    /// one for a newly observed reset time. Some agent hook payloads omit the
-    /// provider reset timestamp; their inferred `now + five hours` value moves
-    /// on every hook and must not create a fresh question each time.
-    pub fn begin_or_load_active(&self, key: EpisodeKey, now_ms: i64) -> anyhow::Result<Episode> {
-        self.mutate(now_ms, |data| {
-            if let Some(episode) = data
-                .episodes
-                .values()
-                .filter(|episode| {
-                    episode.key.agent == key.agent
-                        && episode.key.project_id == key.project_id
-                        && episode.key.session_id == key.session_id
-                        && episode.key.reset_at_ms > now_ms
-                })
-                .max_by_key(|episode| episode.created_at_ms)
-            {
-                return Ok(episode.clone());
+    /// Persist the offer before emitting hook output. An unanswered, cancelled
+    /// or unobserved host question counts for the entire window, including
+    /// after the daemon restarts. The singleton daemon serializes these writes.
+    pub fn offer_question(
+        &self,
+        agent: &str,
+        project_id: &str,
+        session_id: &str,
+        reported_reset: Option<i64>,
+        now_ms: i64,
+    ) -> anyhow::Result<(Episode, bool)> {
+        let reset = reported_reset.filter(|time| *time > now_ms);
+        let _guard = self.gate.lock().unwrap_or_else(|p| p.into_inner());
+        let path = self.path();
+        let mut data = read_file(&path)?;
+        data.episodes.retain(|_, episode| {
+            // A reported reset more than five hours after our first offer
+            // belongs to a later window. Allow one second for clock rounding.
+            let next_window = episode.reset_estimated
+                && episode.key.agent == agent
+                && episode.key.project_id == project_id
+                && episode.key.session_id == session_id
+                && reset.is_some_and(|reset| reset > episode.key.reset_at_ms.saturating_add(1000));
+            episode.key.reset_at_ms > now_ms && !next_window
+        });
+        let active = data
+            .episodes
+            .values_mut()
+            .filter(|e| {
+                e.key.agent == agent
+                    && e.key.project_id == project_id
+                    && e.key.session_id == session_id
+            })
+            .max_by_key(|e| e.created_at_ms);
+        let (episode, issued) = if let Some(episode) = active {
+            let issue = episode.state == EpisodeState::Detected;
+            let correct_reset = reset.filter(|_| episode.reset_estimated);
+            if !issue && correct_reset.is_none() {
+                return Ok((episode.clone(), false));
             }
-
-            let episode_id = episode_id(&key);
+            if let Some(reset) = correct_reset {
+                episode.key.reset_at_ms = reset;
+                episode.reset_estimated = false;
+            }
+            if issue {
+                episode.state = EpisodeState::AwaitingDecision;
+            }
+            episode.updated_at_ms = now_ms;
+            (episode.clone(), issue)
+        } else {
+            let key = EpisodeKey {
+                agent: agent.into(),
+                project_id: project_id.into(),
+                session_id: session_id.into(),
+                reset_at_ms: reset.unwrap_or_else(|| {
+                    now_ms.saturating_add(crate::trigger_mark::FIVE_HOUR_WINDOW_MS)
+                }),
+            };
             let episode = Episode {
-                episode_id: episode_id.clone(),
+                episode_id: episode_id(&key),
                 key,
-                state: EpisodeState::Detected,
+                state: EpisodeState::AwaitingDecision,
                 created_at_ms: now_ms,
                 updated_at_ms: now_ms,
-                question_lease_until_ms: None,
+                reset_estimated: reset.is_none(),
                 decision: None,
                 custom_instruction: None,
                 capsule_id: None,
             };
-            data.episodes.insert(episode_id, episode.clone());
-            Ok(episode)
-        })
+            data.episodes
+                .insert(episode.episode_id.clone(), episode.clone());
+            (episode, true)
+        };
+        write_file(&path, &data)?;
+        Ok((episode, issued))
     }
 
     pub fn get(&self, episode_id: &str) -> anyhow::Result<Option<Episode>> {
@@ -188,31 +230,6 @@ impl EpisodeStore {
             .cloned())
     }
 
-    pub fn lease_question(
-        &self,
-        episode_id: &str,
-        now_ms: i64,
-        lease_ms: i64,
-    ) -> anyhow::Result<bool> {
-        anyhow::ensure!(lease_ms > 0, "question lease must be positive");
-        self.mutate(now_ms, |data| {
-            let episode = required_episode(data, episode_id)?;
-            let may_issue = match episode.state {
-                EpisodeState::Detected | EpisodeState::AwaitingDecision => true,
-                EpisodeState::AskIssued => episode
-                    .question_lease_until_ms
-                    .is_none_or(|until| now_ms >= until),
-                _ => false,
-            };
-            if may_issue {
-                episode.state = EpisodeState::AskIssued;
-                episode.question_lease_until_ms = Some(now_ms.saturating_add(lease_ms));
-                episode.updated_at_ms = now_ms;
-            }
-            Ok(may_issue)
-        })
-    }
-
     pub fn record_decision(
         &self,
         episode_id: &str,
@@ -238,7 +255,6 @@ impl EpisodeStore {
                 "episode is not awaiting a decision"
             );
             episode.decision = Some(decision);
-            episode.question_lease_until_ms = None;
             episode.state = match decision {
                 UserDecision::Save => EpisodeState::CapsulePending,
                 UserDecision::Skip => EpisodeState::Skipped,
@@ -355,10 +371,16 @@ impl EpisodeStore {
         data.episodes
             .retain(|_, episode| episode.key.reset_at_ms > now_ms);
         let result = mutate(&mut data)?;
-        let bytes = serde_json::to_vec_pretty(&data)?;
-        write_atomic_with(&path, &bytes, |from, to| std::fs::rename(from, to))?;
+        write_file(&path, &data)?;
         Ok(result)
     }
+}
+
+fn write_file(path: &Path, data: &EpisodeFile) -> anyhow::Result<()> {
+    let bytes = serde_json::to_vec_pretty(data)?;
+    Ok(write_atomic_with(path, &bytes, |from, to| {
+        std::fs::rename(from, to)
+    })?)
 }
 
 fn required_episode<'a>(
@@ -474,14 +496,50 @@ mod tests {
     }
 
     #[test]
-    fn question_lease_suppresses_duplicates_until_expiry() {
+    fn question_survives_expired_lease_and_restart_until_window_reset() {
         let home = tempfile::tempdir().unwrap();
         let store = EpisodeStore::new(home.path());
-        let episode = store.begin_or_load(key("p", "s", 10_000), 100).unwrap();
+        let offer = |store: &EpisodeStore, now, reset| {
+            store
+                .offer_question("claude-code", "p", "s", reset, now)
+                .unwrap()
+        };
+        let (first, fired) = offer(&store, 100, None);
+        assert!(fired);
+        assert_eq!(
+            first.key.reset_at_ms,
+            100 + crate::trigger_mark::FIVE_HOUR_WINDOW_MS
+        );
+        let reopened = EpisodeStore::new(home.path());
+        let (same, fired) = offer(&reopened, 35_000, Some(50_000));
+        assert!(!fired);
+        assert_eq!(first.episode_id, same.episode_id);
+        assert_eq!(same.key.reset_at_ms, 50_000);
+        assert!(!offer(&reopened, 49_999, None).1);
+        let (next, fired) = offer(&reopened, 50_000, Some(75_000));
+        assert!(fired);
+        assert_ne!(first.episode_id, next.episode_id);
+    }
 
-        assert!(store.lease_question(&episode.episode_id, 100, 500).unwrap());
-        assert!(!store.lease_question(&episode.episode_id, 599, 500).unwrap());
-        assert!(store.lease_question(&episode.episode_id, 600, 500).unwrap());
+    #[test]
+    fn confirmed_new_window_replaces_an_estimated_expiry() {
+        let home = tempfile::tempdir().unwrap();
+        let store = EpisodeStore::new(home.path());
+        let (old, _) = store
+            .offer_question("codex", "p", "s", None, 1_000)
+            .unwrap();
+        let next_reset = old.key.reset_at_ms + 60_000;
+        let (new, issued) = store
+            .offer_question("codex", "p", "s", Some(next_reset), 70_000)
+            .unwrap();
+        assert!(issued);
+        assert_ne!(old.episode_id, new.episode_id);
+        assert!(
+            !store
+                .offer_question("codex", "p", "s", Some(next_reset), 75_000)
+                .unwrap()
+                .1
+        );
     }
 
     #[test]
@@ -489,7 +547,6 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let store = EpisodeStore::new(home.path());
         let episode = store.begin_or_load(key("p", "s", 10_000), 100).unwrap();
-        store.lease_question(&episode.episode_id, 100, 500).unwrap();
 
         let pending = store
             .record_decision(&episode.episode_id, UserDecision::Save, 110)

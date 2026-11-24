@@ -246,6 +246,7 @@ fn prepare_input(
     let mut input = parse_checkpoint_input(raw_text, requested_format)?;
     if let Some(object) = input.as_object_mut() {
         object.remove(CAPSULE_FORMAT_FIELD);
+        object.remove(EPISODE_ID_FIELD);
         if let Some(format) = requested_format {
             object.insert(
                 CAPSULE_FORMAT_FIELD.to_string(),
@@ -406,11 +407,12 @@ mod tests {
         assert_eq!(explicit["_ai_handoff_capsule_format"], "md");
         assert_eq!(explicit["goal"], "keep working");
         let forged = prepare_input(
-            r#"{"goal":"legacy","_ai_handoff_capsule_format":"md"}"#,
+            r#"{"goal":"legacy","_ai_handoff_capsule_format":"md","_ai_handoff_episode_id":"another-question"}"#,
             None,
         )
         .unwrap();
         assert!(forged.get("_ai_handoff_capsule_format").is_none());
+        assert!(forged.get(EPISODE_ID_FIELD).is_none());
 
         let automatic = prepare_input(r#"{"goal":"legacy"}"#, None).unwrap();
         assert!(automatic.get("_ai_handoff_capsule_format").is_none());
